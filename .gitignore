@@ -1,0 +1,27 @@
+# Maven
+target/
+*.jar
+*.war
+*.ear
+
+# IDE
+.idea/
+.vscode/
+*.iml
+.classpath
+.project
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# miniclaw — secrets
+config.yaml
+config.yml
+*.local.yaml
+*.local.yml
+
+# Logs
+logs/
+*.log
