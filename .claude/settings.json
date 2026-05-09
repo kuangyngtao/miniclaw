@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la \"D:/Agent/\")",
+      "Read(//d/Agent/**)",
+      "Read(//d//**)",
+      "Bash(ls -la \"D:/\")",
+      "Bash(ls -la \"D:/Agent/miniclaw/.claude/\" 2>/dev/null; echo \"---\"; ls -la \"C:/Users/yngtao/.claude/\" 2>/dev/null)",
+      "Read(//c/Users/yngtao/.claude/**)",
+      "Bash(ls -la \"D:/AICoding/\")",
+      "Read(//d/AICoding/**)",
+      "Bash(ls -la \"D:/project/\")",
+      "Read(//d/project/**)",
+      "WebFetch(domain:openclaw.ai)",
+      "WebSearch",
+      "Bash(mvn compile *)",
+      "Bash(mvn --version)",
+      "Bash(mvn package *)",
+      "Bash(java -jar miniclaw-cli/target/miniclaw-cli-0.1.0-SNAPSHOT.jar)",
+      "Bash(java -jar miniclaw-cli/target/miniclaw-cli-0.1.0-SNAPSHOT.jar --help)",
+      "Bash(mvn test *)",
+      "Bash(git --version)",
+      "Bash(git init *)",
+      "Bash(git add *)"
+    ]
+  }
+}
