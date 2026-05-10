@@ -8,4 +8,7 @@ public interface AgentLoop {
 
     /** 启动 Agent 循环，处理用户输入，返回模型最终文本回复 */
     String run(String userPrompt);
+
+    /** 运行时切换思考模式 */
+    void setThinkingMode(ThinkingMode mode);
 }

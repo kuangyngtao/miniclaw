@@ -7,17 +7,25 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Registry 的默认实现 — 线程安全，支持运行时注册/注销。
  */
 public class ToolRegistry implements Registry {
 
+    private static final Logger log = LoggerFactory.getLogger(ToolRegistry.class);
+
     private final ConcurrentHashMap<String, Tool> tools = new ConcurrentHashMap<>();
 
     @Override
     public void register(Tool tool) {
+        if (tools.containsKey(tool.name())) {
+            log.warn("工具 '{}' 已被注册，将被覆盖。", tool.name());
+        }
         tools.put(tool.name(), tool);
+        log.info("成功挂载工具: {}", tool.name());
     }
 
     /** 批量注册 */
@@ -48,10 +56,12 @@ public class ToolRegistry implements Registry {
                 call.arguments() != null ? call.arguments().toString() : "{}");
             return switch (result) {
                 case Result.Ok<String> ok -> ToolResult.success(call.id(), ok.data());
-                case Result.Err<String> err -> ToolResult.error(call.id(), err.error().message());
+                case Result.Err<String> err ->
+                    ToolResult.error(call.id(),
+                        "[" + err.error().errorCode() + "] " + err.error().message());
             };
         } catch (Exception e) {
-            return ToolResult.error(call.id(), e.getMessage());
+            return ToolResult.error(call.id(), call.name() + " 执行异常: " + e.getMessage());
         }
     }
 

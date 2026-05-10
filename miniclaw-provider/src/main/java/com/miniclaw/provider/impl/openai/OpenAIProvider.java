@@ -10,14 +10,19 @@ import com.miniclaw.provider.LLMProvider;
 import com.miniclaw.tools.schema.Message;
 import com.miniclaw.tools.schema.ToolCall;
 import com.miniclaw.tools.schema.ToolDefinition;
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,7 +49,7 @@ public class OpenAIProvider implements LLMProvider {
 
     @Override
     public Message generate(List<Message> messages, List<ToolDefinition> availableTools) {
-        OpenAIRequest request = buildRequest(messages, availableTools);
+        OpenAIRequest request = buildRequest(messages, availableTools, false);
 
         final byte[] requestBody;
         try {
@@ -74,9 +79,145 @@ public class OpenAIProvider implements LLMProvider {
         return toMessage(response);
     }
 
+    @Override
+    public Message generateStream(List<Message> messages, List<ToolDefinition> availableTools,
+                                  Consumer<String> onToken) {
+        OpenAIRequest request = buildRequest(messages, availableTools, true);
+
+        final byte[] requestBody;
+        try {
+            requestBody = objectMapper.writeValueAsBytes(request);
+        } catch (JsonProcessingException e) {
+            throw new LLMException("序列化请求失败: " + e.getMessage(), e);
+        }
+
+        if (log.isDebugEnabled()) {
+            log.debug("OpenAI stream request: {}", new String(requestBody, StandardCharsets.UTF_8));
+        }
+
+        HttpRequest httpRequest = buildHttpRequest(requestBody);
+
+        try {
+            HttpResponse<java.io.InputStream> response = httpClient.send(httpRequest,
+                HttpResponse.BodyHandlers.ofInputStream());
+
+            int status = response.statusCode();
+            if (status != 200) {
+                byte[] errBody = response.body().readAllBytes();
+                String errMsg = parseErrorMessage(errBody, status);
+                throw new LLMException("HTTP " + status + ": " + errMsg);
+            }
+
+            return parseSSEStream(response.body(), onToken);
+
+        } catch (LLMException e) {
+            throw e;
+        } catch (IOException e) {
+            throw new LLMException("流式请求失败: " + e.getMessage(), e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new LLMException("流式请求被中断", e);
+        }
+    }
+
+    /** 解析 SSE 流，累积完整 Message */
+    private Message parseSSEStream(java.io.InputStream body, Consumer<String> onToken)
+        throws IOException {
+
+        StringBuilder contentBuilder = new StringBuilder();
+        Map<Integer, ToolCallAccum> toolAccum = new HashMap<>();
+        String finishReason = null;
+
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(body, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isEmpty()) continue;       // SSE 空行
+                if (line.startsWith(": ")) continue; // SSE 注释
+
+                if (!line.startsWith("data: ")) continue;
+                String data = line.substring(6);
+
+                if ("[DONE]".equals(data)) break;
+
+                JsonNode chunk;
+                try {
+                    chunk = objectMapper.readTree(data);
+                } catch (IOException e) {
+                    continue; // 跳过无法解析的行
+                }
+
+                JsonNode choices = chunk.get("choices");
+                if (choices == null || choices.isEmpty()) continue;
+
+                JsonNode delta = choices.get(0).get("delta");
+                if (delta == null) continue;
+
+                // 文本内容 → 回调 onToken
+                JsonNode contentNode = delta.get("content");
+                if (contentNode != null && !contentNode.asText().isEmpty()) {
+                    String text = contentNode.asText();
+                    contentBuilder.append(text);
+                    onToken.accept(text);
+                }
+
+                // 工具调用增量 → 累积
+                JsonNode toolCallsNode = delta.get("tool_calls");
+                if (toolCallsNode != null && toolCallsNode.isArray()) {
+                    for (JsonNode tc : toolCallsNode) {
+                        int idx = tc.get("index").asInt();
+                        toolAccum.putIfAbsent(idx, new ToolCallAccum());
+                        ToolCallAccum acc = toolAccum.get(idx);
+
+                        JsonNode idNode = tc.get("id");
+                        if (idNode != null) acc.id = idNode.asText();
+
+                        JsonNode fnNode = tc.get("function");
+                        if (fnNode != null) {
+                            JsonNode nameNode = fnNode.get("name");
+                            if (nameNode != null) acc.name = nameNode.asText();
+                            JsonNode argsNode = fnNode.get("arguments");
+                            if (argsNode != null) acc.args.append(argsNode.asText());
+                        }
+                    }
+                }
+
+                // finish_reason
+                JsonNode frNode = choices.get(0).get("finish_reason");
+                if (frNode != null && !frNode.isNull()) {
+                    finishReason = frNode.asText();
+                }
+            }
+        }
+
+        // 组装结果
+        if (!toolAccum.isEmpty()) {
+            // 工具调用完成
+            List<ToolCall> toolCalls = new ArrayList<>();
+            for (int i = 0; i < toolAccum.size(); i++) {
+                ToolCallAccum acc = toolAccum.get(i);
+                JsonNode argsNode;
+                try {
+                    argsNode = objectMapper.readTree(acc.args.toString());
+                } catch (IOException e) {
+                    argsNode = objectMapper.createObjectNode();
+                }
+                toolCalls.add(new ToolCall(acc.id, acc.name, argsNode));
+            }
+            String text = !contentBuilder.isEmpty() ? contentBuilder.toString() : null;
+            return text != null
+                ? new Message(com.miniclaw.tools.schema.Role.ASSISTANT, text, toolCalls, null)
+                : Message.assistantWithTools(toolCalls);
+        }
+
+        // 纯文本回复
+        return Message.assistant(!contentBuilder.isEmpty() ? contentBuilder.toString() : "");
+    }
+
     // === 请求构建 ===
 
-    private OpenAIRequest buildRequest(List<Message> messages, List<ToolDefinition> tools) {
+    private OpenAIRequest buildRequest(List<Message> messages, List<ToolDefinition> tools,
+                                       boolean stream) {
         List<OpenAIMessage> openaiMsgs = new ArrayList<>();
         for (Message msg : messages) {
             openaiMsgs.add(toOpenAIMessage(msg));
@@ -91,7 +232,7 @@ public class OpenAIProvider implements LLMProvider {
             }
         }
 
-        return new OpenAIRequest(config.model(), openaiMsgs, openaiTools, false);
+        return new OpenAIRequest(config.model(), openaiMsgs, openaiTools, stream);
     }
 
     private HttpRequest buildHttpRequest(byte[] body) {
@@ -262,5 +403,12 @@ public class OpenAIProvider implements LLMProvider {
         }
         String raw = new String(body, StandardCharsets.UTF_8);
         return raw.length() > 200 ? raw.substring(0, 200) + "..." : raw;
+    }
+
+    /** 流式工具调用增量累加器 */
+    private static class ToolCallAccum {
+        String id;
+        String name;
+        final StringBuilder args = new StringBuilder();
     }
 }

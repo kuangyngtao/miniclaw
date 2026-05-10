@@ -4,6 +4,8 @@ import com.miniclaw.tools.schema.Message;
 import com.miniclaw.tools.schema.ToolDefinition;
 import java.util.List;
 
+import java.util.function.Consumer;
+
 /**
  * 大模型适配器接口 — 与大模型通信的统一契约。
  *
@@ -15,10 +17,21 @@ import java.util.List;
 public interface LLMProvider {
 
     /**
-     * 将当前上下文历史 + 可用工具列表发送给大模型，返回模型生成的 Message。
+     * 阻塞式调用：发送完整上下文历史 + 工具列表，返回模型生成的 Message。
      * 返回的 Message 可能是纯文本回复（content 非空）或工具调用（toolCalls 非空）。
      *
      * @throws LLMException 重试耗尽或遇到不可恢复错误（错误码 A-002）
      */
     Message generate(List<Message> messages, List<ToolDefinition> availableTools);
+
+    /**
+     * 流式调用：以 SSE 方式逐步接收 token，每个文本 chunk 回调 onToken，
+     * 最后返回完整的 Message（支持工具调用）。
+     * 不重试——stream 中断无法重放，失败直接抛 LLMException。
+     */
+    default Message generateStream(List<Message> messages, List<ToolDefinition> tools,
+                                   Consumer<String> onToken) {
+        // 默认回退到阻塞式
+        return generate(messages, tools);
+    }
 }

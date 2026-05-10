@@ -12,6 +12,8 @@ import com.miniclaw.tools.schema.ToolResult;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,28 +33,38 @@ public class AgentEngine implements AgentLoop {
         + "Think step by step before acting.";
 
     private static final List<ToolDefinition> EMPTY_TOOLS = Collections.emptyList();
+    private static final Set<String> READ_ONLY_TOOLS = Set.of("read", "glob", "grep");
 
     private final LLMProvider provider;
     private final Registry registry;
     private final String workDir;
-    private final ThinkingMode thinkingMode;
-    private final Consumer<String> onReasoning;
+    private volatile ThinkingMode thinkingMode;
+    private volatile Runnable onThinkingBegin;
+    private volatile Consumer<String> onReasoning;
+    private final Consumer<String> onToken;
 
     public AgentEngine(LLMProvider provider, Registry registry, String workDir) {
-        this(provider, registry, workDir, ThinkingMode.OFF, null);
+        this(provider, registry, workDir, ThinkingMode.OFF, null, null);
     }
 
     public AgentEngine(LLMProvider provider, Registry registry, String workDir, ThinkingMode thinkingMode) {
-        this(provider, registry, workDir, thinkingMode, null);
+        this(provider, registry, workDir, thinkingMode, null, null);
     }
 
     public AgentEngine(LLMProvider provider, Registry registry, String workDir,
                        ThinkingMode thinkingMode, Consumer<String> onReasoning) {
+        this(provider, registry, workDir, thinkingMode, onReasoning, null);
+    }
+
+    public AgentEngine(LLMProvider provider, Registry registry, String workDir,
+                       ThinkingMode thinkingMode, Consumer<String> onReasoning,
+                       Consumer<String> onToken) {
         this.provider = provider;
         this.registry = registry;
         this.workDir = workDir;
         this.thinkingMode = thinkingMode;
         this.onReasoning = onReasoning;
+        this.onToken = onToken;
     }
 
     @Override
@@ -69,11 +81,18 @@ public class AgentEngine implements AgentLoop {
             turnCount++;
             log.info("========== [Turn {}] 开始 ==========", turnCount);
 
-            // === 两阶段慢思考：第一阶段 — 剥离工具，强制推理规划 ===
+            // === 两阶段慢思考：每轮先剥离工具，强制推理规划 ===
             if (thinkingMode == ThinkingMode.TWO_STAGE) {
                 log.info("[Engine] 慢思考阶段1: 剥离工具，强制推理规划...");
                 try {
-                    Message thinkingMsg = provider.generate(contextHistory, EMPTY_TOOLS);
+                    if (onThinkingBegin != null) onThinkingBegin.run();
+
+                    Message thinkingMsg;
+                    if (onToken != null) {
+                        thinkingMsg = provider.generateStream(contextHistory, EMPTY_TOOLS, onToken);
+                    } else {
+                        thinkingMsg = provider.generate(contextHistory, EMPTY_TOOLS);
+                    }
                     contextHistory.add(thinkingMsg);
 
                     if (thinkingMsg.content() != null && !thinkingMsg.content().isEmpty()) {
@@ -99,7 +118,11 @@ public class AgentEngine implements AgentLoop {
 
             final Message responseMsg;
             try {
-                responseMsg = provider.generate(contextHistory, availableTools);
+                if (onToken != null) {
+                    responseMsg = provider.generateStream(contextHistory, availableTools, onToken);
+                } else {
+                    responseMsg = provider.generate(contextHistory, availableTools);
+                }
             } catch (LLMException e) {
                 log.error("[Engine] LLM 调用失败 (A-002): {}", e.getMessage());
                 return "[A-002] LLM 调用失败: " + e.getMessage();
@@ -117,22 +140,83 @@ public class AgentEngine implements AgentLoop {
             }
 
             // Action + Observation
-            log.info("[Engine] 模型请求调用 {} 个工具...", responseMsg.toolCalls().size());
+            List<ToolCall> calls = responseMsg.toolCalls();
+            log.info("[Engine] 模型请求调用 {} 个工具, {} 模式...",
+                calls.size(), allReadOnly(calls) ? "并行" : "串行");
 
-            for (ToolCall toolCall : responseMsg.toolCalls()) {
-                log.info("  -> 执行工具: {}, 参数: {}", toolCall.name(), toolCall.arguments());
-
-                ToolResult result = registry.execute(toolCall);
-
-                if (result.isError()) {
-                    log.info("  -> 工具执行报错: {}", result.output());
-                } else {
-                    log.info("  -> 工具执行成功 (返回 {} 字节)", result.output().length());
-                }
-
-                contextHistory.add(Message.toolResult(toolCall.id(), result.output()));
+            if (allReadOnly(calls)) {
+                executeParallel(calls, contextHistory);
+            } else {
+                executeSequential(calls, contextHistory);
             }
         }
+    }
+
+    private boolean allReadOnly(List<ToolCall> calls) {
+        return calls.stream().allMatch(c -> READ_ONLY_TOOLS.contains(c.name()));
+    }
+
+    private void executeParallel(List<ToolCall> calls, List<Message> contextHistory) {
+        int n = calls.size();
+        ToolResult[] results = new ToolResult[n];
+        CountDownLatch latch = new CountDownLatch(n);
+
+        for (int i = 0; i < n; i++) {
+            final int idx = i;
+            final ToolCall call = calls.get(i);
+            log.info("  -> [VThread-{}] 并行执行: {}", idx, call.name());
+            Thread.ofVirtual().start(() -> {
+                try {
+                    results[idx] = registry.execute(call);
+                    ToolResult r = results[idx];
+                    if (r.isError()) {
+                        log.info("  -> [VThread-{}] 执行报错: {}", idx, r.output());
+                    } else {
+                        log.info("  -> [VThread-{}] 执行成功 (返回 {} 字节)", idx, r.output().length());
+                    }
+                } finally {
+                    latch.countDown();
+                }
+            });
+        }
+
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("[Engine] 并行执行被中断");
+        }
+
+        for (ToolResult result : results) {
+            contextHistory.add(Message.toolResult(result.toolCallId(), result.output()));
+        }
+    }
+
+    private void executeSequential(List<ToolCall> calls, List<Message> contextHistory) {
+        for (ToolCall call : calls) {
+            log.info("  -> 执行工具: {}, 参数: {}", call.name(), call.arguments());
+            ToolResult result = registry.execute(call);
+            if (result.isError()) {
+                log.info("  -> 工具执行报错: {}", result.output());
+            } else {
+                log.info("  -> 工具执行成功 (返回 {} 字节)", result.output().length());
+            }
+            contextHistory.add(Message.toolResult(call.id(), result.output()));
+        }
+    }
+
+    @Override
+    public void setThinkingMode(ThinkingMode mode) {
+        this.thinkingMode = mode;
+        log.info("[Engine] 思考模式切换为: {}", mode);
+    }
+
+    public void setOnThinkingBegin(Runnable callback) {
+        this.onThinkingBegin = callback;
+    }
+
+    public void onReasoning(Consumer<String> callback) {
+        this.onReasoning = callback;
     }
 
     public String workDir() {
