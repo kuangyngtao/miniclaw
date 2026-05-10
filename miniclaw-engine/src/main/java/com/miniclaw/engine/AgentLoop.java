@@ -11,4 +11,10 @@ public interface AgentLoop {
 
     /** 运行时切换思考模式 */
     void setThinkingMode(ThinkingMode mode);
+
+    /** 运行时切换权限模式 */
+    void setPermissionMode(PermissionMode mode);
+
+    /** 查询当前权限模式 */
+    PermissionMode permissionMode();
 }
