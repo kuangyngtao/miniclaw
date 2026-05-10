@@ -16,14 +16,14 @@ miniclaw 是 [OpenClaw](https://openclaw.ai/) 的 Java CLI 实现——本地 AI
 
 | 层 | 职责 | V1 完成度 | 已实现 | 待实现 |
 |----|------|-----------|--------|--------|
-| 入口交互层 | CLI REPL + HITL 审批 | ▓▓░░ 20% | CLI REPL（Picocli） | HITL 审批、飞书输入 |
-| 核心引擎层 | Main Loop (ReAct) + LLM 适配器 | ▓▓▓▓ 80% | ReAct Loop、OpenAI/DeepSeek Provider、TWO_STAGE 慢思考、流式输出、并行工具调用（读工具虚拟线程并发） | 多模型路由、熔断器 |
+| 入口交互层 | CLI REPL + HITL 审批 | ▓▓▓░ 60% | CLI REPL（Picocli）、HITL 审批（ASK 模式）、权限模式切换（AUTO/ASK/PLAN） | 飞书输入 |
+| 核心引擎层 | Main Loop (ReAct) + LLM 适配器 | ▓▓▓▓ 85% | ReAct Loop、OpenAI/DeepSeek Provider、TWO_STAGE 慢思考、流式输出、并行工具调用（读工具虚拟线程并发）、PermissionMode 引擎层权限控制 | 多模型路由、熔断器 |
 | 上下文工程层 | Prompt 组装 + Token 截断 | ░░░░ 0% | — | Prompt 组装、阶梯压缩、事件注入 |
-| 工具与执行层 | ToolRegistry + Middleware | ▓▓▓▓ 70% | 6 工具（read/write/edit/bash/glob/grep）、ToolRegistry、EditTool 四级模糊匹配 | Middleware 安全拦截 |
+| 工具与执行层 | ToolRegistry + Middleware | ▓▓▓▓ 70% | 6 工具（read/write/edit/bash/glob/grep）、ToolRegistry、EditTool 四级模糊匹配 | Middleware 内容安全拦截（rm -rf/sudo） |
 
 核心哲学：上下文即缓存，磁盘即真相。状态不跨层持有。
 
-层间通信：`CLI → AgentLoop → LLM → tool_call → ToolRegistry.lookup → Middleware.check → Tool.execute → Result → 回注 prompt → 循环`
+层间通信：`CLI → AgentLoop → LLM → tool_call → PermissionMode.check → ToolRegistry.lookup → Tool.execute → Result → 回注 prompt → 循环`
 
 ---
 
@@ -111,6 +111,7 @@ miniclaw 是本地 CLI 工具，不是服务端应用。部署 = `java -jar mini
 | 层 | 方向 | 优先级 | 说明 |
 |----|------|--------|------|
 | 引擎 | ~~并行工具调用~~ | ~~高~~ | ✅ 已实现：读工具（read/glob/grep）虚拟线程并发，写工具（write/edit/bash）保持串行 |
+| 引擎 | ~~权限模式系统~~ | ~~高~~ | ✅ 已实现：AUTO（全自动）/ASK（写工具人工确认）/PLAN（仅读工具，强制先规划），CLI 斜杠命令运行时切换 |
 | 引擎 | 最大迭代守卫 | 高 | 硬限制轮次防止 Agent 死循环烧 token |
 | 工具 | 高危操作拦截 | 高 | Middleware 层在工具执行前检查 rm -rf、sudo 等 |
 | 引擎 | 熔断器 | 中 | 连续失败快速返回，不无限重试 |
@@ -254,7 +255,8 @@ SPEC 必须包含：做什么 / 不做什么 / 做到什么程度 / 接口定义
 | miniclaw-tools | EditToolTest | 单元 | 9 |
 | miniclaw-tools | GlobToolTest | 单元 | 5 |
 | miniclaw-tools | GrepToolTest | 单元 | 6 |
-| miniclaw-engine | AgentEngineTest | Mock 集成 | — |
+| miniclaw-engine | AgentEngineTest | Mock 集成 | 6 |
+| miniclaw-engine | PermissionModeTest | Mock 集成 | 9 |
 | miniclaw-engine | ReadToolIntegrationTest | E2E 集成 | — |
 | miniclaw-engine | WriteBashIntegrationTest | E2E 集成 | — |
 | miniclaw-engine | EditIntegrationTest | E2E 集成 | — |

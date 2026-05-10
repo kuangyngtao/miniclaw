@@ -1,6 +1,6 @@
 package com.miniclaw.cli;
 
-
+import com.miniclaw.engine.PermissionMode;
 import com.miniclaw.engine.ThinkingMode;
 import com.miniclaw.engine.impl.AgentEngine;
 import com.miniclaw.provider.LLMConfig;
@@ -77,11 +77,21 @@ public class MiniclawApp implements Runnable {
             engine.onReasoning(this::onReasoning);
         }
 
+        try (Scanner scanner = new Scanner(System.in)) {
+            engine.setPermissionHandler(call -> {
+                String args = call.arguments() != null ? call.arguments().toString() : "{}";
+                if (args.length() > 120) {
+                    args = args.substring(0, 120) + "...";
+                }
+                System.out.print(GRAY + "  Execute " + call.name() + " " + args + "? [y/n] " + RESET);
+                String answer = scanner.nextLine().trim().toLowerCase();
+                return answer.equals("y") || answer.equals("yes");
+            });
+
         log.info("miniclaw started — model={}, thinking={}", model, mode);
 
         printBanner(model, registry.count());
 
-        Scanner scanner = new Scanner(System.in);
         while (true) {
             System.out.print("> ");
             if (!scanner.hasNextLine()) break;
@@ -91,13 +101,16 @@ public class MiniclawApp implements Runnable {
             // === 斜杠命令 ===
             if (input.startsWith("/")) {
                 switch (input) {
-                    case "/" -> printMenu(engine.thinkingMode());
-                    case "/h", "/help" -> printHelp(engine.thinkingMode());
+                    case "/" -> printMenu(engine.thinkingMode(), engine.permissionMode());
+                    case "/h", "/help" -> printHelp(engine.thinkingMode(), engine.permissionMode());
                     case "/q", "/exit" -> {
                         System.out.println("Goodbye.");
                         return;
                     }
                     case "/t", "/thinking" -> toggleThinking(engine);
+                    case "/p", "/plan" -> setPermissionMode(engine, PermissionMode.PLAN);
+                    case "/a", "/ask" -> setPermissionMode(engine, PermissionMode.ASK);
+                    case "/auto" -> setPermissionMode(engine, PermissionMode.AUTO);
                     default -> System.out.println("未知命令，输入 / 查看菜单。\n");
                 }
                 continue;
@@ -117,25 +130,31 @@ public class MiniclawApp implements Runnable {
             }
         }
 
+        } // try-with-resources closes scanner
+
         log.info("miniclaw exiting normally.");
         System.out.println("Goodbye.");
     }
 
     // === 命令处理 ===
 
-    private void printMenu(ThinkingMode currentMode) {
+    private void printMenu(ThinkingMode thinking, PermissionMode perm) {
         System.out.println();
-        System.out.println(GRAY + "  /t  toggle slow thinking  (current: " + currentMode + ")" + RESET);
-        System.out.println(GRAY + "  /h  show help" + RESET);
-        System.out.println(GRAY + "  /q  quit" + RESET);
+        System.out.println(GRAY + "  /t  toggle thinking     (current: " + thinking + ")" + RESET);
+        System.out.println(GRAY + "  /p  plan mode           (current: " + perm + ")" + RESET);
+        System.out.println(GRAY + "  /a  ask mode   /auto    auto mode" + RESET);
+        System.out.println(GRAY + "  /h  help       /q       quit" + RESET);
         System.out.println();
     }
 
-    private void printHelp(ThinkingMode currentMode) {
+    private void printHelp(ThinkingMode thinking, PermissionMode perm) {
         System.out.println();
-        System.out.println("  /, /t, /thinking  切换慢思考模式 (当前: " + currentMode + ")");
-        System.out.println("  /h, /help         显示此帮助");
-        System.out.println("  /q, /exit         退出程序");
+        System.out.println("  /t, /thinking   切换慢思考模式 (当前: " + thinking + ")");
+        System.out.println("  /p, /plan       仅允许读工具，强制 LLM 先规划 (当前: " + perm + ")");
+        System.out.println("  /a, /ask        写工具执行前人工确认");
+        System.out.println("  /auto           全自动执行所有工具");
+        System.out.println("  /h, /help       显示此帮助");
+        System.out.println("  /q, /exit       退出程序");
         System.out.println("  输入 / 可查看快捷菜单。\n");
     }
 
@@ -152,17 +171,32 @@ public class MiniclawApp implements Runnable {
         log.info("Thinking mode toggled: {} -> {}", current, next);
     }
 
+    private void setPermissionMode(AgentEngine engine, PermissionMode mode) {
+        PermissionMode old = engine.permissionMode();
+        engine.setPermissionMode(mode);
+        System.out.println(GRAY + "  permission: " + old + " -> " + mode + RESET + "\n");
+        log.info("Permission mode switched: {} -> {}", old, mode);
+    }
+
     // === 回调 ===
 
     private static final String GRAY = "\033[90m";
     private static final String RESET = "\033[0m";
 
+    private static final String THINKING_BAR = "─".repeat(54);
+
     private void onThinkingBegin() {
-        System.out.println(GRAY + "┌─ thinking " + "─".repeat(54) + RESET);
+        System.out.print("\n"); // 确保与上一轮流式输出之间有换行
+        System.out.println(GRAY + "┌─ thinking " + THINKING_BAR + RESET);
     }
 
     private void onReasoning(String text) {
-        System.out.println(GRAY + "└" + "─".repeat(66) + RESET);
+        if (text != null && !text.isEmpty()) {
+            for (String line : text.split("\n")) {
+                System.out.println(GRAY + "│ " + line + RESET);
+            }
+        }
+        System.out.println(GRAY + "└" + THINKING_BAR + RESET);
         System.out.println();
     }
 
@@ -177,6 +211,7 @@ public class MiniclawApp implements Runnable {
         System.out.println("|  model   " + String.format("%-36s", model) + "|");
         System.out.println("|  tools   " + toolCount + " loaded                                |");
         System.out.println("|  /   show menu     /t   toggle thinking     |");
+        System.out.println("|  /p  plan mode     /a   ask   /auto  auto   |");
         System.out.println("|  /h  help           /q   quit               |");
         System.out.println("+-----------------------------------------------+");
         System.out.println();
