@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# miniclaw launcher — auto-build on first run, then reuse JAR
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+JAR="$SCRIPT_DIR/miniclaw-cli/target/miniclaw-cli-0.1.0-SNAPSHOT.jar"
+
+if [ ! -f "$JAR" ]; then
+    echo "[miniclaw] building..."
+    cd "$SCRIPT_DIR"
+    mvn install -pl miniclaw-cli -am -q -DskipTests
+fi
+
+exec java -Dfile.encoding=UTF-8 -jar "$JAR" "$@"

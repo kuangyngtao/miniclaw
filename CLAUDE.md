@@ -14,12 +14,12 @@ miniclaw 是 [OpenClaw](https://openclaw.ai/) 的 Java CLI 实现——本地 AI
 
 ## 四层架构
 
-| 层 | 职责 | MVP 范围 | V2 预留 |
-|----|------|---------|--------|
-| 入口交互层 | CLI REPL + HITL 审批 | 同步审批（y/N） | 飞书异步回调 |
-| 核心引擎层 | Main Loop (ReAct) + LLM 适配器 | Claude API | Thinking 模块、多模型 |
-| 上下文工程层 | Prompt 组装 + Token 截断 | 简单截断 | 阶梯压缩、事件注入 |
-| 工具与执行层 | ToolRegistry + Middleware | 6 工具 + 安全拦截 | 插件扩展 |
+| 层 | 职责 | V1 完成度 | 已实现 | 待实现 |
+|----|------|-----------|--------|--------|
+| 入口交互层 | CLI REPL + HITL 审批 | ▓▓░░ 20% | CLI REPL（Picocli） | HITL 审批、飞书输入 |
+| 核心引擎层 | Main Loop (ReAct) + LLM 适配器 | ▓▓▓▓ 80% | ReAct Loop、OpenAI/DeepSeek Provider、TWO_STAGE 慢思考、流式输出、并行工具调用（读工具虚拟线程并发） | 多模型路由、熔断器 |
+| 上下文工程层 | Prompt 组装 + Token 截断 | ░░░░ 0% | — | Prompt 组装、阶梯压缩、事件注入 |
+| 工具与执行层 | ToolRegistry + Middleware | ▓▓▓▓ 70% | 6 工具（read/write/edit/bash/glob/grep）、ToolRegistry、EditTool 四级模糊匹配 | Middleware 安全拦截 |
 
 核心哲学：上下文即缓存，磁盘即真相。状态不跨层持有。
 
@@ -101,9 +101,23 @@ miniclaw 是本地 CLI 工具，不是服务端应用。部署 = `java -jar mini
 | 阶段 | 优化 | 触发条件 |
 |------|------|---------|
 | V1 | 超时+重试+虚拟线程（已有） | 当前 |
-| V2 | 并行工具调用（glob/grep 并发跑） | 项目变大 |
+| V1.5 | 并行工具调用（读工具并发） + 流式输出 | ✅ 已完成 |
+| V2 | 最大迭代守卫 + 高危操作拦截 | 项目变大 |
 | V3 | GraalVM native-image 编译（启动 < 0.1s） | 需要瞬启 |
 | 远期 | 本地嵌入模型语义搜索 | grep 无法覆盖的语义场景 |
+
+### 功能演进
+
+| 层 | 方向 | 优先级 | 说明 |
+|----|------|--------|------|
+| 引擎 | ~~并行工具调用~~ | ~~高~~ | ✅ 已实现：读工具（read/glob/grep）虚拟线程并发，写工具（write/edit/bash）保持串行 |
+| 引擎 | 最大迭代守卫 | 高 | 硬限制轮次防止 Agent 死循环烧 token |
+| 工具 | 高危操作拦截 | 高 | Middleware 层在工具执行前检查 rm -rf、sudo 等 |
+| 引擎 | 熔断器 | 中 | 连续失败快速返回，不无限重试 |
+| 引擎 | 上下文阶梯压缩 | 中 | Token 超限时自动摘要历史而非简单截断 |
+| 工具 | BashTool 后台守护 | 中 | --background 标志，超时不杀返回 PID |
+| 工具 | WriteTool 覆盖确认 | 低 | 目标文件已存在时交互确认 |
+| 工具 | 跨平台 Shell 统一 | 低 | 固定 bash -c 还是保留自动检测 |
 
 ### 数据模型
 
@@ -147,7 +161,6 @@ V1 不需要建数据模型。核心结构已在代码中：
 ### 代码组织
 
 - **接口与实现分离**: 公开接口放包根，实现类放 `impl/` 子包（如 `tools/impl/ReadTool.java`）
-- **包级私有**: 实现类不加 `public`，通过 `ToolRegistry` 等入口对外暴露
 - **测试目录镜像**: `src/test/java/` 完整镜像 `src/main/java/` 的包结构
 - **无循环依赖**: 模块依赖严格单向
 
@@ -167,6 +180,7 @@ public record ErrorInfo(String errorCode, String message) {}
 
 ```
 T-001~T-005  工具系统（未注册/参数非法/权限不足/超时/IO）
+E-001~E-002  Edit 工具（非唯一匹配/未找到匹配）
 A-001~A-003  Agent（超最大迭代/LLM 调用失败/返回不可解析）
 S-001~S-003  Skills（文件不存在/格式非法/匹配失败）
 C-001~C-003  配置（文件不存在/格式非法/校验失败）
@@ -196,6 +210,19 @@ public interface Tool {
 
 新增工具：实现 Tool → 注册到 ToolRegistry → 测试 → 合入。
 
+### 现有工具清单
+
+| 工具 | 文件 | 安全机制 |
+|------|------|---------|
+| read | ReadTool.java | 路径穿越防护、8000 字节截断 |
+| write | WriteTool.java | 路径穿越防护、自动建父目录 |
+| edit | EditTool.java | **四级模糊匹配**（L1 精确→L2 换行符归一化→L3 去首尾空行→L4 逐行去缩进滑动窗口）、唯一性校验（E-001/E-002） |
+| bash | BashTool.java | 30s 超时强杀、workDir 绑定、8000 字节截断、Windows Git Bash 检测 |
+| glob | GlobTool.java | 200 条 + 8000 字节双截断、路径归一化 |
+| grep | GrepTool.java | 50 条 + 200 字符/行 + 8000 字节三层截断、自动跳过 `.git`/`target`/`node_modules`/二进制文件 |
+
+工具工作流：`glob（定位文件）→ grep（定位代码）→ read（确认）→ edit（修改）`
+
 ---
 
 ## 开发流程
@@ -220,8 +247,25 @@ SPEC 必须包含：做什么 / 不做什么 / 做到什么程度 / 接口定义
 
 ## 测试约定
 
+### 测试清单
+
+| 模块 | 测试文件 | 类型 | 用例数 |
+|------|---------|------|--------|
+| miniclaw-tools | EditToolTest | 单元 | 9 |
+| miniclaw-tools | GlobToolTest | 单元 | 5 |
+| miniclaw-tools | GrepToolTest | 单元 | 6 |
+| miniclaw-engine | AgentEngineTest | Mock 集成 | — |
+| miniclaw-engine | ReadToolIntegrationTest | E2E 集成 | — |
+| miniclaw-engine | WriteBashIntegrationTest | E2E 集成 | — |
+| miniclaw-engine | EditIntegrationTest | E2E 集成 | — |
+| miniclaw-provider | OpenAIProviderTest | 单元 | — |
+| miniclaw-provider | DeepSeekConnectivityTest | 连通性 | — |
+
+### 测试原则
+
 - **Mock 验证必须输出完整日志** — 每个模块的 `test` scope 必须包含 `logback-classic`，确保 Agent Loop 的执行轨迹完整可见
 - Mock 测试验证三条：引擎是否达到预期轮次、工具是否被正确调用、最终返回值是否正确
+- 集成测试通过真实 API Key 调用 LLM，验证端到端 ReAct 行为
 
 ---
 
