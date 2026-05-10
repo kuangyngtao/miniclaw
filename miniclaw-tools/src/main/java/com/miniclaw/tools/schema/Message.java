@@ -27,6 +27,6 @@ public record Message(
     }
 
     public static Message toolResult(String toolCallId, String output) {
-        return new Message(Role.USER, output, null, toolCallId);
+        return new Message(Role.TOOL, output, null, toolCallId);
     }
 }

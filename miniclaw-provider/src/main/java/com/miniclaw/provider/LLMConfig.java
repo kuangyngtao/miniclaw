@@ -24,8 +24,8 @@ public record LLMConfig(
 
     public static class Builder {
         private String apiKey;
-        private String baseUrl = "https://api.anthropic.com/v1";
-        private String model = "claude-sonnet-4-6";
+        private String baseUrl = "https://api.deepseek.com";
+        private String model = "deepseek-chat";
         private Duration connectTimeout = Duration.ofSeconds(10);
         private Duration requestTimeout = Duration.ofSeconds(60);
         private int maxRetries = 3;
