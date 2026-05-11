@@ -89,6 +89,11 @@ public class SlowThinkingDemo {
         public Optional<Tool> lookup(String name) {
             return Optional.empty();
         }
+
+        @Override
+        public boolean isReadOnly(String toolName) {
+            return false; // bash is a write tool
+        }
     }
 
     public static void main(String[] args) {

@@ -3,6 +3,7 @@ package com.miniclaw.tools;
 import com.miniclaw.tools.schema.ToolCall;
 import com.miniclaw.tools.schema.ToolDefinition;
 import com.miniclaw.tools.schema.ToolResult;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -18,6 +19,7 @@ public class ToolRegistry implements Registry {
     private static final Logger log = LoggerFactory.getLogger(ToolRegistry.class);
 
     private final ConcurrentHashMap<String, Tool> tools = new ConcurrentHashMap<>();
+    private final List<SafetyInterceptor> interceptors = new ArrayList<>();
 
     @Override
     public void register(Tool tool) {
@@ -38,6 +40,17 @@ public class ToolRegistry implements Registry {
         return Optional.ofNullable(tools.get(name));
     }
 
+    /** 查询工具是否为只读工具 */
+    public boolean isReadOnly(String toolName) {
+        Tool tool = tools.get(toolName);
+        return tool != null && tool.isReadOnly();
+    }
+
+    /** 注册安全拦截器 */
+    public void addInterceptor(SafetyInterceptor interceptor) {
+        interceptors.add(interceptor);
+    }
+
     @Override
     public List<ToolDefinition> getAvailableTools() {
         return tools.values().stream()
@@ -47,6 +60,13 @@ public class ToolRegistry implements Registry {
 
     @Override
     public ToolResult execute(ToolCall call) {
+        for (SafetyInterceptor i : interceptors) {
+            String blockReason = i.check(call);
+            if (blockReason != null) {
+                log.warn("[Registry] 工具调用被拦截: {}", blockReason);
+                return ToolResult.error(call.id(), blockReason);
+            }
+        }
         Tool tool = tools.get(call.name());
         if (tool == null) {
             return ToolResult.error(call.id(), "tool not found: " + call.name());

@@ -17,4 +17,25 @@ public interface AgentLoop {
 
     /** 查询当前权限模式 */
     PermissionMode permissionMode();
+
+    /** 清空当前会话历史 */
+    void clearSession();
+
+    /** 中断当前 Agent 循环，run() 将在下一轮检查点返回 */
+    void interrupt();
+
+    /** 设置流式输出回调，下次 run() 生效 */
+    void setOnToken(java.util.function.Consumer<String> onToken);
+
+    /** 添加流式输出监听器（多路复用，不清除已有监听器） */
+    void addOnTokenListener(java.util.function.Consumer<String> listener);
+
+    /** 移除流式输出监听器 */
+    void removeOnTokenListener(java.util.function.Consumer<String> listener);
+
+    /** 尝试获取引擎执行权（防并发），成功返回 true */
+    boolean tryAcquire();
+
+    /** 释放引擎执行权 */
+    void release();
 }

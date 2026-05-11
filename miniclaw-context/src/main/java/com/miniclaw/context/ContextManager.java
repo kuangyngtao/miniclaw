@@ -1,21 +1,17 @@
 package com.miniclaw.context;
 
+import com.miniclaw.tools.schema.Message;
+import java.util.List;
+
 /**
- * 上下文管理器 — Prompt 动态组装 + Token 监控。
- * MVP: 简单截断策略（超出 N 轮丢弃最早消息）。
- * V2: 阶梯压缩 + 事件注入。
+ * 上下文管理器 — 阶梯压缩 + Token 监控。
+ * 每轮 ReAct 开始前调用，确保上下文不超 token 预算。
  */
 public interface ContextManager {
 
-    /** 将用户输入与当前上下文拼装为完整的 LLM 消息列表 */
-    String buildPrompt(String userInput);
+    /** 估算消息列表的 token 数（1 token ≈ 3 字符英文 / 4 字符中文） */
+    int estimateTokens(List<Message> messages);
 
-    /** 返回当前上下文的消息轮数 */
-    int turnCount();
-
-    /** 截断上下文，保留最近 N 轮 */
-    void truncate(int keepTurns);
-
-    /** 注入运行时事件提醒（如 "当前时间: xxx"） */
-    void injectReminder(String reminder);
+    /** 阶梯压缩消息列表，使其不超过 maxTokens。最近 3 轮完整保留。 */
+    List<Message> compact(List<Message> messages, int maxTokens);
 }

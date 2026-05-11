@@ -34,9 +34,16 @@ public class OpenAIProvider implements LLMProvider {
 
     private static final Logger log = LoggerFactory.getLogger(OpenAIProvider.class);
 
+    private static final int CIRCUIT_THRESHOLD = 5;
+    private static final long CIRCUIT_COOLDOWN_MS = 30_000;
+
     private final LLMConfig config;
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
+
+    // 熔断器状态（CLOSED → OPEN → HALF_OPEN）
+    private int consecutiveFailures;
+    private long circuitOpenUntil;
 
     public OpenAIProvider(LLMConfig config) {
         this.config = config;
@@ -47,8 +54,47 @@ public class OpenAIProvider implements LLMProvider {
             .build();
     }
 
+    // === 熔断器 ===
+
+    /**
+     * OPEN 状态直接抛异常；HALF_OPEN 允许一次探测；CLOSED 正常通过。
+     */
+    private void checkCircuit() {
+        if (circuitOpenUntil == 0) return; // CLOSED
+        long now = System.currentTimeMillis();
+        if (now < circuitOpenUntil) {
+            long remaining = (circuitOpenUntil - now) / 1000;
+            throw new LLMException("熔断器开启，请等待 " + remaining + "s 后重试");
+        }
+        // HALF_OPEN: 允许探测
+        log.info("熔断器半开，允许探测请求...");
+    }
+
+    private synchronized void recordSuccess() {
+        if (consecutiveFailures > 0 || circuitOpenUntil > 0) {
+            log.info("熔断器恢复，连续失败 {} 次后请求成功", consecutiveFailures);
+        }
+        consecutiveFailures = 0;
+        circuitOpenUntil = 0;
+    }
+
+    private synchronized void recordFailure() {
+        consecutiveFailures++;
+        log.warn("熔断器记录失败: {}/{}", consecutiveFailures, CIRCUIT_THRESHOLD);
+        if (consecutiveFailures >= CIRCUIT_THRESHOLD && circuitOpenUntil == 0) {
+            circuitOpenUntil = System.currentTimeMillis() + CIRCUIT_COOLDOWN_MS;
+            log.warn("熔断器开启，{}s 内直接快速失败", CIRCUIT_COOLDOWN_MS / 1000);
+        } else if (consecutiveFailures >= CIRCUIT_THRESHOLD) {
+            // HALF_OPEN 探测失败，重新计时
+            circuitOpenUntil = System.currentTimeMillis() + CIRCUIT_COOLDOWN_MS;
+            log.warn("熔断器探测失败，重新开启 {}s", CIRCUIT_COOLDOWN_MS / 1000);
+        }
+    }
+
     @Override
     public Message generate(List<Message> messages, List<ToolDefinition> availableTools) {
+        checkCircuit();
+
         OpenAIRequest request = buildRequest(messages, availableTools, false);
 
         final byte[] requestBody;
@@ -63,25 +109,33 @@ public class OpenAIProvider implements LLMProvider {
         }
 
         HttpRequest httpRequest = buildHttpRequest(requestBody);
-        byte[] responseBody = sendWithRetry(httpRequest);
 
-        OpenAIResponse response;
         try {
-            response = objectMapper.readValue(responseBody, OpenAIResponse.class);
-        } catch (IOException e) {
-            throw new LLMException("解析 LLM 响应失败: " + e.getMessage(), e);
-        }
+            byte[] responseBody = sendWithRetry(httpRequest);
+            OpenAIResponse response;
+            try {
+                response = objectMapper.readValue(responseBody, OpenAIResponse.class);
+            } catch (IOException e) {
+                throw new LLMException("解析 LLM 响应失败: " + e.getMessage(), e);
+            }
 
-        if (log.isDebugEnabled()) {
-            log.debug("OpenAI response model={} id={}", response.model(), response.id());
-        }
+            if (log.isDebugEnabled()) {
+                log.debug("OpenAI response model={} id={}", response.model(), response.id());
+            }
 
-        return toMessage(response);
+            recordSuccess();
+            return toMessage(response);
+        } catch (LLMException e) {
+            recordFailure();
+            throw e;
+        }
     }
 
     @Override
     public Message generateStream(List<Message> messages, List<ToolDefinition> availableTools,
                                   Consumer<String> onToken) {
+        checkCircuit();
+
         OpenAIRequest request = buildRequest(messages, availableTools, true);
 
         final byte[] requestBody;
@@ -108,14 +162,19 @@ public class OpenAIProvider implements LLMProvider {
                 throw new LLMException("HTTP " + status + ": " + errMsg);
             }
 
-            return parseSSEStream(response.body(), onToken);
+            Message result = parseSSEStream(response.body(), onToken);
+            recordSuccess();
+            return result;
 
         } catch (LLMException e) {
+            recordFailure();
             throw e;
         } catch (IOException e) {
+            recordFailure();
             throw new LLMException("流式请求失败: " + e.getMessage(), e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            recordFailure();
             throw new LLMException("流式请求被中断", e);
         }
     }

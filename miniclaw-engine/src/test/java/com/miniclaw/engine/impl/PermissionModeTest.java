@@ -11,6 +11,7 @@ import com.miniclaw.tools.schema.ToolCall;
 import com.miniclaw.tools.schema.ToolDefinition;
 import com.miniclaw.tools.schema.ToolResult;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
@@ -23,7 +24,7 @@ class PermissionModeTest {
 
     // === 共享 Registry：含读工具 (glob) 和写工具 (bash) ===
     static class DualToolRegistry implements Registry {
-        final List<ToolCall> executedCalls = new ArrayList<>();
+        final List<ToolCall> executedCalls = Collections.synchronizedList(new ArrayList<>());
 
         @Override
         public List<ToolDefinition> getAvailableTools() {
@@ -45,6 +46,11 @@ class PermissionModeTest {
         @Override
         public Optional<Tool> lookup(String name) {
             return Optional.empty();
+        }
+
+        @Override
+        public boolean isReadOnly(String toolName) {
+            return "glob".equals(toolName); // glob is read, bash is write
         }
     }
 
