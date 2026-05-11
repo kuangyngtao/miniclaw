@@ -20,6 +20,21 @@
             <version>${project.version}</version>
         </dependency>
         <dependency>
+            <groupId>com.miniclaw</groupId>
+            <artifactId>miniclaw-memory</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.miniclaw</groupId>
+            <artifactId>miniclaw-feishu</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.jline</groupId>
+            <artifactId>jline</artifactId>
+            <version>${jline.version}</version>
+        </dependency>
+        <dependency>
             <groupId>info.picocli</groupId>
             <artifactId>picocli</artifactId>
         </dependency>

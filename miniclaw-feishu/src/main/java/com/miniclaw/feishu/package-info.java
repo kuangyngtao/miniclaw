@@ -1,5 +1,4 @@
 /**
- * V2 placeholder — 飞书 IM 通道模块。
- * MVP 阶段仅占位，不做任何实现。
+ * Feishu IM channel — embedded HTTP server for remote AI coding assistance.
  */
 package com.miniclaw.feishu;

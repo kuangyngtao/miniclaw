@@ -35,6 +35,8 @@
         <assertj.version>3.26.3</assertj.version>
         <logback.version>1.5.7</logback.version>
         <slf4j.version>2.0.13</slf4j.version>
+        <jsoup.version>1.18.1</jsoup.version>
+        <jline.version>3.26.1</jline.version>
     </properties>
 
     <dependencyManagement>
@@ -80,6 +82,11 @@
                 <artifactId>assertj-core</artifactId>
                 <version>${assertj.version}</version>
                 <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.jsoup</groupId>
+                <artifactId>jsoup</artifactId>
+                <version>${jsoup.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

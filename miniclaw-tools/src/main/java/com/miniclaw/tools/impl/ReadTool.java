@@ -53,6 +53,9 @@ public class ReadTool implements Tool {
     }
 
     @Override
+    public boolean isReadOnly() { return true; }
+
+    @Override
     public Result<String> execute(String arguments) {
         // 1. 解析参数
         final JsonNode argsNode;

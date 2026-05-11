@@ -17,4 +17,7 @@ public interface Tool {
 
     /** 执行工具，参数为 JSON 字符串，返回统一 Result */
     Result<String> execute(String arguments);
+
+    /** 是否为只读工具。读工具可并行执行，写工具需串行。默认 false（写工具）。 */
+    default boolean isReadOnly() { return false; }
 }

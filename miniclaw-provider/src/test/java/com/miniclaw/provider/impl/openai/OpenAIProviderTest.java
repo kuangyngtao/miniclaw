@@ -219,4 +219,167 @@ class OpenAIProviderTest {
         String body = capturedBodies.get(0);
         assertThat(body).doesNotContain("\"tools\"");
     }
+
+    // === 熔断器测试 ===
+
+    // Test 10: 连续 5 次失败后熔断器开启，第 6 次快速失败
+    @Test
+    void shouldOpenCircuitAfterConsecutiveFailures() {
+        // 5 次 400 错误（不可重试，每次只消耗 1 个 stub）
+        for (int i = 0; i < 5; i++) {
+            responseQueue.add(new StubResponse(400,
+                "{\"error\":{\"message\":\"bad request " + i + "\"}}"));
+        }
+
+        for (int i = 0; i < 5; i++) {
+            try { provider.generate(List.of(Message.user("x")), List.of()); }
+            catch (LLMException e) { /* expected */ }
+        }
+        capturedBodies.clear();
+
+        // 第 6 次：不需要 stub — 应该直接抛异常，不发 HTTP 请求
+        assertThatThrownBy(() ->
+            provider.generate(List.of(Message.user("x")), List.of()))
+            .isInstanceOf(LLMException.class)
+            .hasMessageContaining("熔断器开启");
+
+        assertThat(capturedBodies).isEmpty(); // 没有发出 HTTP 请求
+    }
+
+    // Test 11: 成功后熔断器重置，失败计数归零
+    @Test
+    void shouldResetCircuitOnSuccess() {
+        // 先触发 4 次失败（差一次到阈值）
+        for (int i = 0; i < 4; i++) {
+            responseQueue.add(new StubResponse(400,
+                "{\"error\":{\"message\":\"bad request " + i + "\"}}"));
+        }
+        for (int i = 0; i < 4; i++) {
+            try { provider.generate(List.of(Message.user("x")), List.of()); }
+            catch (LLMException e) { /* expected */ }
+        }
+
+        // 一次成功 → 计数归零
+        responseQueue.add(new StubResponse(200,
+            "{\"id\":\"ok\",\"model\":\"x\",\"choices\":["
+            + "{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},"
+            + "\"finish_reason\":\"stop\"}]}"));
+        provider.generate(List.of(Message.user("x")), List.of());
+
+        // 再触发 5 次失败 → 应该又需要 5 次才能熔断
+        for (int i = 0; i < 5; i++) {
+            responseQueue.add(new StubResponse(400,
+                "{\"error\":{\"message\":\"bad request " + i + "\"}}"));
+        }
+        for (int i = 0; i < 4; i++) {
+            try { provider.generate(List.of(Message.user("x")), List.of()); }
+            catch (LLMException e) { /* expected */ }
+        }
+        // 第 4 次还没触发熔断，第 5 次需要发请求
+        capturedBodies.clear();
+        try { provider.generate(List.of(Message.user("x")), List.of()); }
+        catch (LLMException e) { /* expected */ }
+        assertThat(capturedBodies).isNotEmpty(); // 第 5 次仍然发了 HTTP
+    }
+
+    // Test 12: 半开探测成功 → 熔断器恢复
+    @Test
+    void shouldRecoverAfterHalfOpenProbe() throws Exception {
+        // 5 次失败 → 熔断器开启
+        for (int i = 0; i < 5; i++) {
+            responseQueue.add(new StubResponse(500,
+                "{\"error\":{\"message\":\"server error " + i + "\"}}"));
+        }
+        for (int i = 0; i < 5; i++) {
+            try { provider.generate(List.of(Message.user("x")), List.of()); }
+            catch (LLMException e) { /* expected */ }
+        }
+
+        // 验证熔断器已开启
+        assertThatThrownBy(() ->
+            provider.generate(List.of(Message.user("x")), List.of()))
+            .isInstanceOf(LLMException.class)
+            .hasMessageContaining("熔断器开启");
+
+        // 用反射将 circuitOpenUntil 设为过去 → HALF_OPEN
+        java.lang.reflect.Field f = OpenAIProvider.class.getDeclaredField("circuitOpenUntil");
+        f.setAccessible(true);
+        f.set(provider, System.currentTimeMillis() - 1000);
+        f = OpenAIProvider.class.getDeclaredField("consecutiveFailures");
+        f.setAccessible(true);
+        f.set(provider, 5);
+
+        // 探测成功 → 熔断器恢复
+        capturedBodies.clear();
+        responseQueue.add(new StubResponse(200,
+            "{\"id\":\"ok\",\"model\":\"x\",\"choices\":["
+            + "{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"recovered\"},"
+            + "\"finish_reason\":\"stop\"}]}"));
+        Message result = provider.generate(List.of(Message.user("x")), List.of());
+        assertThat(result.content()).contains("recovered");
+
+        // 后续请求正常（不会熔断）
+        capturedBodies.clear();
+        responseQueue.add(new StubResponse(200,
+            "{\"id\":\"ok2\",\"model\":\"x\",\"choices\":["
+            + "{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"normal\"},"
+            + "\"finish_reason\":\"stop\"}]}"));
+        result = provider.generate(List.of(Message.user("x")), List.of());
+        assertThat(result.content()).contains("normal");
+        assertThat(capturedBodies).isNotEmpty();
+    }
+
+    // Test 13: 半开探测失败 → 重新熔断
+    @Test
+    void shouldReopenCircuitOnFailedProbe() throws Exception {
+        // 5 次失败 → 熔断器开启
+        for (int i = 0; i < 5; i++) {
+            responseQueue.add(new StubResponse(500,
+                "{\"error\":{\"message\":\"server error " + i + "\"}}"));
+        }
+        for (int i = 0; i < 5; i++) {
+            try { provider.generate(List.of(Message.user("x")), List.of()); }
+            catch (LLMException e) { /* expected */ }
+        }
+
+        // 用反射将 circuitOpenUntil 设为过去 → HALF_OPEN
+        java.lang.reflect.Field f = OpenAIProvider.class.getDeclaredField("circuitOpenUntil");
+        f.setAccessible(true);
+        f.set(provider, System.currentTimeMillis() - 1000);
+        f = OpenAIProvider.class.getDeclaredField("consecutiveFailures");
+        f.setAccessible(true);
+        f.set(provider, 5);
+
+        // 探测失败 → 重新熔断
+        responseQueue.add(new StubResponse(500,
+            "{\"error\":{\"message\":\"still broken\"}}"));
+        try { provider.generate(List.of(Message.user("x")), List.of()); }
+        catch (LLMException e) { /* expected */ }
+
+        // 下一次直接快速失败
+        capturedBodies.clear();
+        assertThatThrownBy(() ->
+            provider.generate(List.of(Message.user("x")), List.of()))
+            .isInstanceOf(LLMException.class)
+            .hasMessageContaining("熔断器开启");
+        assertThat(capturedBodies).isEmpty();
+    }
+
+    // Test 14: generateStream 也受熔断器保护
+    @Test
+    void shouldFastFailStreamOnOpenCircuit() {
+        for (int i = 0; i < 5; i++) {
+            responseQueue.add(new StubResponse(400,
+                "{\"error\":{\"message\":\"bad request " + i + "\"}}"));
+        }
+        for (int i = 0; i < 5; i++) {
+            try { provider.generate(List.of(Message.user("x")), List.of()); }
+            catch (LLMException e) { /* expected */ }
+        }
+
+        assertThatThrownBy(() ->
+            provider.generateStream(List.of(Message.user("x")), List.of(), t -> {}))
+            .isInstanceOf(LLMException.class)
+            .hasMessageContaining("熔断器开启");
+    }
 }

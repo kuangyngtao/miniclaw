@@ -21,4 +21,7 @@ public interface Registry {
 
     /** 按名称查找 */
     java.util.Optional<Tool> lookup(String name);
+
+    /** 查询指定名称的工具是否为只读工具 */
+    boolean isReadOnly(String toolName);
 }
