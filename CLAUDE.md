@@ -17,7 +17,7 @@ miniclaw 是 [OpenClaw](https://openclaw.ai/) 的 Java CLI 实现——本地 AI
 | 层 | 职责 | V1 完成度 | 已实现 | 待实现 |
 |----|------|-----------|--------|--------|
 | 入口交互层 | CLI REPL + HITL 审批 | ▓▓▓▓ 85% | CLI REPL（Picocli）、JLine3 REPL（历史持久化 + Tab 补全 + Ctrl+C 跨平台）、`--root` 工作目录限制、HITL 审批（ASK 模式）、权限模式切换（AUTO/ASK/PLAN）、`/clear` `/compact` `/context` 命令、FIGlet Banner + 工作目录 + 入门提示、Token 用量实时显示 | — |
-| 核心引擎层 | Main Loop (ReAct) + LLM 适配器 | ▓▓▓▓ 90% | ReAct Loop、多轮会话上下文、三层迭代控制（死循环检测+进度提醒+硬上限）、OpenAI/DeepSeek Provider（含熔断器）、TWO_STAGE 慢思考（仅首轮规划）、流式输出、并行工具调用（读工具虚拟线程并发）、PermissionMode 引擎层权限控制、Ctrl+C 优雅中断 | SubAgent 引擎、多模型路由 |
+| 核心引擎层 | Main Loop (ReAct) + LLM 适配器 | ▓▓▓▓ 95% | ReAct Loop、多轮会话上下文、三层迭代控制（死循环检测+进度提醒+硬上限）、OpenAI/DeepSeek Provider（含熔断器）、TWO_STAGE 慢思考（仅首轮规划）、流式输出、并行工具调用（读工具虚拟线程并发）、PermissionMode 引擎层权限控制、Ctrl+C 优雅中断、SubAgent 引擎（task 工具 + explore/general + 并行派发 + 权限继承） | 多模型路由 |
 | 上下文工程层 | Prompt 组装 + Token 截断 + 记忆 | ▓▓▓▓ 90% | LadderedCompactor 阶梯压缩（L1 删空行/L2 跨轮去重/L3 LLM 摘要）、DiskMemoryService 磁盘记忆（YAML frontmatter + MEMORY.md 索引）、System Prompt 记忆注入 | 自动记忆提取 |
 | 工具与执行层 | ToolRegistry + Middleware | ▓▓▓▓ 90% | 8 工具（read/write/edit/bash/glob/grep/todo_write/web_fetch）、ToolRegistry、EditTool 四级模糊匹配、`Tool.isReadOnly()` 读写声明、`SafetyInterceptor` 高危命令拦截链、`CommandSafetyInterceptor` 8 条规则 | Git 工具 |
 
@@ -109,8 +109,8 @@ miniclaw 是本地 CLI 工具，不是服务端应用。部署 = `java -jar mini
 | V2.9 | 飞书 IM 通道（嵌入式 HTTP Server + 流式回复 + 多用户会话隔离） | ✅ 已完成 |
 | V2.10 | CLI ↔ 飞书双向共享（多路监听 + 共享锁 + 双向镜像 + 飞书自适应节流） | ✅ 已完成 |
 | V2.11 | JLine3 REPL（历史持久化 + Tab 补全 + 跨平台 Ctrl+C） | ✅ 已完成 |
-| V3 | SubAgent 引擎 | 下一阶段 |
-| V3 | GraalVM native-image 编译（启动 < 0.1s） | 需要瞬启 |
+| V3 | SubAgent 引擎（task 工具 + explore/general + 并行派发虚拟线程 + 权限继承 + 防递归） | ✅ 已完成 |
+| V3.5 | GraalVM native-image 编译（启动 < 0.1s） | 需要瞬启 |
 | 远期 | 本地嵌入模型语义搜索 | grep 无法覆盖的语义场景 |
 
 ### 功能演进
@@ -122,7 +122,7 @@ miniclaw 是本地 CLI 工具，不是服务端应用。部署 = `java -jar mini
 | 引擎 | ~~多轮对话上下文~~ | ~~高~~ | ✅ 已实现：sessionHistory 跨 run() 复用 + clearSession() |
 | 引擎 | ~~迭代控制~~ | ~~高~~ | ✅ 已实现：三层防御（死循环检测+进度提醒+50轮硬上限） |
 | 引擎 | ~~上下文阶梯压缩~~ | ~~高~~ | ✅ 已实现：LadderedCompactor（L1 删空行/L2 跨轮去重/L3 LLM 摘要压缩），Summarizer 接口解耦 context/provider |
-| 引擎 | SubAgent 引擎 | 高 | 派生子 Agent 独立执行，并行派发虚拟线程 |
+| 引擎 | SubAgent 引擎 | 高 | 派生子 Agent 独立执行，并行派发虚拟线程，explore（仅读）和 general（不含 task）两种类型 | ✅ 已完成 |
 | 工具 | ~~高危操作拦截~~ | ~~高~~ | ✅ 已实现：`SafetyInterceptor` 链 + `CommandSafetyInterceptor` 8 条规则，AUTO 模式也生效 |
 | 工具 | ~~WebFetch 工具~~ | ~~中~~ | ✅ 已实现：HTTP GET + Jsoup HTML→text + 15min TTL 缓存 + 1MB/8000 双截断 |
 | 工具 | ~~TodoWrite 工具~~ | ~~中~~ | ✅ 已实现：`TodoWriteTool` 会话级 ephemeral，AtomicReference 存储，status 枚举校验 |
@@ -285,6 +285,7 @@ SPEC 必须包含：做什么 / 不做什么 / 做到什么程度 / 接口定义
 | miniclaw-context | LadderedCompactorTest | 单元 | 6 |
 | miniclaw-engine | AgentEngineTest | Mock 集成 | 10 |
 | miniclaw-engine | PermissionModeTest | Mock 集成 | 9 |
+| miniclaw-engine | SubAgentTest | Mock 集成 | 6 |
 | miniclaw-engine | ReadToolIntegrationTest | E2E 集成 | — |
 | miniclaw-engine | WriteBashIntegrationTest | E2E 集成 | — |
 | miniclaw-engine | EditIntegrationTest | E2E 集成 | — |

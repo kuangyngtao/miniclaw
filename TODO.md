@@ -73,34 +73,34 @@
 
 ---
 
-### 1.4 SubAgent 引擎 `[ ]` **P1**
+### 1.4 SubAgent 引擎 `[x]` **P1** ✅ 2026-05-12
 
 派生子 Agent 独立执行子任务，结果回传主 Agent。
 
 **核心设计：**
 ```
 主 Agent 调用 Task 工具
-  → AgentEngine.spawnSubAgent(instruction, tools?)
-  → 新建子 AgentEngine 实例（隔离的 contextHistory）
+  → AgentEngine 拦截 task 调用（引擎级特殊工具，不注册到 ToolRegistry）
+  → spawnSubAgent() 构造裁剪后的 ToolRegistry + 新 AgentEngine
   → 子 Agent 独立 ReAct 循环直到完成
-  → 返回最终文本结果给主 Agent
-  → 主 Agent 综合判断
+  → 返回最终文本结果给主 Agent → 主 Agent 综合判断
 ```
 
-**关键点：**
-- 子 Agent 共享 ToolRegistry（可裁剪子集，如仅读工具）
-- 子 Agent 上下文与主 Agent 完全隔离
-- 支持并行派发多个子 Agent（虚拟线程）
-- 子 Agent 也需要三层迭代控制
-- 子 Agent 不继承 TWO_STAGE 模式
+**已完成：**
+- `task` 工具作为引擎内置特殊工具（`buildTaskToolDefinition()` 生成 ToolDefinition），不注册到 ToolRegistry
+- `spawnSubAgent(ToolCall)` 方法：解析参数 → 构建子 Registry → new AgentEngine → subEngine.run()
+- `enableSubAgents` volatile 标志防止子 Agent 递归派发（子引擎设为 false）
+- `executeSubAgentsParallel()` — 同一轮多个 task 调用虚拟线程并发派发（CountDownLatch）
+- `executeSequential` 中拦截 task 调用走 spawnSubAgent 路径
+- 两种类型：`explore`（仅读工具，15轮上限）和 `general`（全工具不含 task，25轮上限）
+- 子 Agent 继承主 Agent permissionMode，不继承 TWO_STAGE
+- `SubAgentSpawnEvent` / `SubAgentCompleteEvent` 回调（CopyOnWriteArrayList 模式）
+- CLI 灰色 `[SubAgent]` 前缀打印派发/完成信息
+- `lastRunTurns` package-private 字段跟踪子 Agent 轮次
 
-**实现步骤：**
-1. 新增 `Task` 工具定义 → `miniclaw-tools`
-2. `AgentEngine` 新增 `spawnSubAgent(instruction, maxTurns) → String`
-3. `executeSequential` 中检测 Task 工具调用 → 特殊处理
-4. 并行派发时用 `CountDownLatch` + 虚拟线程
+**测试：** `SubAgentTest.java` — 6 个用例（explore 读工具/ general 写工具/ 并行派发/ 防递归/ PLAN 模式隐藏/ 权限继承）
 
-**影响文件：** 新建 `TaskTool.java`, `AgentEngine.java`
+**影响文件：** `AgentEngine.java`, `MiniclawApp.java`, `SubAgentTest.java`
 
 ---
 
@@ -306,7 +306,13 @@ CLI 斜杠命令调用 `engine.clearSession()` 清空会话历史。
 
 ## 六、测试与质量
 
-### 6.1 CLI 层测试 `[ ]` **P2**
+### 6.1 SubAgent 测试 `[x]` **P2** ✅ 2026-05-12
+
+SubAgent 引擎 6 个 Mock 集成测试（见 1.4）。
+
+---
+	
+### 6.2 CLI 层测试 `[ ]` **P2**
 
 斜杠命令解析、权限模式切换、confirmTool 交互测试。
 
@@ -330,7 +336,8 @@ WebFetch / Task/SubAgent 集成测试。
 已完成 (P0 + 部分 P1/P2):
   ├─ 1.1 多轮对话上下文        ✅ sessionHistory + clearSession
   ├─ 1.2 迭代控制（三层防御）   ✅ 死循环检测 + 进度提醒 + 50轮硬上限
-  └─ 1.3 上下文阶梯压缩        ✅ L1 删空行 + L2 跨轮去重 + L3 LLM 摘要
+  ├─ 1.3 上下文阶梯压缩        ✅ L1 删空行 + L2 跨轮去重 + L3 LLM 摘要
+  ├─ 1.4 SubAgent 引擎         ✅ task 工具 + explore/general + 并行派发 + 权限继承
   ├─ 1.5 熔断器                ✅ CLOSED→OPEN→HALF_OPEN 状态机
   ├─ 2.1 WebFetch 工具         ✅ HTTP GET + Jsoup + 15min 缓存
   ├─ 2.2 TodoWrite 工具        ✅ Agent 自管理任务列表
@@ -345,10 +352,10 @@ WebFetch / Task/SubAgent 集成测试。
   ├─ 飞书 IM 通道               ✅ HTTP Server + 流式编辑 + TokenBatcher + 多用户会话隔离
   └─ CLI ↔ 飞书双向共享         ✅ onToken 多路监听 + 共享锁 + 双向镜像 + ngrok管理 + 配置统一
 
-测试: 109/109 通过
+测试: 115/115 通过
   miniclaw-tools:    46 (20 原有 + 6 TodoWrite + 8 安全拦截器 + 12 WebFetch)
   miniclaw-context:   6 (LadderedCompactor)
-  miniclaw-engine:   19 (AgentEngine 10 + PermissionMode 9)
+  miniclaw-engine:   25 (AgentEngine 10 + PermissionMode 9 + SubAgent 6)
   miniclaw-provider:  14 (9 原有 + 5 熔断器)
   miniclaw-memory:    24 (8 YAML + 8 FileMemoryStore + 8 DiskMemoryService)
   miniclaw-cli:       0 ← 待补充
@@ -363,7 +370,7 @@ P0（基础能力）✅ 已完成
   └─ 1.3 上下文阶梯压缩      ✅
 
 P1（质变特性）
-  ├─ 1.4 SubAgent 引擎          ← 下一批
+  ├─ 1.4 SubAgent 引擎          ✅
   ├─ 2.1 WebFetch 工具          ✅
   ├─ 2.2 TodoWrite 工具         ✅
   └─ 3.1 MemoryStore 磁盘记忆   ✅
