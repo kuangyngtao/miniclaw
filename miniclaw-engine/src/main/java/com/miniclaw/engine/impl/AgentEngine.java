@@ -7,7 +7,9 @@ import com.miniclaw.engine.PermissionMode;
 import com.miniclaw.engine.ThinkingMode;
 import com.miniclaw.provider.LLMException;
 import com.miniclaw.provider.LLMProvider;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.miniclaw.tools.Registry;
+import com.miniclaw.tools.ToolRegistry;
 import com.miniclaw.tools.schema.Message;
 import com.miniclaw.tools.schema.Role;
 import com.miniclaw.tools.schema.ToolCall;
@@ -33,6 +35,10 @@ public class AgentEngine implements AgentLoop {
 
     private static final Logger log = LoggerFactory.getLogger(AgentEngine.class);
 
+    // === SubAgent 事件 record（供 CLI 回调） ===
+    public record SubAgentSpawnEvent(String instruction, String type, int maxTurns) {}
+    public record SubAgentCompleteEvent(String summary, int turnsUsed, int tokens, long durationMs) {}
+
     private String buildSystemPrompt() {
         String base = "You are miniclaw, an expert coding assistant. ";
         String prompt = switch (permissionMode) {
@@ -49,6 +55,19 @@ public class AgentEngine implements AgentLoop {
                 + "You have full access to all tools. Think step by step before acting.";
         };
 
+        if (permissionMode != PermissionMode.PLAN && enableSubAgents) {
+            prompt += "\n\n## Task Delegation\n\n"
+                + "You have access to a `task` tool for delegating self-contained "
+                + "subtasks to sub-agents with isolated context windows. "
+                + "Use `task` to search many files, analyze multiple modules, "
+                + "or independently implement a sub-feature - this keeps your context clean. "
+                + "Instructions MUST be self-contained (the sub-agent cannot see your "
+                + "conversation history). You can call multiple `task` tools in one turn "
+                + "for parallel execution. "
+                + "subagent_type: `explore` (read-only, for search/analysis) "
+                + "or `general` (full tools, for implementation).";
+        }
+
         if (memoryIndex != null && !memoryIndex.isBlank()) {
             prompt += "\n\n## Available Memory\n\nThe following is context gathered "
                 + "from previous sessions. Use it to tailor your responses.\n\n"
@@ -58,11 +77,45 @@ public class AgentEngine implements AgentLoop {
         return prompt;
     }
 
+    private static ToolDefinition buildTaskToolDefinition() {
+        return new ToolDefinition(
+            TASK_TOOL_NAME,
+            "Delegate a self-contained subtask to a sub-agent with isolated context. "
+                + "Use this to search many files, analyze multiple modules, or independently "
+                + "implement a sub-feature while keeping your main context clean. "
+                + "Instructions must be self-contained and specific. "
+                + "Use subagent_type `explore` (read-only) for search/analysis, "
+                + "`general` for implementation tasks.",
+            """
+            {
+              "type": "object",
+              "properties": {
+                "instruction": {
+                  "type": "string",
+                  "description": "Clear, self-contained instruction for the sub-agent. Include ALL context needed - the sub-agent cannot see your conversation history."
+                },
+                "subagent_type": {
+                  "type": "string",
+                  "enum": ["explore", "general"],
+                  "description": "explore = read-only tools for search/analysis. general = full tools for implementation."
+                }
+              },
+              "required": ["instruction"]
+            }"""
+        );
+    }
+
     private static final int MAX_TURNS = 50;
     private static final int MAX_CONTEXT_TOKENS = 8000;
     private static final int DEAD_LOOP_THRESHOLD = 3;
     private static final int PROGRESS_REMINDER_INTERVAL = 10;
     private static final List<ToolDefinition> EMPTY_TOOLS = Collections.emptyList();
+
+    // SubAgent 常量
+    private static final int SUB_MAX_TURNS_EXPLORE = 15;
+    private static final int SUB_MAX_TURNS_GENERAL = 25;
+    private static final int SUB_PROGRESS_INTERVAL = 7;
+    private static final String TASK_TOOL_NAME = "task";
 
     private final LLMProvider provider;
     private final Registry registry;
@@ -78,8 +131,12 @@ public class AgentEngine implements AgentLoop {
     private final List<Consumer<String>> onThinkingTokenListeners = new CopyOnWriteArrayList<>();
     private volatile Predicate<ToolCall> permissionHandler;
     private volatile boolean interrupted;
+    volatile int lastRunTurns;
+    volatile boolean enableSubAgents = true;
     private final List<Consumer<String>> onTokenListeners = new CopyOnWriteArrayList<>();
     private final AtomicBoolean busy = new AtomicBoolean(false);
+    private final List<Consumer<SubAgentSpawnEvent>> onSubAgentSpawnListeners = new CopyOnWriteArrayList<>();
+    private final List<Consumer<SubAgentCompleteEvent>> onSubAgentCompleteListeners = new CopyOnWriteArrayList<>();
 
     public AgentEngine(LLMProvider provider, Registry registry, String workDir) {
         this(provider, registry, workDir, ThinkingMode.OFF, null, null, null);
@@ -124,6 +181,7 @@ public class AgentEngine implements AgentLoop {
         List<Message> contextHistory = sessionHistory;
 
         int turnCount = 0;
+        lastRunTurns = 0;
 
         while (true) {
             if (interrupted) {
@@ -242,7 +300,10 @@ public class AgentEngine implements AgentLoop {
                     .toList();
                 log.info("[Engine] PLAN 模式: 仅暴露 {} 个读工具", availableTools.size());
             } else {
-                availableTools = registry.getAvailableTools();
+                availableTools = new ArrayList<>(registry.getAvailableTools());
+                if (enableSubAgents) {
+                    availableTools.add(buildTaskToolDefinition());
+                }
             }
             if (thinkingMode == ThinkingMode.TWO_STAGE) {
                 log.info("[Engine] 慢思考阶段2: 带工具执行 ({})...", availableTools.size());
@@ -278,6 +339,7 @@ public class AgentEngine implements AgentLoop {
             // 退出条件：没有工具调用
             if (responseMsg.toolCalls() == null || responseMsg.toolCalls().isEmpty()) {
                 log.info("[Engine] 任务完成，退出循环。");
+                lastRunTurns = turnCount;
                 return responseMsg.content() != null ? responseMsg.content() : "";
             }
 
@@ -286,7 +348,10 @@ public class AgentEngine implements AgentLoop {
             log.info("[Engine] 模型请求调用 {} 个工具, {} 模式...",
                 calls.size(), allReadOnly(calls) ? "并行" : "串行");
 
-            if (allReadOnly(calls)) {
+            if (calls.stream().allMatch(c -> TASK_TOOL_NAME.equals(c.name()))) {
+                log.info("[Engine] SubAgent 并行: {} 个子任务", calls.size());
+                executeSubAgentsParallel(calls, contextHistory);
+            } else if (allReadOnly(calls)) {
                 executeParallel(calls, contextHistory);
             } else {
                 executeSequential(calls, contextHistory);
@@ -345,6 +410,12 @@ public class AgentEngine implements AgentLoop {
 
     private void executeSequential(List<ToolCall> calls, List<Message> contextHistory) {
         for (ToolCall call : calls) {
+            // task 工具由引擎直接处理，不走 Registry
+            if (TASK_TOOL_NAME.equals(call.name())) {
+                log.info("  -> [SubAgent] 派发子任务");
+                contextHistory.add(Message.toolResult(call.id(), spawnSubAgent(call)));
+                continue;
+            }
             if (!registry.isReadOnly(call.name())) {
                 if (permissionMode == PermissionMode.PLAN) {
                     contextHistory.add(Message.toolResult(call.id(),
@@ -369,6 +440,100 @@ public class AgentEngine implements AgentLoop {
             }
             contextHistory.add(Message.toolResult(call.id(), result.output()));
         }
+    }
+
+    private void executeSubAgentsParallel(List<ToolCall> calls, List<Message> contextHistory) {
+        int n = calls.size();
+        String[] results = new String[n];
+        CountDownLatch latch = new CountDownLatch(n);
+
+        for (int i = 0; i < n; i++) {
+            final int idx = i;
+            final ToolCall call = calls.get(i);
+            Thread.ofVirtual().start(() -> {
+                try {
+                    results[idx] = spawnSubAgent(call);
+                } finally {
+                    latch.countDown();
+                }
+            });
+        }
+
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("[Engine] SubAgent 并行执行被中断");
+        }
+
+        for (int i = 0; i < n; i++) {
+            contextHistory.add(Message.toolResult(calls.get(i).id(), results[i]));
+        }
+    }
+
+    // === SubAgent 派发 ===
+
+    private String spawnSubAgent(ToolCall call) {
+        JsonNode args = call.arguments();
+        String instruction = args.has("instruction") ? args.get("instruction").asText() : "";
+        if (instruction.isBlank()) {
+            return "Error: sub-agent instruction is required.";
+        }
+
+        String type = args.has("subagent_type") ? args.get("subagent_type").asText() : "general";
+        if (!"explore".equals(type) && !"general".equals(type)) {
+            type = "general";
+        }
+
+        int maxTurns = "explore".equals(type) ? SUB_MAX_TURNS_EXPLORE : SUB_MAX_TURNS_GENERAL;
+
+        // 通知 CLI 层
+        SubAgentSpawnEvent spawnEvent = new SubAgentSpawnEvent(instruction, type, maxTurns);
+        for (var listener : onSubAgentSpawnListeners) {
+            try { listener.accept(spawnEvent); } catch (Exception ignored) {}
+        }
+
+        // 构建子 Registry：explore 仅读工具，general 排除 task
+        ToolRegistry subRegistry = new ToolRegistry();
+        for (ToolDefinition td : registry.getAvailableTools()) {
+            if (TASK_TOOL_NAME.equals(td.name())) continue;
+            if ("explore".equals(type) && !registry.isReadOnly(td.name())) continue;
+            registry.lookup(td.name()).ifPresent(subRegistry::register);
+        }
+        log.info("[SubAgent] {} 模式, 可用工具: {}", type, subRegistry.count());
+
+        // 创建子引擎：不继承 TWO_STAGE，继承 permissionMode
+        AgentEngine subEngine = new AgentEngine(provider, subRegistry, workDir,
+            ThinkingMode.OFF, null, null, memoryIndex);
+        subEngine.setPermissionMode(permissionMode);
+        subEngine.enableSubAgents = false; // 防止递归委派
+        if (permissionHandler != null) {
+            subEngine.setPermissionHandler(permissionHandler);
+        }
+        // 子引擎不流式输出（避免干扰主 Agent 显示）
+        subEngine.lastRunTurns = 0;
+
+        long startMs = System.currentTimeMillis();
+        String result;
+        try {
+            result = subEngine.run(instruction);
+        } catch (Exception e) {
+            log.error("[SubAgent] 执行异常: {}", e.getMessage(), e);
+            result = "[A-003] SubAgent execution failed: " + e.getMessage();
+        }
+        long durationMs = System.currentTimeMillis() - startMs;
+
+        int turns = subEngine.lastRunTurns;
+        int tokens = subEngine.getEstimatedTokens();
+
+        // 通知 CLI 层完成
+        SubAgentCompleteEvent completeEvent = new SubAgentCompleteEvent(result, turns, tokens, durationMs);
+        for (var listener : onSubAgentCompleteListeners) {
+            try { listener.accept(completeEvent); } catch (Exception ignored) {}
+        }
+
+        log.info("[SubAgent] 完成: {} turns, {} tokens, {}ms", turns, tokens, durationMs);
+        return result;
     }
 
     @Override
@@ -424,6 +589,14 @@ public class AgentEngine implements AgentLoop {
 
     public void onThinkingToken(Consumer<String> callback) {
         if (callback != null) onThinkingTokenListeners.add(callback);
+    }
+
+    public void onSubAgentSpawn(Consumer<SubAgentSpawnEvent> listener) {
+        if (listener != null) onSubAgentSpawnListeners.add(listener);
+    }
+
+    public void onSubAgentComplete(Consumer<SubAgentCompleteEvent> listener) {
+        if (listener != null) onSubAgentCompleteListeners.add(listener);
     }
 
     @Override

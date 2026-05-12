@@ -139,6 +139,22 @@ public class MiniclawApp implements Runnable {
             return answer.equals("y") || answer.equals("yes");
         });
 
+        // SubAgent 回调 — 用户可见的派发/完成信息
+        engine.onSubAgentSpawn(event -> {
+            String inst = event.instruction();
+            if (inst.length() > 100) inst = inst.substring(0, 100) + "...";
+            System.out.println(GRAY + "  [SubAgent] dispatching: \"" + inst + "\" ("
+                + event.type() + ", max " + event.maxTurns() + " turns)" + RESET);
+        });
+        engine.onSubAgentComplete(event -> {
+            String summary = event.summary();
+            if (summary.length() > 100) summary = summary.substring(0, 100) + "...";
+            String line = summary.replace("\n", " ");
+            System.out.println(GRAY + "  [SubAgent] done (" + event.turnsUsed()
+                + " turns, ~" + event.tokens() + " tk, " + event.durationMs() + "ms) → "
+                + line + RESET);
+        });
+
         log.info("miniclaw started — model={}, thinking={}", model, mode);
 
         printBanner(model, registry.count(), resolvedWorkDir.toString());
