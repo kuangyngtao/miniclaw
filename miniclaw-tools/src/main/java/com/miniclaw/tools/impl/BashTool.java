@@ -45,7 +45,17 @@ public class BashTool implements Tool {
         if (!isWindows) {
             return new String[]{"bash", "-c"};
         }
-        // 优先找 Git Bash，避免命中 C:\Windows\System32\bash.exe (WSL shim)
+        // 1. 环境变量 GIT_BASH
+        String envBash = System.getenv("GIT_BASH");
+        if (envBash != null && java.nio.file.Files.exists(java.nio.file.Path.of(envBash))) {
+            return new String[]{envBash, "-c"};
+        }
+        // 2. PATH 中查找 git 安装目录下的 bash（避免 System32 的 WSL shim）
+        String pathBash = findBashInPath();
+        if (pathBash != null) {
+            return new String[]{pathBash, "-c"};
+        }
+        // 3. 常见安装路径
         for (String candidate : new String[]{
                 "D:\\Git\\usr\\bin\\bash.exe",
                 "D:\\Git\\bin\\bash.exe",
@@ -56,6 +66,19 @@ public class BashTool implements Tool {
             }
         }
         return new String[]{"cmd", "/c"};
+    }
+
+    private static String findBashInPath() {
+        String pathEnv = System.getenv("PATH");
+        if (pathEnv == null) return null;
+        for (String dir : pathEnv.split(java.io.File.pathSeparator)) {
+            if (dir.toLowerCase().contains("system32")) continue;
+            java.nio.file.Path candidate = java.nio.file.Path.of(dir, "bash.exe");
+            if (java.nio.file.Files.exists(candidate)) {
+                return candidate.toString();
+            }
+        }
+        return null;
     }
 
     public BashTool(Path workDir) {
@@ -95,7 +118,17 @@ public class BashTool implements Tool {
         }
 
         // 2. 构建进程：绑定 workDir + shell 包装
-        ProcessBuilder pb = new ProcessBuilder(shell, shellFlag, cmdNode.asText());
+        String command = cmdNode.asText();
+        String useShell = shell;
+        String useFlag = shellFlag;
+
+        // Windows: .cmd/.bat 文件直接走 cmd.exe /c，避免 bash 嵌套引号卡死
+        if (isWindows() && needsCmdExe(command) && !"cmd".equals(shell)) {
+            useShell = "cmd";
+            useFlag = "/c";
+        }
+
+        ProcessBuilder pb = new ProcessBuilder(useShell, useFlag, command);
         pb.directory(workDir.toFile());
         pb.redirectErrorStream(true);
 
@@ -146,5 +179,19 @@ public class BashTool implements Tool {
             return head + "\n\n...[终端输出过长，已截断至前 " + MAX_OUTPUT_BYTES + " 字节]...";
         }
         return output;
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name").toLowerCase().contains("win");
+    }
+
+    private static boolean needsCmdExe(String command) {
+        String[] parts = command.trim().split("\\s+");
+        if (parts.length == 0) return false;
+        // Check if the first word (the executable) ends with .cmd or .bat
+        String exe = parts[0].toLowerCase();
+        return exe.endsWith(".cmd") || exe.endsWith(".bat")
+            // Also detect "cmd.exe /c ..." being passed to bash (double wrapping)
+            || exe.equals("cmd.exe") || exe.equals("cmd");
     }
 }

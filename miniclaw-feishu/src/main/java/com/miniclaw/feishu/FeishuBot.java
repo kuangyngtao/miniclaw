@@ -2,6 +2,7 @@ package com.miniclaw.feishu;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.miniclaw.engine.AgentStateEvent;
 import com.miniclaw.engine.PermissionMode;
 import com.miniclaw.engine.impl.AgentEngine;
 import com.sun.net.httpserver.HttpServer;
@@ -41,6 +42,7 @@ public class FeishuBot {
     private volatile Consumer<String> onFeishuInput;
     private TokenBatcher cliBatcher;
     private Consumer<String> cliListener;
+    private volatile Consumer<AgentStateEvent> cliStateListener;
     private String cliMsgId;
     private HttpServer server;
     private Process ngrokProcess;
@@ -248,8 +250,16 @@ public class FeishuBot {
             }
 
             TokenBatcher batcher = new TokenBatcher(msgId, api);
-            Consumer<String> listener = batcher::onToken;
-            engine.addOnTokenListener(listener);
+            Consumer<String> tokenListener = batcher::onToken;
+            engine.addOnTokenListener(tokenListener);
+
+            Consumer<AgentStateEvent> stateListener = event -> {
+                String status = mapStateToStatus(event);
+                try {
+                    api.editMessage(msgId, status);
+                } catch (Exception ignored) {}
+            };
+            engine.onStateChange(stateListener);
 
             PermissionMode savedMode = engine.permissionMode();
             engine.setPermissionMode(PermissionMode.AUTO);
@@ -263,7 +273,8 @@ public class FeishuBot {
                 return;
             } finally {
                 engine.setPermissionMode(savedMode);
-                engine.removeOnTokenListener(listener);
+                engine.removeOnTokenListener(tokenListener);
+                engine.removeOnStateChangeListener(stateListener);
             }
 
             String finalContent = result != null && !result.isBlank()
@@ -300,11 +311,19 @@ public class FeishuBot {
             cliBatcher = new TokenBatcher(cliMsgId, api);
             cliListener = cliBatcher::onToken;
             engine.addOnTokenListener(cliListener);
+            cliStateListener = event -> {
+                String status = mapStateToStatus(event);
+                try {
+                    api.editMessage(cliMsgId, status);
+                } catch (Exception ignored) {}
+            };
+            engine.onStateChange(cliStateListener);
         } catch (Exception e) {
             log.warn("Failed to start Feishu mirror: {}", e.getMessage());
             cliMsgId = null;
             cliBatcher = null;
             cliListener = null;
+            cliStateListener = null;
         }
     }
 
@@ -313,6 +332,10 @@ public class FeishuBot {
         if (cliMsgId == null || cliBatcher == null) return;
         try {
             engine.removeOnTokenListener(cliListener);
+            if (cliStateListener != null) {
+                engine.removeOnStateChangeListener(cliStateListener);
+                cliStateListener = null;
+            }
             String content = (result != null && !result.isBlank())
                 ? result : cliBatcher.buffer.toString();
             if (content.isBlank()) content = "No output.";
@@ -323,6 +346,7 @@ public class FeishuBot {
             cliBatcher = null;
             cliMsgId = null;
             cliListener = null;
+            cliStateListener = null;
         }
     }
 
@@ -354,6 +378,29 @@ public class FeishuBot {
     private static String padRight(String s, int n) {
         if (s == null || s.length() >= n) return s;
         return s + " ".repeat(n - s.length());
+    }
+
+    // ─── State Mapping ───────────────────────────────────────────────
+
+    private static String mapStateToStatus(AgentStateEvent event) {
+        return switch (event.state()) {
+            case IDLE -> "▋ 准备中…";
+            case PLANNING -> "▋ 规划中…";
+            case REASONING -> "▋ 思考中…";
+            case EXECUTING -> {
+                @SuppressWarnings("unchecked")
+                var toolNames = (java.util.List<String>) event.metadata()
+                    .getOrDefault("toolNames", java.util.List.of());
+                String firstTool = toolNames.isEmpty() ? "" : toolNames.get(0);
+                yield firstTool.isEmpty() ? "▋ 执行中…" : "▋ 执行 " + firstTool + "…";
+            }
+            case REPLYING -> "▋ 生成回复…";
+            case INTERRUPTED -> "已中断";
+            case ERROR -> {
+                String err = (String) event.metadata().getOrDefault("error", "");
+                yield err.isEmpty() ? "执行出错" : "出错: " + err;
+            }
+        };
     }
 
     // ─── TokenBatcher ────────────────────────────────────────────────
