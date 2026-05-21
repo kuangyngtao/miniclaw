@@ -4,12 +4,11 @@ import com.miniclaw.context.ContextManager;
 import com.miniclaw.context.Summarizer;
 import com.miniclaw.tools.schema.Message;
 import com.miniclaw.tools.schema.Role;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
+import com.miniclaw.tools.schema.ToolCall;
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
@@ -23,6 +22,10 @@ public class LadderedCompactor implements ContextManager {
     private static final int CHARS_PER_TOKEN_CN = 4;
     private static final int MAX_LINE_LENGTH = 300;
     private static final int RECENT_TURNS = 3;
+    private static final int HEAD_TAIL_THRESHOLD = 1000;
+    private static final int HEAD_TAIL_KEEP = 500;
+    private static final double PRESSURE_THRESHOLD = 0.6;
+    private static final double L3_THRESHOLD = 0.9;
 
     private static final Set<String> LOW_SIGNAL_PREFIXES = Set.of(
         "executing...", "reading file...", "done.", "running...", "processing..."
@@ -65,46 +68,160 @@ public class LadderedCompactor implements ContextManager {
 
     @Override
     public List<Message> compact(List<Message> messages, int maxTokens) {
-        int currentTokens = estimateTokens(messages);
+        Map<String, String> toolNameIndex = buildToolNameIndex(messages);
+        int recentBoundary = findRecentTurnsBoundary(messages);
+
+        List<Message> result = applyAlwaysOnRules(messages, recentBoundary, toolNameIndex);
+
+        int currentTokens = estimateTokens(result);
         double usage = (double) currentTokens / maxTokens;
 
-        if (usage < 0.6) {
-            return new ArrayList<>(messages);
+        if (usage < PRESSURE_THRESHOLD) {
+            return result;
         }
 
-        int recentBoundary = findRecentTurnsBoundary(messages);
-        List<Message> result = new ArrayList<>();
-
-        // 保护区 (recent N turns + system): 不压缩
-        // 压缩区 (older turns): 阶梯压缩
-
-        if (usage < 0.8) {
-            result = compactL1(messages, recentBoundary);
-        } else {
-            result = compactL2(messages, recentBoundary);
-        }
-
+        int beforePressure = currentTokens;
+        result = applyPressureRules(result, recentBoundary);
         int afterTokens = estimateTokens(result);
-        int reductionPct = (int) (100.0 * (currentTokens - afterTokens) / currentTokens);
-        log.info("[Compactor] 压缩完成: {} → {} tokens (减少 {}%)",
-            currentTokens, afterTokens, reductionPct);
+        int reductionPct = (int) (100.0 * (beforePressure - afterTokens) / beforePressure);
+        log.info("[Compactor] 压力压缩: {} → {} tokens (减少 {}%)",
+            beforePressure, afterTokens, reductionPct);
 
-        if ((double) afterTokens / maxTokens > 0.95 && summarizer != null) {
+        if ((double) afterTokens / maxTokens > L3_THRESHOLD && summarizer != null) {
             List<Message> l3 = compactL3(result, recentBoundary);
             if (l3 != null) {
                 int l3Tokens = estimateTokens(l3);
-                log.info("[Compactor] L3 LLM 摘要完成: {} → {} tokens", afterTokens, l3Tokens);
+                log.info("[Compactor] L3 LLM 摘要: {} → {} tokens", afterTokens, l3Tokens);
                 return l3;
             }
         }
 
-        if ((double) afterTokens / maxTokens > 0.95) {
-            log.info("[Compactor] Token 仍超限 ({} tokens)，L3 未执行 (summarizer={})",
+        if ((double) afterTokens / maxTokens > L3_THRESHOLD) {
+            log.info("[Compactor] Token 仍超限 ({} tokens), L3 未执行 (summarizer={})",
                 afterTokens, summarizer != null ? "已配置但失败" : "未配置");
         }
 
         return result;
     }
+
+    // === 工具名索引：toolCallId → toolName ===
+
+    private Map<String, String> buildToolNameIndex(List<Message> messages) {
+        Map<String, String> index = new HashMap<>();
+        for (Message msg : messages) {
+            if (msg.role() == Role.ASSISTANT && msg.toolCalls() != null) {
+                for (ToolCall tc : msg.toolCalls()) {
+                    if (tc.id() != null) {
+                        index.put(tc.id(), tc.name());
+                    }
+                }
+            }
+        }
+        return index;
+    }
+
+    // === 常驻规则：每次 compact() 都执行，不依赖 token 阈值 ===
+
+    private List<Message> applyAlwaysOnRules(List<Message> messages, int recentBoundary,
+                                             Map<String, String> toolNameIndex) {
+        List<Message> result = new ArrayList<>(messages.size());
+        for (int i = 0; i < messages.size(); i++) {
+            Message msg = messages.get(i);
+            boolean inProtectionZone = i >= recentBoundary || msg.role() == Role.SYSTEM;
+
+            if (inProtectionZone) {
+                result.add(applyProtectionZoneRules(msg));
+            } else {
+                result.add(applyCompressibleZoneAlwaysOn(msg, toolNameIndex));
+            }
+        }
+        return result;
+    }
+
+    private Message applyProtectionZoneRules(Message msg) {
+        if (msg.role() == Role.TOOL && msg.content() != null && msg.content().length() > HEAD_TAIL_THRESHOLD) {
+            return headTailTruncate(msg);
+        }
+        return msg;
+    }
+
+    private Message applyCompressibleZoneAlwaysOn(Message msg, Map<String, String> toolNameIndex) {
+        if (msg.role() == Role.TOOL) {
+            String toolName = toolNameIndex.getOrDefault(msg.toolCallId(), "unknown");
+            return maskToolOutput(msg, toolName);
+        }
+        if (msg.role() == Role.ASSISTANT && msg.toolCalls() != null && !msg.toolCalls().isEmpty()) {
+            return msg; // 保留逻辑链
+        }
+        return msg;
+    }
+
+    // === 压力规则：token 紧张时触发 ===
+
+    private List<Message> applyPressureRules(List<Message> messages, int recentBoundary) {
+        List<Message> result = new ArrayList<>(messages.size());
+        for (int i = 0; i < messages.size(); i++) {
+            Message msg = messages.get(i);
+            boolean inProtectionZone = i >= recentBoundary || msg.role() == Role.SYSTEM;
+
+            if (inProtectionZone) {
+                result.add(msg);
+            } else if (msg.role() == Role.TOOL) {
+                result.add(msg); // 常驻已掩码
+            } else if (msg.role() == Role.ASSISTANT && msg.toolCalls() != null && !msg.toolCalls().isEmpty()) {
+                result.add(msg); // 常驻已保留
+            } else {
+                result.add(compressLineLevel(msg));
+            }
+        }
+        return result;
+    }
+
+    private Message compressLineLevel(Message msg) {
+        String content = msg.content();
+        if (content == null || content.isEmpty()) return msg;
+
+        String[] lines = content.split("\n", -1);
+        StringBuilder sb = new StringBuilder();
+        for (String line : lines) {
+            String trimmed = line.stripTrailing();
+            if (trimmed.isEmpty()) continue;
+            if (isLowSignal(trimmed)) continue;
+            if (trimmed.length() > MAX_LINE_LENGTH) {
+                sb.append(trimmed, 0, MAX_LINE_LENGTH).append("...\n");
+            } else {
+                sb.append(trimmed).append('\n');
+            }
+        }
+
+        String resultStr = sb.toString().stripTrailing();
+        if (resultStr.isEmpty()) {
+            return new Message(msg.role(), "[empty after compression]", msg.toolCalls(), msg.toolCallId());
+        }
+        return new Message(msg.role(), resultStr, msg.toolCalls(), msg.toolCallId());
+    }
+
+    // === 掩码与截断 ===
+
+    private Message maskToolOutput(Message msg, String toolName) {
+        int len = msg.content() != null ? msg.content().length() : 0;
+        return new Message(Role.TOOL,
+            "[tool:" + toolName + " output — " + len + " bytes]",
+            null, msg.toolCallId());
+    }
+
+    private Message headTailTruncate(Message msg) {
+        String content = msg.content();
+        int len = content.length();
+        int truncated = len - HEAD_TAIL_KEEP * 2;
+        if (truncated <= 0) return msg;
+        String newContent = content.substring(0, HEAD_TAIL_KEEP)
+            + "\n…[truncated " + truncated + " bytes]…\n"
+            + content.substring(len - HEAD_TAIL_KEEP);
+        return new Message(Role.TOOL, newContent, null, msg.toolCallId());
+    }
+
+    // === 保护区边界 ===
 
     private int findRecentTurnsBoundary(List<Message> messages) {
         int userCount = 0;
@@ -119,93 +236,8 @@ public class LadderedCompactor implements ContextManager {
         return 0;
     }
 
-    // === L1: 删空行 + 截断超长行 ===
-    private List<Message> compactL1(List<Message> messages, int recentBoundary) {
-        List<Message> result = new ArrayList<>();
-        for (int i = 0; i < messages.size(); i++) {
-            Message msg = messages.get(i);
-            if (i >= recentBoundary || msg.role() == Role.SYSTEM) {
-                result.add(msg);
-                continue;
-            }
-            result.add(compressContentL1(msg));
-        }
-        return result;
-    }
+    // === L3: LLM 摘要（方法体不变） ===
 
-    private Message compressContentL1(Message msg) {
-        String content = msg.content();
-        if (content == null || content.isEmpty()) return msg;
-
-        String[] lines = content.split("\n", -1);
-        StringBuilder sb = new StringBuilder();
-        for (String line : lines) {
-            String trimmed = line.stripTrailing();
-            if (trimmed.isEmpty()) continue;
-            if (trimmed.length() > MAX_LINE_LENGTH) {
-                sb.append(trimmed.substring(0, MAX_LINE_LENGTH)).append("...\n");
-            } else {
-                sb.append(trimmed).append('\n');
-            }
-        }
-        return new Message(msg.role(), sb.toString().stripTrailing(), msg.toolCalls(), msg.toolCallId());
-    }
-
-    // === L2: 跨轮去重 + 删低信号行 ===
-    private List<Message> compactL2(List<Message> messages, int recentBoundary) {
-        List<Message> result = new ArrayList<>();
-        Set<String> contentHashes = new HashSet<>();
-
-        for (int i = 0; i < messages.size(); i++) {
-            Message msg = messages.get(i);
-            if (i >= recentBoundary || msg.role() == Role.SYSTEM) {
-                result.add(msg);
-                continue;
-            }
-
-            if (msg.role() == Role.TOOL && msg.content() != null) {
-                String hash = hash8(msg.content());
-                if (!contentHashes.add(hash)) {
-                    // 跨轮重复：替换为简短提示
-                    int savedBytes = msg.content().length();
-                    result.add(new Message(Role.TOOL,
-                        "[content unchanged from earlier turn — " + savedBytes + " bytes omitted]",
-                        null, msg.toolCallId()));
-                    continue;
-                }
-            }
-
-            result.add(compressContentL2(msg));
-        }
-        return result;
-    }
-
-    private Message compressContentL2(Message msg) {
-        String content = msg.content();
-        if (content == null || content.isEmpty()) return msg;
-
-        String[] lines = content.split("\n", -1);
-        StringBuilder sb = new StringBuilder();
-        for (String line : lines) {
-            String trimmed = line.stripTrailing();
-            if (trimmed.isEmpty()) continue;
-            if (trimmed.length() > MAX_LINE_LENGTH) {
-                sb.append(trimmed.substring(0, MAX_LINE_LENGTH)).append("...\n");
-                continue;
-            }
-            // 跳过低信号行
-            if (isLowSignal(trimmed)) continue;
-            sb.append(trimmed).append('\n');
-        }
-
-        String result = sb.toString().stripTrailing();
-        if (result.isEmpty() && msg.role() == Role.TOOL) {
-            return new Message(Role.TOOL, "[low-signal output removed]", null, msg.toolCallId());
-        }
-        return new Message(msg.role(), result, msg.toolCalls(), msg.toolCallId());
-    }
-
-    // === L3: LLM 摘要 ===
     private List<Message> compactL3(List<Message> messages, int recentBoundary) {
         if (recentBoundary == 0) return null;
 
@@ -237,7 +269,6 @@ public class LadderedCompactor implements ContextManager {
         if (summary == null || summary.isBlank()) return null;
 
         List<Message> result = new ArrayList<>();
-        // 保留 system prompt（如果存在）
         for (Message msg : messages) {
             if (msg.role() == Role.SYSTEM) {
                 result.add(msg);
@@ -249,6 +280,8 @@ public class LadderedCompactor implements ContextManager {
         return result;
     }
 
+    // === 低信号判断 ===
+
     private boolean isLowSignal(String line) {
         String lower = line.stripLeading().toLowerCase();
         for (String prefix : LOW_SIGNAL_PREFIXES) {
@@ -257,19 +290,5 @@ public class LadderedCompactor implements ContextManager {
         if (TRUNCATED_MARKER.matcher(line).find()) return true;
         if (SEPARATOR_LINE.matcher(line).matches()) return true;
         return false;
-    }
-
-    private static String hash8(String content) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] digest = md.digest(content.getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < 4; i++) {
-                sb.append(String.format("%02x", digest[i]));
-            }
-            return sb.toString();
-        } catch (NoSuchAlgorithmException e) {
-            return Integer.toHexString(content.hashCode());
-        }
     }
 }

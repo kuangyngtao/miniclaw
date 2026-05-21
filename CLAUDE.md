@@ -4,9 +4,7 @@
 
 miniclaw 是 [OpenClaw](https://openclaw.ai/) 的 Java CLI 实现——本地 AI 编程助手。
 
-### 三问裁剪
-
-- **做什么**: CLI Agent + 飞书 IM 通道，8 工具（read/write/edit/bash/glob/grep/todo_write/web_fetch），可扩展工具体系
+- **做什么**: CLI Agent + 飞书 IM 通道，8 工具（read/write/edit/bash/glob/grep/todo_write/web_fetch）
 - **不做什么**: Gateway、多 Agent 调度、浏览器自动化、MCP、Web 前端
 - **做到什么程度**: JVM 本地运行、CLI + 飞书双通道、工具独立可测
 
@@ -14,36 +12,32 @@ miniclaw 是 [OpenClaw](https://openclaw.ai/) 的 Java CLI 实现——本地 AI
 
 ## 四层架构
 
-| 层 | 职责 | V1 完成度 | 已实现 | 待实现 |
-|----|------|-----------|--------|--------|
-| 入口交互层 | CLI REPL + HITL 审批 | ▓▓▓▓ 85% | CLI REPL（Picocli）、JLine3 REPL（历史持久化 + Tab 补全 + Ctrl+C 跨平台）、`--root` 工作目录限制、HITL 审批（ASK 模式）、权限模式切换（AUTO/ASK/PLAN）、`/clear` `/compact` `/context` 命令、FIGlet Banner + 工作目录 + 入门提示、Token 用量实时显示 | — |
-| 核心引擎层 | Main Loop (ReAct) + LLM 适配器 | ▓▓▓▓ 95% | ReAct Loop、多轮会话上下文、三层迭代控制（死循环检测+进度提醒+硬上限）、OpenAI/DeepSeek Provider（含熔断器）、TWO_STAGE 慢思考（仅首轮规划）、流式输出、并行工具调用（读工具虚拟线程并发）、PermissionMode 引擎层权限控制、Ctrl+C 优雅中断、SubAgent 引擎（task 工具 + explore/general + 并行派发 + 权限继承） | 多模型路由 |
-| 上下文工程层 | Prompt 组装 + Token 截断 + 记忆 | ▓▓▓▓ 90% | LadderedCompactor 阶梯压缩（L1 删空行/L2 跨轮去重/L3 LLM 摘要）、DiskMemoryService 磁盘记忆（YAML frontmatter + MEMORY.md 索引）、System Prompt 记忆注入 | 自动记忆提取 |
-| 工具与执行层 | ToolRegistry + Middleware | ▓▓▓▓ 90% | 8 工具（read/write/edit/bash/glob/grep/todo_write/web_fetch）、ToolRegistry、EditTool 四级模糊匹配、`Tool.isReadOnly()` 读写声明、`SafetyInterceptor` 高危命令拦截链、`CommandSafetyInterceptor` 8 条规则 | Git 工具 |
+| 层 | 职责 | 已实现 |
+|----|------|--------|
+| 入口交互层 | CLI REPL + HITL 审批 | JLine3 REPL（历史+补全+Ctrl+C）、HITL 审批、权限模式切换、`/clear` `/compact` `/context`、工具调用可视化（[..]/[OK]/[ER]） |
+| 核心引擎层 | ReAct Loop + LLM 适配器 | ReAct Loop、三层迭代控制（死循环+进度提醒+硬上限）、OpenAI/DeepSeek Provider（含熔断器）、TWO_STAGE 慢思考、流式输出、并行工具调用、Ctrl+C 中断、SubAgent 引擎 |
+| 上下文工程层 | Prompt 组装 + Token 截断 + 记忆 | LadderedCompactor + MessageMasker（mask→compact 管线）、状态外部化（todo_write→.miniclaw/todo.md + PLAN.md 同步 + 自举检测）、PromptAssembly 5 层、SkillLoader、memory_save、DiskMemoryService、SessionService（BM25 检索 + 自动保存）、L3 自动记忆提取 |
+| 工具与执行层 | ToolRegistry + Middleware | 8 工具、EditTool 四级模糊匹配、SafetyInterceptor 链、CommandSafetyInterceptor 8 规则 |
 
-核心哲学：上下文即缓存，磁盘即真相。状态不跨层持有。
+核心哲学：上下文即缓存，磁盘即真相。
 
-层间通信：`CLI → AgentLoop → LLM → tool_call → allReadOnly? → executeParallel/Sequential → ToolRegistry.execute (interceptor chain) → Tool.execute → Result → 回注 prompt → 循环`
+层间通信：`CLI → AgentLoop → LLM → tool_call → executeParallel/Sequential → ToolRegistry.execute (interceptor chain) → Tool.execute → Result → 回注 prompt`
 
 ---
 
-## 模块依赖关系
+## 模块依赖
 
-| 模块 | 依赖（内部） | 外部依赖 |
-|------|------------|---------|
+| 模块 | 内部依赖 | 外部依赖 |
+|------|---------|---------|
 | `miniclaw-tools` | 无 | Jackson, SLF4J |
 | `miniclaw-memory` | 无 | Jackson, Jackson YAML, SLF4J |
 | `miniclaw-context` | tools | SLF4J |
 | `miniclaw-provider` | tools | Jackson, JDK HTTP, SLF4J |
 | `miniclaw-engine` | tools, provider, context | SLF4J |
 | `miniclaw-cli` | engine, memory | Picocli, Logback |
-| `miniclaw-feishu` | engine, tools | FeishuApi + FeishuBot + FeishuConfig + TokenBatcher；双向共享通道：CLI ↔ 飞书输入输出镜像 |
+| `miniclaw-feishu` | engine, tools | FeishuApi + FeishuBot + FeishuConfig + TokenBatcher |
 
-约束：
-- `tools` 是唯一基础层，`Result<T>` 定义在此，所有模块通过依赖 tools 获得统一返回模型
-- `engine` 是组装点，不实现具体逻辑
-- `cli` 不直接依赖 tools / provider，必须通过 engine
-- 禁止循环依赖
+约束：`tools` 是唯一基础层，`engine` 是组装点，`cli` 不直接依赖 tools/provider。禁止循环依赖。
 
 ---
 
@@ -51,122 +45,76 @@ miniclaw 是 [OpenClaw](https://openclaw.ai/) 的 Java CLI 实现——本地 AI
 
 | 项 | 选型 |
 |----|------|
-| Java | 21 LTS（虚拟线程、sealed class、record）|
+| Java | 21 LTS（虚拟线程、sealed class、record） |
 | 构建 | Maven 3.9+ |
-| CLI | Picocli（注解驱动、零依赖）|
+| CLI | Picocli（注解驱动、零依赖） |
 | JSON/YAML | Jackson |
-| HTTP | `java.net.http`（JDK 内置）|
-| 模板 | StringTemplate4 |
+| HTTP | `java.net.http`（JDK 内置） |
 | 测试 | JUnit 5 + AssertJ |
 | 日志 | SLF4J + Logback |
 
-明确排除：Spring Boot/Shell（启动慢）、Gradle（不必要复杂度）、OkHttp（JDK 内置已够）。
+明确排除：Spring Boot/Shell、Gradle、OkHttp。
 
 ---
 
 ## 运维
 
-- **日志**: `~/.miniclaw/logs/miniclaw.log`，按天滚动保留 7 天，`MINICLAW_LOG_LEVEL=DEBUG` 切换
-- **API Key**: 优先级 环境变量 > `~/.miniclaw/config.yaml` > 交互输入。硬编码=零容忍
-- **工作目录**: 默认启动时所在目录，`--root` 限制范围。元数据（logs/config/memory）统一在 `~/.miniclaw/`
-- **V1 不做**: 健康检查、指标、自动更新——CLI 模式用户可观察
+- **日志**: `~/.miniclaw/logs/miniclaw.log`，按天滚动保留 7 天
+- **API Key**: 环境变量 > `~/.miniclaw/config.yaml` > 交互输入。硬编码零容忍
+- **工作目录**: 默认启动目录，`--root` 限制范围。元数据统一在 `~/.miniclaw/`
+- **存储**: 文件系统即数据库。logs + config + Markdown 记忆 + sessions JSON
 
 ---
 
-## 部署架构
+## 演进路径
 
-miniclaw 是本地 CLI 工具，不是服务端应用。部署 = `java -jar miniclaw.jar`。
-
-### 存储选型
-
-| 组件 | 需要？ | 理由 |
-|------|-------|------|
-| SQL / PostgreSQL | **否** | 文件系统即数据库，"磁盘即真相" |
-| Redis | **否** | 单用户、无共享状态、无缓存需求 |
-| pgvector | **否** | 无向量检索，代码搜索靠 glob/grep |
-
-唯一存储：`~/.miniclaw/` 下的 logs + config + Markdown 记忆文件。
-
-### 性能瓶颈与演进
-
-| 瓶颈 | 量级 | 影响 |
+| 阶段 | 功能 | 状态 |
 |------|------|------|
-| LLM API 延迟 | 30-60s/次 | 占 Agent Loop 95% 时间，绝对主导 |
-| 上下文膨胀 | +2-3K tokens/轮 | 长对话越来越慢，截断策略已预留 |
-| JVM 冷启动 | 1-2s | 可接受，不是高频重启服务 |
-| 文件 I/O | < 0.1s | 对本地项目无感 |
+| V1 | 超时+重试+虚拟线程 | ✅ |
+| V1.5 | 并行工具调用 + 流式输出 + 权限模式 | ✅ |
+| V2 | 多轮上下文 + 三层迭代控制 + 阶梯压缩 | ✅ |
+| V2.5 | TodoWrite + isReadOnly 下沉 + 安全拦截器 | ✅ |
+| V2.7 | TWO_STAGE + Ctrl+C 中断 + 熔断器 | ✅ |
+| V2.8 | MemoryStore 磁盘记忆 | ✅ |
+| V2.9 | 飞书 IM 通道 | ✅ |
+| V2.10 | CLI ↔ 飞书双向共享 | ✅ |
+| V2.11 | JLine3 REPL | ✅ |
+| V2.12 | 会话持久化（JSON + LLM 摘要 + session_context） | ✅ |
+| V2.13 | LadderedCompactor 角色感知增强 | ✅ |
+| V3 | SubAgent 引擎（task + explore/general + 并行派发） | ✅ |
+| V3.1 | AgentState 状态机 + Reporter 抽象 | ✅ |
+| V3.3 | 提示词分层加载（PromptAssembly 5 层） | ✅ |
+| V3.4 | 技能外挂系统（SkillLoader + /skill） | ✅ |
+| V3.4a | MessageMasker 上下文掩码（4 层 Tier + mask→compact） | ✅ |
+| V3.4c | memory_save 引擎内部工具 | ✅ |
+| V3.4d | 状态外部化（todo.md 双写 + PLAN.md 同步 + 自举检测） | ✅ |
+| V3.6 | 工作内存（remember 工具 + ConcurrentHashMap + 每轮注入） | ✅ |
+| V3.7 | 子目标跟踪（todo 进展检测 + 3轮无进展警告 + allTodosCompleted 判定） | ✅ |
+| V3.8a | L3 自动记忆提取（提示词驱动 + 静默 LLM + 条件触发） | ✅ |
+| V3.8b | L4 会话检索升级（SessionService BM25 替换子串匹配） | ✅ |
+| V3.8c | 会话自动保存（clearSession 钩子 + [auto] 命名） | ✅ |
+| V3.8d | 启动注入相关历史会话摘要 | ✅ |
+| — | `/btw` 后台并行任务 | 待做 |
+| — | 多模型路由（Anthropic 原生 API） | 待做 |
+| V3.5 | GraalVM native-image | 远期 |
 
-演进路径：
-
-| 阶段 | 优化 | 触发条件 |
-|------|------|---------|
-| V1 | 超时+重试+虚拟线程 | ✅ 已完成 |
-| V1.5 | 并行工具调用 + 流式输出 + 权限模式系统 | ✅ 已完成 |
-| V2 | 多轮上下文 + 三层迭代控制 + 阶梯压缩 | ✅ 已完成 |
-| V2.5 | TodoWrite + isReadOnly 下沉 + 安全拦截器链 | ✅ 已完成 |
-| V2.7 | TWO_STAGE 优化 + Ctrl+C 优雅中断 + 熔断器 | ✅ 已完成 |
-| V2.8 | MemoryStore 磁盘记忆 + 熔断器 | ✅ 已完成 |
-| V2.9 | 飞书 IM 通道（嵌入式 HTTP Server + 流式回复 + 多用户会话隔离） | ✅ 已完成 |
-| V2.10 | CLI ↔ 飞书双向共享（多路监听 + 共享锁 + 双向镜像 + 飞书自适应节流） | ✅ 已完成 |
-| V2.11 | JLine3 REPL（历史持久化 + Tab 补全 + 跨平台 Ctrl+C） | ✅ 已完成 |
-| V3 | SubAgent 引擎（task 工具 + explore/general + 并行派发虚拟线程 + 权限继承 + 防递归） | ✅ 已完成 |
-| V3.5 | GraalVM native-image 编译（启动 < 0.1s） | 需要瞬启 |
-| 远期 | 本地嵌入模型语义搜索 | grep 无法覆盖的语义场景 |
-
-### 功能演进
-
-| 层 | 方向 | 优先级 | 说明 |
-|----|------|--------|------|
-| 引擎 | ~~并行工具调用~~ | ~~高~~ | ✅ 已实现：读工具虚拟线程并发，写工具保持串行 |
-| 引擎 | ~~权限模式系统~~ | ~~高~~ | ✅ 已实现：AUTO/ASK/PLAN + CLI 斜杠命令运行时切换 |
-| 引擎 | ~~多轮对话上下文~~ | ~~高~~ | ✅ 已实现：sessionHistory 跨 run() 复用 + clearSession() |
-| 引擎 | ~~迭代控制~~ | ~~高~~ | ✅ 已实现：三层防御（死循环检测+进度提醒+50轮硬上限） |
-| 引擎 | ~~上下文阶梯压缩~~ | ~~高~~ | ✅ 已实现：LadderedCompactor（L1 删空行/L2 跨轮去重/L3 LLM 摘要压缩），Summarizer 接口解耦 context/provider |
-| 引擎 | SubAgent 引擎 | 高 | 派生子 Agent 独立执行，并行派发虚拟线程，explore（仅读）和 general（不含 task）两种类型 | ✅ 已完成 |
-| 工具 | ~~高危操作拦截~~ | ~~高~~ | ✅ 已实现：`SafetyInterceptor` 链 + `CommandSafetyInterceptor` 8 条规则，AUTO 模式也生效 |
-| 工具 | ~~WebFetch 工具~~ | ~~中~~ | ✅ 已实现：HTTP GET + Jsoup HTML→text + 15min TTL 缓存 + 1MB/8000 双截断 |
-| 工具 | ~~TodoWrite 工具~~ | ~~中~~ | ✅ 已实现：`TodoWriteTool` 会话级 ephemeral，AtomicReference 存储，status 枚举校验 |
-| 工具 | ~~isReadOnly 下沉~~ | ~~中~~ | ✅ 已实现：`Tool.isReadOnly()` default method，引擎不再硬编码 READ_ONLY_TOOLS |
-| 引擎 | ~~熔断器~~ | ~~中~~ | ✅ 已实现：`OpenAIProvider` CLOSED→OPEN→HALF_OPEN 状态机，连续 5 次失败熔断 30s |
-| 记忆 | ~~MemoryStore 磁盘记忆~~ | ~~中~~ | ✅ 已实现：`DiskMemoryService` + YAML frontmatter + MEMORY.md 索引 + `/remember` CLI |
-| 工具 | Git 专用工具 | 低 | git status/diff/log 封装，解决 bash 输出截断 |
-| 工具 | BashTool 后台守护 | 低 | --background 标志，超时不杀返回 PID |
-| 工具 | WriteTool 覆盖确认 | 低 | 目标文件已存在时交互确认 |
-| CLI | ~~JLine3 REPL~~ | 高 | ✅ 已完成：JLine3 `LineReader` 替换 Scanner、`MiniclawCompleter` Tab 补全、`~/.miniclaw/history` 持久化、Ctrl+C 跨平台信号处理（`Terminal.handle(Signal.INT)` + `UserInterruptException`）、`\` 多行续行 |
-| CLI | ~~--root 工作目录限制~~ | 中 | ✅ 已完成：`--root` CLI 选项限制 Agent 可访问范围，自动 resolve + 路径校验（存在性+目录类型） |
-| 飞书 | ~~Feishu IM 通道~~ | 高 | ✅ 已完成：HTTP Server + 流式编辑 + TokenBatcher 自适应节流 |
-| 飞书 | ~~CLI ↔ 飞书双向共享~~ | 高 | ✅ 已完成：onToken 多路监听（CopyOnWriteArrayList）+ 引擎共享锁（tryAcquire/release）+ ngrok 自动管理 + 配置统一（env > config.yaml）+ 双向输入输出镜像 |
-| 工具 | 跨平台 Shell 统一 | 低 | 动态检测 git bash / wsl / cmd |
-
-### 数据模型
-
-V1 不需要建数据模型。核心结构已在代码中：
-
-| 结构 | 所在模块 | 说明 |
-|------|---------|------|
-| `Message(role, content)` | provider | 对话记录，会话级 ephemeral |
-| `Result<T>` | tools | 工具返回，模块间唯一通行证 |
-| `LLMConfig` | provider | 超时/重试配置 |
-| Markdown 文件 | memory | TODO.md / AGENTS.md，磁盘即真相 |
-
-若将来需会话历史索引：不建表，给 `~/.miniclaw/sessions/` 加 JSON 索引文件。
+测试: 229/229 通过（tools 46 + context 45 + engine 47 + provider 14 + memory 32 + cli 45）
 
 ---
 
-## LLM 外部调用韧性
+## LLM 调用韧性
 
-| 能力 | MVP | 设计 |
-|------|-----|------|
-| 超时控制 | **必须** | 连接 10s + 请求 60s，通过 `LLMConfig` 配置 |
-| 重试策略 | **必须** | 3 次指数退避（2s→4s→8s），仅对 429/5xx/IO 超时重试；4xx 直接返回错误 |
-| 线程池隔离 | V2 | 飞书引入并发回调后，Agent Loop 和 IM 回调分池 |
-| 熔断器 | V2 | 连续 5 次失败快速返回错误，V1 由超时+重试兜底 |
+| 能力 | 设计 |
+|------|------|
+| 超时控制 | 连接 10s + 请求 60s，`LLMConfig` 配置 |
+| 重试策略 | 3 次指数退避（2s→4s→8s），仅对 429/5xx/IO 超时重试 |
+| 熔断器 | 连续 5 次失败快速返回错误 |
 
 ---
 
 ## 规范体系
 
-### 命名风格
+### 命名
 
 | 元素 | 风格 | 示例 |
 |------|------|------|
@@ -175,13 +123,12 @@ V1 不需要建数据模型。核心结构已在代码中：
 | 方法/变量 | camelCase | `executeTool` |
 | 常量/枚举值 | UPPER_SNAKE_CASE | `MAX_RETRIES` |
 | 测试类 | 被测类名+Test | `ReadToolTest` |
-| 资源文件 | kebab-case | `error-messages.properties` |
 
 ### 代码组织
 
-- **接口与实现分离**: 公开接口放包根，实现类放 `impl/` 子包（如 `tools/impl/ReadTool.java`）
-- **测试目录镜像**: `src/test/java/` 完整镜像 `src/main/java/` 的包结构
-- **无循环依赖**: 模块依赖严格单向
+- 接口与实现分离：公开接口放包根，实现类放 `impl/` 子包
+- 测试目录镜像 `src/test/java/` 完整镜像 `src/main/java/` 的包结构
+- 无循环依赖
 
 ### 统一返回格式
 
@@ -193,30 +140,26 @@ public sealed interface Result<T> {
 public record ErrorInfo(String errorCode, String message) {}
 ```
 
-禁止业务代码抛异常传递已知错误；异常仅用于 JVM 不可恢复错误。
+禁止业务代码抛异常传递已知错误。
 
-### 错误码（`<前缀>-<三位数字>`）
+### 错误码
 
 ```
-T-001~T-005  工具系统（未注册/参数非法/权限不足/超时/IO）
-E-001~E-002  Edit 工具（非唯一匹配/未找到匹配）
-A-001~A-003  Agent（超最大迭代/LLM 调用失败/返回不可解析）
-S-001~S-003  Skills（文件不存在/格式非法/匹配失败）
-C-001~C-003  配置（文件不存在/格式非法/校验失败）
-X-001~X-002  通用（内部错误/不可达分支）
+T-001~T-005  工具系统    E-001~E-002  Edit 工具
+A-001~A-003  Agent       S-001~S-003  Skills
+C-001~C-003  配置        X-001~X-002  通用
 ```
 
 ### 设计原则
 
-1. **约定优于配置** — 目录/注解/接口决定行为，不做无谓配置项
-2. **渐进式复杂度** — 核心 Loop < 200 行，Tool 接口 < 5 方法，新增工具=实现一个接口
-3. **工具原子化** — 一个 Tool 做一件事，统一 `Tool` 接口 + `Result<T>` 返回
+1. **约定优于配置** — 目录/注解/接口决定行为
+2. **渐进式复杂度** — 核心 Loop < 200 行，Tool 接口 < 5 方法
+3. **工具原子化** — 一个 Tool 做一件事，统一 `Result<T>` 返回
 4. **失败透明** — 错误必须含：错误码 + 上下文 + 可操作信息
-5. **前后一致** — 全项目一套规范，有异议先改本文件再改代码
 
 ---
 
-## Tool 接口契约
+## Tool 接口
 
 ```java
 public interface Tool {
@@ -224,82 +167,36 @@ public interface Tool {
     String description();       // 给 LLM 看
     String inputSchema();       // JSON Schema
     Result<String> execute(String arguments);
-    default boolean isReadOnly() { return false; }  // 读工具 override 返回 true
+    default boolean isReadOnly() { return false; }
 }
 ```
 
-新增工具：实现 Tool → 注册到 ToolRegistry → 测试 → 合入。读工具需 override `isReadOnly()`。
+### 工具清单
 
-### 现有工具清单
+| 工具 | 读/写 | 安全机制 |
+|------|:---:|------|
+| read | 读 | 路径穿越防护、8000 字节截断 |
+| write | 写 | 路径穿越防护、自动建父目录 |
+| edit | 写 | 四级模糊匹配、唯一性校验 |
+| bash | 写 | 30s 超时强杀、workDir 绑定、高危命令拦截 |
+| glob | 读 | 200 条 + 8000 字节双截断 |
+| grep | 读 | 50 条 + 200 字符/行 + 8000 字节三层截断 |
+| todo_write | 写 | JSON schema 校验、双写到 .miniclaw/todo.md |
+| web_fetch | 读 | 15min TTL 缓存、1MB/8000 双截断 |
 
-| 工具 | 文件 | 安全机制 | 读/写 |
-|------|------|---------|:---:|
-| read | ReadTool.java | 路径穿越防护、8000 字节截断 | 读 |
-| write | WriteTool.java | 路径穿越防护、自动建父目录 | 写 |
-| edit | EditTool.java | **四级模糊匹配**（L1 精确→L2 换行符归一化→L3 去首尾空行→L4 逐行去缩进滑动窗口）、唯一性校验（E-001/E-002） | 写 |
-| bash | BashTool.java | 30s 超时强杀、workDir 绑定、8000 字节截断、Windows Git Bash 检测 | 写 |
-| glob | GlobTool.java | 200 条 + 8000 字节双截断、路径归一化 | 读 |
-| grep | GrepTool.java | 50 条 + 200 字符/行 + 8000 字节三层截断、自动跳过 `.git`/`target`/`node_modules`/二进制文件 | 读 |
-| todo_write | TodoWriteTool.java | JSON schema 校验、status 枚举限制 | 写 |
-| web_fetch | WebFetchTool.java | HTTP GET + Jsoup HTML→text、15min TTL 缓存、1MB/8000 双截断 | 读 |
+全局安全拦截器：`rm -rf /~/*`、`sudo`、`chmod 777`、`> /dev/sd`、`mkfs`、`dd`、fork bomb
 
-**全局安全拦截器**（`ToolRegistry.execute()` 入口，所有模式生效）：
-- `CommandSafetyInterceptor` — 8 条高危命令正则：`rm -rf /~/*`、`sudo`、`chmod 777`、`> /dev/sd`、`mkfs`、`dd`、fork bomb
-
-工具工作流：`glob（定位文件）→ grep（定位代码）→ read（确认）→ edit（修改）`
+工具工作流：`glob → grep → read → edit`
 
 ---
 
-## 开发流程
+## 开发流程与检查
 
-```
-SPEC.md（三问裁剪）→ 实现 → 三部检查 → 合入
-```
+**SPEC.md（三问裁剪）→ 实现 → 三部检查 → 合入**
 
-SPEC 必须包含：做什么 / 不做什么 / 做到什么程度 / 接口定义 / 验收用例。
-
----
-
-## 三部检查法
-
-**意图**: diff 是否实现 SPEC 描述？是否有范围外改动？删除代码是否确实废弃？
-
-**质量**: 命名/返回格式/错误码是否合规？风格是否一致？是否有 debug 残留？
-
-**边界**: null/空输入→明确错误 / timeout 有默认值 / IO 失败不抛裸异常 / 共享状态线程安全性
-
----
-
-## 测试约定
-
-### 测试清单
-
-| 模块 | 测试文件 | 类型 | 用例数 |
-|------|---------|------|--------|
-| miniclaw-tools | EditToolTest | 单元 | 9 |
-| miniclaw-tools | GlobToolTest | 单元 | 5 |
-| miniclaw-tools | GrepToolTest | 单元 | 6 |
-| miniclaw-tools | TodoWriteToolTest | 单元 | 6 |
-| miniclaw-tools | WebFetchToolTest | 单元 | 12 |
-| miniclaw-tools | CommandSafetyInterceptorTest | 单元 | 8 |
-| miniclaw-context | LadderedCompactorTest | 单元 | 6 |
-| miniclaw-engine | AgentEngineTest | Mock 集成 | 10 |
-| miniclaw-engine | PermissionModeTest | Mock 集成 | 9 |
-| miniclaw-engine | SubAgentTest | Mock 集成 | 6 |
-| miniclaw-engine | ReadToolIntegrationTest | E2E 集成 | — |
-| miniclaw-engine | WriteBashIntegrationTest | E2E 集成 | — |
-| miniclaw-engine | EditIntegrationTest | E2E 集成 | — |
-| miniclaw-provider | OpenAIProviderTest | 单元 | 14 |
-| miniclaw-memory | YamlFrontmatterParserTest | 单元 | 8 |
-| miniclaw-memory | FileMemoryStoreTest | 单元 | 8 |
-| miniclaw-memory | DiskMemoryServiceTest | 单元 | 8 |
-| miniclaw-provider | DeepSeekConnectivityTest | 连通性 | — |
-
-### 测试原则
-
-- **Mock 验证必须输出完整日志** — 每个模块的 `test` scope 必须包含 `logback-classic`，确保 Agent Loop 的执行轨迹完整可见
-- Mock 测试验证三条：引擎是否达到预期轮次、工具是否被正确调用、最终返回值是否正确
-- 集成测试通过真实 API Key 调用 LLM，验证端到端 ReAct 行为
+- **意图**: diff 是否实现 SPEC？是否有范围外改动？
+- **质量**: 命名/错误码/风格合规？无 debug 残留？
+- **边界**: null/空→明确错误 / timeout 默认值 / IO 不抛裸异常 / 线程安全
 
 ---
 

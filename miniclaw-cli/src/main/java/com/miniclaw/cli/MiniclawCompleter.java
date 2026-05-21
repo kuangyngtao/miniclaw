@@ -15,6 +15,11 @@ class MiniclawCompleter implements Completer {
         "/help", "/clear", "/compact", "/context",
         "/remember", "/memory",
         "/thinking", "/plan", "/ask", "/auto",
+        "/session", "/session save", "/session load", "/session list",
+        "/session delete", "/session search", "/session stats",
+        "/session prune", "/session new",
+        "/skill", "/skill list", "/skill load", "/skill unload",
+        "/feishu-on", "/feishu-off",
         "/exit"
     );
 

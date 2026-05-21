@@ -32,9 +32,15 @@ public class ReadTool implements Tool {
     private static final ObjectMapper mapper = new ObjectMapper();
 
     private final Path workDir;
+    private final Path[] extraRoots;
 
     public ReadTool(Path workDir) {
+        this(workDir, new Path[0]);
+    }
+
+    public ReadTool(Path workDir, Path... extraRoots) {
         this.workDir = workDir.toAbsolutePath().normalize();
+        this.extraRoots = extraRoots;
     }
 
     @Override
@@ -72,7 +78,7 @@ public class ReadTool implements Tool {
 
         // 2. 路径解析 + 穿越防护
         Path resolved = workDir.resolve(pathNode.asText()).normalize();
-        if (!resolved.startsWith(workDir)) {
+        if (!resolved.startsWith(workDir) && !isUnderExtraRoot(resolved)) {
             return new Result.Err<>(new Result.ErrorInfo("T-003", "禁止访问工作区外的路径: " + pathNode.asText()));
         }
 
@@ -92,5 +98,14 @@ public class ReadTool implements Tool {
         }
 
         return new Result.Ok<>(new String(bytes, StandardCharsets.UTF_8));
+    }
+
+    private boolean isUnderExtraRoot(Path resolved) {
+        for (Path root : extraRoots) {
+            if (root != null && resolved.startsWith(root.toAbsolutePath().normalize())) {
+                return true;
+            }
+        }
+        return false;
     }
 }

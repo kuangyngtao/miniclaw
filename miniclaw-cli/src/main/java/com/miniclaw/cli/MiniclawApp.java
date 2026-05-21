@@ -1,7 +1,12 @@
 package com.miniclaw.cli;
 
+import com.miniclaw.context.SkillCatalog;
+import com.miniclaw.context.SkillLoader;
 import com.miniclaw.engine.PermissionMode;
+import com.miniclaw.engine.SessionMeta;
+import com.miniclaw.engine.SessionService;
 import com.miniclaw.engine.ThinkingMode;
+import com.miniclaw.engine.AgentState;
 import com.miniclaw.engine.impl.AgentEngine;
 import com.miniclaw.feishu.FeishuBot;
 import com.miniclaw.feishu.FeishuConfig;
@@ -67,7 +72,9 @@ public class MiniclawApp implements Runnable {
 
     private Path resolvedWorkDir;
     private AgentEngine engine;
+    private SessionService sessionService;
     private FeishuBot feishuBot;
+    private SkillLoader skillLoader;
 
     @Override
     public void run() {
@@ -92,19 +99,31 @@ public class MiniclawApp implements Runnable {
 
         OpenAIProvider provider = new OpenAIProvider(config);
 
-        ToolRegistry registry = createToolRegistry(resolvedWorkDir);
+        Path userSkillsDir = Path.of(System.getProperty("user.home"), ".agents", "skills");
+        ToolRegistry registry = createToolRegistry(resolvedWorkDir, userSkillsDir);
 
         ThinkingMode mode = thinking ? ThinkingMode.TWO_STAGE : ThinkingMode.OFF;
         Path memoryDir = Path.of(System.getProperty("user.home"), ".miniclaw", "memory");
         DiskMemoryService memoryService = new DiskMemoryService(memoryDir);
         String memoryIndex = memoryService.loadIndex();
 
-        // 读取项目级 CLAUDE.md / AGENTS.md
-        String projectContext = readProjectContext(resolvedWorkDir);
-        String fullContext = buildFullContext(projectContext, memoryIndex);
+        // 读取分级 CLAUDE.md（~/.miniclaw/CLAUDE.md + ./CLAUDE.md）
+        String workspaceRules = loadWorkspaceRules(resolvedWorkDir);
 
         engine = new AgentEngine(provider, registry, resolvedWorkDir.toString(),
-            mode, null, System.out::print, fullContext);
+            mode, null, System.out::print, memoryIndex);
+        engine.setWorkspaceRules(workspaceRules);
+
+        // 初始化 Skills 系统
+        Path projectSkillsDir = resolvedWorkDir.resolve(".miniclaw").resolve("skills");
+        skillLoader = new SkillLoader(userSkillsDir, projectSkillsDir);
+        engine.setSkillLoader(skillLoader);
+        engine.rebuildSkillCatalog(skillLoader.buildCatalog());
+        engine.setDiskMemoryService(memoryService);
+
+        Path sessionsDir = Path.of(System.getProperty("user.home"), ".miniclaw", "sessions");
+        sessionService = new SessionService(sessionsDir, provider);
+        engine.setSessionService(sessionService);
 
         if (mode == ThinkingMode.TWO_STAGE) {
             engine.setOnThinkingBegin(this::onThinkingBegin);
@@ -155,6 +174,23 @@ public class MiniclawApp implements Runnable {
                 + line + RESET);
         });
 
+        engine.onToolStart(event -> {
+            String args = event.argSummary().isEmpty() ? "" : "  " + GRAY + event.argSummary() + RESET;
+            System.out.println("  [..] " + event.name() + args);
+        });
+
+        engine.onToolEnd(event -> {
+            String icon = event.success() ? "OK" : "ER";
+            String detail = event.success() ? event.detail() : GRAY + event.detail() + RESET;
+            System.out.println("  [" + icon + "] " + event.name() + "  " + detail);
+        });
+
+        engine.onStateChange(event -> {
+            if (event.state() == AgentState.EXECUTING) {
+                // 工具执行由 onToolStart/onToolEnd 显示，此处不再重复
+            }
+        });
+
         log.info("miniclaw started — model={}, thinking={}", model, mode);
 
         printBanner(model, registry.count(), resolvedWorkDir.toString());
@@ -174,15 +210,27 @@ public class MiniclawApp implements Runnable {
 
             // === 记忆命令 ===
             if (input.equals("/remember") || input.startsWith("/remember ")) {
-                handleRemember(reader, memoryService, provider, engine, projectContext, input);
+                handleRemember(reader, memoryService, provider, engine, input);
                 continue;
             }
             if (input.startsWith("/memory")) {
-                handleMemory(input, memoryService, engine, projectContext);
+                handleMemory(input, memoryService, engine);
                 continue;
             }
 
             // === 斜杠命令 ===
+            if (input.equals("/session")) {
+                printSessionUsage();
+                continue;
+            }
+            if (input.startsWith("/session ")) {
+                handleSessionCommand(input.substring("/session ".length()).trim());
+                continue;
+            }
+            if (input.startsWith("/skill")) {
+                handleSkillCommand(input.substring("/skill".length()).trim());
+                continue;
+            }
             if (input.startsWith("/")) {
                 switch (input) {
                     case "/" -> printMenu(engine.thinkingMode(), engine.permissionMode());
@@ -224,6 +272,11 @@ public class MiniclawApp implements Runnable {
                     feishuBot.mirrorToFeishu(input);
                 }
                 String result = engine.run(input);
+                // PLAN 模式：LLM 生成的计划自动同步到 .miniclaw/plan.md
+                if (engine.permissionMode() == PermissionMode.PLAN
+                    && result != null && !result.startsWith("[")) {
+                    engine.writePlanToWorkspace(result);
+                }
                 if (feishuBot != null && feishuBot.isRunning()) {
                     feishuBot.finalizeMirror(result);
                 }
@@ -256,12 +309,41 @@ public class MiniclawApp implements Runnable {
         bar = "█".repeat(filled) + "░".repeat(10 - filled);
         System.out.println();
         System.out.println(GRAY + "  context  [" + bar + "] " + pct + "%  (~" + formatTokens(tokens) + " / " + formatTokens(maxTokens) + ")" + RESET);
+        var mask = engine.getLastMaskedContext();
+        if (mask != null) {
+            System.out.println(GRAY + "  mask     T0:" + mask.tier0Count()
+                + "  T1:" + mask.tier1Count()
+                + "  T2:" + mask.tier2Count()
+                + "  T3:" + mask.tier3Count() + RESET);
+        }
         System.out.println(GRAY + "  mode     " + engine.thinkingMode() + " / " + engine.permissionMode() + RESET);
         System.out.println(GRAY + "  workdir  " + engine.workDir() + RESET);
         System.out.println();
     }
 
-    private static String formatTokens(int tokens) {
+    /** 解析斜杠命令输入，返回规范化的命令名；非斜杠命令返回 null */
+    static String resolveCommand(String input) {
+        if (input == null || input.isBlank()) return null;
+        if (!input.startsWith("/")) return null;
+        return switch (input) {
+            case "/" -> "menu";
+            case "/h", "/help" -> "help";
+            case "/q", "/exit" -> "exit";
+            case "/t", "/thinking" -> "thinking";
+            case "/p", "/plan" -> "plan";
+            case "/a", "/ask" -> "ask";
+            case "/auto" -> "auto";
+            case "/c", "/clear" -> "clear";
+            case "/compact" -> "compact";
+            case "/context" -> "context";
+            case "/feishu-on" -> "feishu-on";
+            case "/feishu-off" -> "feishu-off";
+            case "/skill" -> "skill";
+            default -> null;
+        };
+    }
+
+    static String formatTokens(int tokens) {
         if (tokens < 1000) return tokens + "t";
         return String.format("%.1fkt", tokens / 1000.0);
     }
@@ -282,7 +364,7 @@ public class MiniclawApp implements Runnable {
 
     private void handleRemember(LineReader reader, DiskMemoryService service,
                                 LLMProvider provider, AgentEngine engine,
-                                String projectContext, String input) {
+                                String input) {
         String rawContent = input.substring("/remember".length()).trim();
 
         // 无内容 → 提示输入
@@ -340,13 +422,13 @@ public class MiniclawApp implements Runnable {
 
         MemoryEntry entry = new MemoryEntry(name, description, type, Instant.now(), rawContent);
         service.save(entry);
-        engine.setMemoryIndex(buildFullContext(projectContext, service.loadIndex()));
+        engine.setMemoryIndex(service.loadIndex());
         System.out.println(GRAY + "\r  saved " + entry.filename()
             + " [" + type.name().toLowerCase() + "] " + description + RESET + "\n");
     }
 
     private void handleMemory(String input, DiskMemoryService service,
-                              AgentEngine engine, String projectContext) {
+                              AgentEngine engine) {
         String sub = input.substring("/memory".length()).trim();
         if (sub.equals("list") || sub.isEmpty()) {
             var entries = service.listIndex();
@@ -362,14 +444,39 @@ public class MiniclawApp implements Runnable {
             System.out.println();
         } else if (sub.equals("regen")) {
             service.regenerateIndex();
-            engine.setMemoryIndex(buildFullContext(projectContext, service.loadIndex()));
+            engine.setMemoryIndex(service.loadIndex());
             System.out.println(GRAY + "  Index regenerated from files." + RESET + "\n");
         } else {
             System.out.println(GRAY + "  Usage: /memory list | /memory regen" + RESET + "\n");
         }
     }
 
-    private static String readProjectContext(Path workDir) {
+    /** Load hierarchical CLAUDE.md: ~/.miniclaw/CLAUDE.md + ./CLAUDE.md (fallback AGENTS.md). */
+    static String loadWorkspaceRules(Path workDir) {
+        Path homeDir = Path.of(System.getProperty("user.home"));
+        String userRules = readIfExists(homeDir.resolve(".miniclaw").resolve("CLAUDE.md"));
+        String projectRules = readIfExists(workDir.resolve("CLAUDE.md"));
+        if (projectRules.isEmpty()) {
+            projectRules = readIfExists(workDir.resolve("AGENTS.md"));
+        }
+        if (userRules.isEmpty() && projectRules.isEmpty()) return "";
+        if (userRules.isEmpty()) return projectRules;
+        if (projectRules.isEmpty()) return userRules;
+        return userRules + "\n\n" + projectRules;
+    }
+
+    private static String readIfExists(Path path) {
+        if (Files.exists(path)) {
+            try {
+                return Files.readString(path);
+            } catch (Exception e) {
+                log.warn("Failed to read {}: {}", path, e.getMessage());
+            }
+        }
+        return "";
+    }
+
+    static String readProjectContext(Path workDir) {
         Path claudeMd = workDir.resolve("CLAUDE.md");
         if (Files.exists(claudeMd)) {
             try {
@@ -393,7 +500,7 @@ public class MiniclawApp implements Runnable {
         return "";
     }
 
-    private static String buildFullContext(String projectContext, String memoryIndex) {
+    static String buildFullContext(String projectContext, String memoryIndex) {
         StringBuilder sb = new StringBuilder();
         if (projectContext != null && !projectContext.isBlank()) {
             sb.append("## Project Context\n\n").append(projectContext.stripTrailing());
@@ -405,7 +512,203 @@ public class MiniclawApp implements Runnable {
         return sb.toString();
     }
 
-    private static MemoryType parseMemoryType(String s) {
+    // === 会话命令 ===
+
+    private void handleSessionCommand(String args) {
+        if (args.startsWith("save")) {
+            String name = args.substring("save".length()).trim();
+            if (name.isEmpty()) {
+                name = "session-" + Instant.now().toString().replace(":", "-").substring(0, 19);
+            }
+            String result = engine.saveSession(name);
+            System.out.println(GRAY + "  " + result + RESET + "\n");
+        } else if (args.startsWith("load ")) {
+            String id = args.substring("load ".length()).trim();
+            try {
+                engine.loadSession(id);
+                System.out.println(GRAY + "  Session loaded: " + id + RESET + "\n");
+            } catch (Exception e) {
+                System.out.println(GRAY + "  [H-003] " + e.getMessage() + RESET + "\n");
+            }
+        } else if (args.equals("list")) {
+            List<SessionMeta> sessions = engine.listSessions();
+            if (sessions.isEmpty()) {
+                System.out.println(GRAY + "  No saved sessions." + RESET + "\n");
+                return;
+            }
+            System.out.println();
+            for (SessionMeta s : sessions) {
+                String updated = s.updatedAt().toString().replace("T", " ").substring(0, 16);
+                String first = s.firstUserMessage() != null ? s.firstUserMessage() : "";
+                if (first.length() > 60) first = first.substring(0, 60) + "...";
+                System.out.println(GRAY + "  [" + s.id() + "] " + s.name()
+                    + "  (" + s.messageCount() + " msgs, " + updated + ")" + RESET);
+                if (!first.isEmpty()) {
+                    System.out.println(GRAY + "      " + first + RESET);
+                }
+            }
+            System.out.println();
+        } else if (args.startsWith("delete ")) {
+            String id = args.substring("delete ".length()).trim();
+            try {
+                engine.deleteSession(id);
+                System.out.println(GRAY + "  Session deleted: " + id + RESET + "\n");
+            } catch (Exception e) {
+                System.out.println(GRAY + "  [H-003] " + e.getMessage() + RESET + "\n");
+            }
+        } else if (args.startsWith("search ")) {
+            String query = args.substring("search ".length()).trim();
+            if (sessionService == null) {
+                System.out.println(GRAY + "  Session service not available." + RESET + "\n");
+                return;
+            }
+            List<SessionMeta> matches = sessionService.search(query);
+            if (matches.isEmpty()) {
+                System.out.println(GRAY + "  No sessions matching \"" + query + "\"." + RESET + "\n");
+                return;
+            }
+            System.out.println();
+            for (SessionMeta s : matches) {
+                String updated = s.updatedAt().toString().replace("T", " ").substring(0, 16);
+                System.out.println(GRAY + "  [" + s.id() + "] " + s.name()
+                    + "  (" + s.messageCount() + " msgs, " + updated + ")" + RESET);
+                if (s.summary() != null && !s.summary().isBlank()) {
+                    System.out.println(GRAY + "      " + s.summary() + RESET);
+                }
+            }
+            System.out.println();
+        } else if (args.equals("stats")) {
+            if (sessionService == null) {
+                System.out.println(GRAY + "  Session service not available." + RESET + "\n");
+                return;
+            }
+            List<SessionService.AgeBucket> buckets = sessionService.stats();
+            if (buckets.isEmpty()) {
+                System.out.println(GRAY + "  No saved sessions." + RESET + "\n");
+                return;
+            }
+            long totalBytes = 0;
+            int totalCount = 0;
+            System.out.println();
+            System.out.println(GRAY + "  Session storage breakdown:" + RESET);
+            for (SessionService.AgeBucket b : buckets) {
+                System.out.println(GRAY + "    " + padRight(b.label(), 16)
+                    + String.format("%3d sessions", b.count())
+                    + String.format("%8s", formatSize(b.bytes())) + RESET);
+                totalBytes += b.bytes();
+                totalCount += b.count();
+            }
+            System.out.println(GRAY + "    " + padRight("───", 16)
+                + "───────────" + "  ────────" + RESET);
+            System.out.println(GRAY + "    " + padRight("Total", 16)
+                + String.format("%3d sessions", totalCount)
+                + String.format("%8s", formatSize(totalBytes)) + RESET);
+            System.out.println();
+        } else if (args.startsWith("prune")) {
+            String rest = args.substring("prune".length()).trim();
+            int days;
+            try {
+                days = Integer.parseInt(rest);
+                if (days <= 0) {
+                    System.out.println(GRAY + "  Usage: /session prune <days>  (days must be > 0)" + RESET + "\n");
+                    return;
+                }
+            } catch (NumberFormatException e) {
+                System.out.println(GRAY + "  Usage: /session prune <days>  (e.g. /session prune 30)" + RESET + "\n");
+                return;
+            }
+            if (sessionService == null) {
+                System.out.println(GRAY + "  Session service not available." + RESET + "\n");
+                return;
+            }
+            int count = sessionService.prune(days);
+            if (count == 0) {
+                System.out.println(GRAY + "  No sessions older than " + days + " days." + RESET + "\n");
+            } else {
+                System.out.println(GRAY + "  Pruned " + count + " session(s) older than " + days + " days." + RESET + "\n");
+            }
+        } else if (args.equals("new")) {
+            String result = engine.newSession();
+            System.out.println(GRAY + "  " + result + RESET + "\n");
+        } else {
+            printSessionUsage();
+        }
+    }
+
+    private void printSessionUsage() {
+        System.out.println();
+        System.out.println(GRAY + "  /session save [name]     save current session" + RESET);
+        System.out.println(GRAY + "  /session load <id>       load a saved session" + RESET);
+        System.out.println(GRAY + "  /session list            list all saved sessions" + RESET);
+        System.out.println(GRAY + "  /session search <query>  search past sessions" + RESET);
+        System.out.println(GRAY + "  /session stats           show storage breakdown by age" + RESET);
+        System.out.println(GRAY + "  /session prune <days>    delete sessions older than N days" + RESET);
+        System.out.println(GRAY + "  /session delete <id>     delete a specific session" + RESET);
+        System.out.println(GRAY + "  /session new             clear and start new session" + RESET);
+        System.out.println();
+    }
+
+    // === 技能命令 ===
+
+    private void handleSkillCommand(String args) {
+        if (args.isEmpty()) {
+            printSkillUsage();
+            return;
+        }
+        if (args.equals("list")) {
+            var skills = skillLoader.listAll();
+            if (skills.isEmpty()) {
+                System.out.println(GRAY + "  No skills found." + RESET + "\n");
+                return;
+            }
+            System.out.println();
+            for (var s : skills) {
+                String status = engine.hasSkillLoaded(s.name()) ? " (*loaded)" : "";
+                System.out.println(GRAY + "  - " + s.name() + status + RESET);
+                System.out.println(GRAY + "    " + s.description() + RESET);
+            }
+            System.out.println();
+        } else if (args.startsWith("load ")) {
+            String name = args.substring("load ".length()).trim();
+            if (name.isEmpty()) {
+                System.out.println(GRAY + "  Usage: /skill load <name>" + RESET + "\n");
+                return;
+            }
+            String prompt = skillLoader.loadPrompt(name);
+            if (prompt == null) {
+                System.out.println(GRAY + "  [S-001] Skill not found: " + name + RESET + "\n");
+                return;
+            }
+            engine.loadSkill(name, prompt);
+            System.out.println(GRAY + "  Skill loaded: " + name + " (" + prompt.length() + " chars)" + RESET + "\n");
+        } else if (args.startsWith("unload ")) {
+            String name = args.substring("unload ".length()).trim();
+            if (name.isEmpty()) {
+                System.out.println(GRAY + "  Usage: /skill unload <name>" + RESET + "\n");
+                return;
+            }
+            engine.unloadSkill(name);
+            System.out.println(GRAY + "  Skill unloaded: " + name + RESET + "\n");
+        } else {
+            printSkillUsage();
+        }
+    }
+
+    private void printSkillUsage() {
+        System.out.println();
+        System.out.println(GRAY + "  /skill list             list available skills" + RESET);
+        System.out.println(GRAY + "  /skill load <name>      load a skill into current session" + RESET);
+        System.out.println(GRAY + "  /skill unload <name>    unload a skill" + RESET);
+        System.out.println();
+    }
+
+    static String formatSize(long bytes) {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
+        return String.format("%.1f MB", bytes / (1024.0 * 1024.0));
+    }
+
+    static MemoryType parseMemoryType(String s) {
         if (s == null || s.isBlank()) return null;
         try {
             return MemoryType.valueOf(s.toUpperCase().trim());
@@ -429,8 +732,9 @@ public class MiniclawApp implements Runnable {
         System.out.println(GRAY + "  /ask        confirm writes      /auto   full-auto" + RESET);
         System.out.println(GRAY + "  /clear      reset session       /compact compress" + RESET);
         System.out.println(GRAY + "  /context    token usage         /remember add memory" + RESET);
-        System.out.println(GRAY + "  /memory     list memories       /feishu-on  /feishu-off" + RESET);
-        System.out.println(GRAY + "  /help       /exit" + RESET);
+        System.out.println(GRAY + "  /memory     list memories       /session manage sessions" + RESET);
+        System.out.println(GRAY + "  /skill      load/unload skills  /feishu-on  /feishu-off" + RESET);
+        System.out.println(GRAY + "  /help       show all commands   /exit   quit" + RESET);
         System.out.println();
     }
 
@@ -448,6 +752,8 @@ public class MiniclawApp implements Runnable {
         System.out.println("    /context     show token usage and session info");
         System.out.println("    /remember    add a memory entry (interactive)");
         System.out.println("    /memory      list or manage memory entries");
+        System.out.println("    /session     save, load, list, search sessions");
+        System.out.println("    /skill       list, load, unload skills");
         System.out.println("    /feishu-on   enable Feishu bot companion");
         System.out.println("    /feishu-off  disable Feishu bot companion");
         System.out.println("    /help        show this help");
@@ -537,35 +843,37 @@ public class MiniclawApp implements Runnable {
         System.out.println(boxLine(W, "  /plan     read-only mode   /ask     confirm writes"));
         System.out.println(boxLine(W, "  /auto     full-auto        /clear   reset session"));
         System.out.println(boxLine(W, "  /thinking toggle thinking  /compact compress context"));
-        System.out.println(boxLine(W, "  /context  show session     /exit    quit"));
+        System.out.println(boxLine(W, "  /context  show session     /session save/load"));
+        System.out.println(boxLine(W, "  /memory   list memories    /skill  manage skills"));
+        System.out.println(boxLine(W, "  /feishu-on  /feishu-off    /exit   quit"));
         System.out.println(boxLine(W, "═".repeat(W), '╚', '╝'));
         System.out.println();
         System.out.println("  Try \"explain this project\" or \"fix the NPE in UserService.java\"");
         System.out.println();
     }
 
-    private static String boxLine(int width, String content) {
+    static String boxLine(int width, String content) {
         return boxLine(width, content, '║', '║');
     }
 
-    private static String boxLine(int width, String content, char left, char right) {
+    static String boxLine(int width, String content, char left, char right) {
         if (content.length() > width) content = content.substring(0, width);
         else content = padRight(content, width);
         return "  " + left + content + right;
     }
 
-    private static String center(String s, int width) {
+    static String center(String s, int width) {
         if (s.length() >= width) return s;
         int pad = (width - s.length()) / 2;
         return " ".repeat(pad) + s;
     }
 
-    private static String padRight(String s, int n) {
+    static String padRight(String s, int n) {
         if (s.length() >= n) return s;
         return s + " ".repeat(n - s.length());
     }
 
-    private static String truncatePath(String path, int maxLen) {
+    static String truncatePath(String path, int maxLen) {
         if (path.length() <= maxLen) return path;
         return "..." + path.substring(path.length() - maxLen + 3);
     }
@@ -611,10 +919,12 @@ public class MiniclawApp implements Runnable {
 
         Path workDir = resolvedWorkDir != null ? resolvedWorkDir : Path.of(System.getProperty("user.dir"));
         OpenAIProvider provider = new OpenAIProvider(llmConfig);
-        ToolRegistry registry = createToolRegistry(workDir);
+        Path skillsDir = Path.of(System.getProperty("user.home"), ".agents", "skills");
+        ToolRegistry registry = createToolRegistry(workDir, skillsDir);
         AgentEngine eng = new AgentEngine(provider, registry, workDir.toString(),
             ThinkingMode.OFF, null, null, null);
         eng.setPermissionMode(PermissionMode.AUTO);
+        eng.setWorkspaceRules(loadWorkspaceRules(workDir));
 
         FeishuConfig feishuConfig = FeishuConfig.fromEnv();
         FeishuBot bot = new FeishuBot(feishuConfig);
@@ -660,9 +970,9 @@ public class MiniclawApp implements Runnable {
         System.out.println(GRAY + "  Feishu companion stopped." + RESET + "\n");
     }
 
-    private ToolRegistry createToolRegistry(Path workDir) {
+    private ToolRegistry createToolRegistry(Path workDir, Path... extraReadRoots) {
         ToolRegistry registry = new ToolRegistry();
-        registry.register(new ReadTool(workDir));
+        registry.register(new ReadTool(workDir, extraReadRoots));
         registry.register(new WriteTool(workDir));
         registry.register(new TodoWriteTool());
         registry.register(new WebFetchTool());

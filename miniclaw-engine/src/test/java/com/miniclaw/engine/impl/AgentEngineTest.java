@@ -2,6 +2,7 @@ package com.miniclaw.engine.impl;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.miniclaw.engine.SessionService;
 import com.miniclaw.engine.ThinkingMode;
 import com.miniclaw.provider.LLMException;
 import com.miniclaw.provider.LLMProvider;
@@ -11,6 +12,8 @@ import com.miniclaw.tools.schema.Message;
 import com.miniclaw.tools.schema.ToolCall;
 import com.miniclaw.tools.schema.ToolDefinition;
 import com.miniclaw.tools.schema.ToolResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
@@ -328,5 +331,72 @@ class AgentEngineTest {
         assertThat(result).startsWith("[A-001]");
         assertThat(result).contains("50");
         assertThat(provider.callCount).isEqualTo(50);
+    }
+
+    // === 会话自动保存测试 ===
+
+    @Test
+    void shouldAutoSaveOnClearSession() throws Exception {
+        Path tempDir = Files.createTempDirectory("miniclaw-test-sessions");
+        try {
+            SessionService sessionService = new SessionService(tempDir, null);
+            MockProvider mockProvider = new MockProvider();
+            MockRegistry mockRegistry = new MockRegistry();
+            AgentEngine engine = new AgentEngine(mockProvider, mockRegistry, "/tmp/work",
+                ThinkingMode.OFF);
+            engine.setSessionService(sessionService);
+
+            engine.run("list files");
+            engine.clearSession();
+
+            // 验证会话已保存
+            assertThat(sessionService.list()).hasSize(1);
+            assertThat(sessionService.list().get(0).name()).startsWith("[auto]");
+        } finally {
+            // cleanup temp dir
+            Files.list(tempDir).forEach(p -> p.toFile().delete());
+            Files.deleteIfExists(tempDir);
+        }
+    }
+
+    @Test
+    void shouldNotAutoSaveWhenSessionEmpty() throws Exception {
+        Path tempDir = Files.createTempDirectory("miniclaw-test-sessions");
+        try {
+            SessionService sessionService = new SessionService(tempDir, null);
+            AgentEngine engine = new AgentEngine(new MockProvider(), new MockRegistry(), "/tmp/work",
+                ThinkingMode.OFF);
+            engine.setSessionService(sessionService);
+
+            // No run() call — sessionHistory empty
+            engine.clearSession();
+
+            assertThat(sessionService.list()).isEmpty();
+        } finally {
+            Files.list(tempDir).forEach(p -> p.toFile().delete());
+            Files.deleteIfExists(tempDir);
+        }
+    }
+
+    @Test
+    void shouldNotAutoSaveTwiceOnDoubleClear() throws Exception {
+        Path tempDir = Files.createTempDirectory("miniclaw-test-sessions");
+        try {
+            SessionService sessionService = new SessionService(tempDir, null);
+            MockProvider mockProvider = new MockProvider();
+            MockRegistry mockRegistry = new MockRegistry();
+            AgentEngine engine = new AgentEngine(mockProvider, mockRegistry, "/tmp/work",
+                ThinkingMode.OFF);
+            engine.setSessionService(sessionService);
+
+            engine.run("list files");
+            engine.clearSession();
+            engine.clearSession(); // second clear — session empty, should skip
+
+            assertThat(sessionService.list()).hasSize(1);
+        } finally {
+            Files.list(tempDir).forEach(p -> p.toFile().delete());
+            Files.deleteIfExists(tempDir);
+        }
     }
 }
