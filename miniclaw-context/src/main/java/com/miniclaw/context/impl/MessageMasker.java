@@ -3,7 +3,9 @@ package com.miniclaw.context.impl;
 import com.miniclaw.tools.schema.Message;
 import com.miniclaw.tools.schema.Role;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 角色+时效双维上下文掩码。
@@ -26,8 +28,13 @@ public final class MessageMasker {
 
     public record MaskedContext(
         List<Message> messages,
-        int tier0Count, int tier1Count, int tier2Count, int tier3Count
-    ) {}
+        int tier0Count, int tier1Count, int tier2Count, int tier3Count,
+        List<TurnGroup> evictedTurnGroups
+    ) {
+        public MaskedContext(List<Message> messages, int t0, int t1, int t2, int t3) {
+            this(messages, t0, t1, t2, t3, List.of());
+        }
+    }
 
     public static boolean shouldMask(int turnCount) {
         return turnCount > TRIGGER_TURNS;
@@ -51,6 +58,7 @@ public final class MessageMasker {
 
         // 2. 按 Tier 处理每条消息
         List<Message> result = new ArrayList<>(messages.size());
+        Map<Integer, List<Message>> evictionGroups = new HashMap<>();
         int t0 = 0, t1 = 0, t2 = 0, t3 = 0;
 
         for (int i = 0; i < messages.size(); i++) {
@@ -68,17 +76,18 @@ public final class MessageMasker {
                 case 0 -> { t0++; result.add(handleTier0(msg)); }
                 case 1 -> { t1++; result.add(handleTier1(msg)); }
                 case 2 -> { t2++; result.add(handleTier2(msg)); }
-                case 3 -> { t3++; result.add(handleTier3(msg)); }
+                case 3 -> { t3++; evictionGroups.computeIfAbsent(msgTurn, k -> new ArrayList<>()).add(msg); }
             }
         }
 
-        // 清理连续的 null（Tier3 丢弃产生）
+        // 过滤 null（Tier3 已改为软驱逐，此处保留兼容）
         List<Message> filtered = new ArrayList<>(result.size());
         for (Message m : result) {
             if (m != null) filtered.add(m);
         }
 
-        return new MaskedContext(filtered, t0, t1, t2, t3);
+        List<TurnGroup> evicted = TurnGroup.fromEvictionMap(evictionGroups);
+        return new MaskedContext(filtered, t0, t1, t2, t3, evicted);
     }
 
     private static int classifyTier(int msgTurn, int totalTurns) {
@@ -149,13 +158,6 @@ public final class MessageMasker {
         return new Message(Role.TOOL,
             "[tool output — elided]",
             null, msg.toolCallId());
-    }
-
-    // ── Tier3: 全部丢弃 ──
-
-    private static Message handleTier3(Message msg) {
-        if (msg.role() == Role.SYSTEM) return msg;
-        return null;
     }
 
     // ── ASSISTANT 截断 ──

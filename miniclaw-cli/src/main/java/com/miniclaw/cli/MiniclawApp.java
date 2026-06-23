@@ -2,12 +2,20 @@ package com.miniclaw.cli;
 
 import com.miniclaw.context.SkillCatalog;
 import com.miniclaw.context.SkillLoader;
+import com.miniclaw.engine.ApprovalHandler;
+import com.miniclaw.engine.ApprovalRequest;
+import com.miniclaw.engine.ApprovalResult;
+import com.miniclaw.engine.ExecutionMode;
 import com.miniclaw.engine.PermissionMode;
+import com.miniclaw.engine.RiskLevel;
 import com.miniclaw.engine.SessionMeta;
 import com.miniclaw.engine.SessionService;
 import com.miniclaw.engine.ThinkingMode;
 import com.miniclaw.engine.AgentState;
 import com.miniclaw.engine.impl.AgentEngine;
+import com.miniclaw.engine.impl.PlanParser;
+import com.miniclaw.tools.schema.ExecutionPlan;
+import com.miniclaw.tools.schema.Task;
 import com.miniclaw.feishu.FeishuBot;
 import com.miniclaw.feishu.FeishuConfig;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -16,8 +24,9 @@ import com.miniclaw.memory.MemoryType;
 import com.miniclaw.memory.impl.DiskMemoryService;
 import com.miniclaw.provider.LLMConfig;
 import com.miniclaw.provider.LLMProvider;
-import com.miniclaw.provider.impl.openai.OpenAIProvider;
+import com.miniclaw.provider.ProviderFactory;
 import com.miniclaw.tools.schema.Message;
+import com.miniclaw.tools.Tool;
 import com.miniclaw.tools.ToolRegistry;
 import com.miniclaw.tools.impl.BashTool;
 import com.miniclaw.tools.impl.CommandSafetyInterceptor;
@@ -28,6 +37,8 @@ import com.miniclaw.tools.impl.ReadTool;
 import com.miniclaw.tools.impl.TodoWriteTool;
 import com.miniclaw.tools.impl.WebFetchTool;
 import com.miniclaw.tools.impl.WriteTool;
+import com.miniclaw.tools.mcp.McpConfig;
+import com.miniclaw.tools.mcp.McpManager;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -61,6 +72,10 @@ public class MiniclawApp implements Runnable {
         description = "API base URL")
     private String baseUrl;
 
+    @Option(names = {"--protocol"}, defaultValue = "OPENAI_COMPAT",
+        description = "API protocol: OPENAI_COMPAT, ANTHROPIC")
+    private String protocol;
+
     @Option(names = {"--thinking"}, description = "Enable slow thinking mode (TWO_STAGE)")
     private boolean thinking;
 
@@ -75,6 +90,10 @@ public class MiniclawApp implements Runnable {
     private SessionService sessionService;
     private FeishuBot feishuBot;
     private SkillLoader skillLoader;
+    private McpManager mcpManager;
+    private ToolRegistry registry;
+    private LLMConfig.Protocol protocolEnum;
+    private LineReader reader;
 
     @Override
     public void run() {
@@ -91,16 +110,31 @@ public class MiniclawApp implements Runnable {
             System.exit(1);
         }
 
+        try {
+            protocolEnum = LLMConfig.Protocol.valueOf(protocol.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            System.err.println("[C-004] Unknown protocol '" + protocol
+                + "'. Valid: OPENAI_COMPAT, ANTHROPIC");
+            System.exit(1);
+            return; // unreachable, but javac doesn't know that
+        }
+
         LLMConfig config = LLMConfig.builder()
             .apiKey(apiKey)
             .baseUrl(baseUrl)
             .model(model)
+            .protocol(protocolEnum)
             .build();
 
-        OpenAIProvider provider = new OpenAIProvider(config);
+        LLMProvider provider = ProviderFactory.create(config);
 
         Path userSkillsDir = Path.of(System.getProperty("user.home"), ".agents", "skills");
-        ToolRegistry registry = createToolRegistry(resolvedWorkDir, userSkillsDir);
+        registry = createToolRegistry(resolvedWorkDir, userSkillsDir);
+
+        McpConfig mcpConfig = McpConfig.load(resolvedWorkDir);
+        mcpManager = new McpManager();
+        List<Tool> mcpTools = mcpManager.startAll(mcpConfig, resolvedWorkDir);
+        for (Tool t : mcpTools) registry.register(t);
 
         ThinkingMode mode = thinking ? ThinkingMode.TWO_STAGE : ThinkingMode.OFF;
         Path memoryDir = Path.of(System.getProperty("user.home"), ".miniclaw", "memory");
@@ -132,7 +166,6 @@ public class MiniclawApp implements Runnable {
         }
 
         Path historyPath = Path.of(System.getProperty("user.home"), ".miniclaw", "history");
-        LineReader reader;
         try {
             reader = LineReaderBuilder.builder()
                 .terminal(TerminalBuilder.terminal())
@@ -148,15 +181,7 @@ public class MiniclawApp implements Runnable {
             engine.interrupt();
         });
 
-        engine.setPermissionHandler(call -> {
-            String args = call.arguments() != null ? call.arguments().toString() : "{}";
-            if (args.length() > 120) {
-                args = args.substring(0, 120) + "...";
-            }
-            String prompt = GRAY + "  Execute " + call.name() + " " + args + "? [y/n] " + RESET;
-            String answer = reader.readLine(prompt).trim().toLowerCase();
-            return answer.equals("y") || answer.equals("yes");
-        });
+        engine.setApprovalHandler(this::handleApproval);
 
         // SubAgent 回调 — 用户可见的派发/完成信息
         engine.onSubAgentSpawn(event -> {
@@ -227,6 +252,10 @@ public class MiniclawApp implements Runnable {
                 handleSessionCommand(input.substring("/session ".length()).trim());
                 continue;
             }
+            if (input.startsWith("/mcp")) {
+                handleMcpCommand(input.substring("/mcp".length()).trim());
+                continue;
+            }
             if (input.startsWith("/skill")) {
                 handleSkillCommand(input.substring("/skill".length()).trim());
                 continue;
@@ -236,6 +265,7 @@ public class MiniclawApp implements Runnable {
                     case "/" -> printMenu(engine.thinkingMode(), engine.permissionMode());
                     case "/h", "/help" -> printHelp(engine.thinkingMode(), engine.permissionMode());
                     case "/q", "/exit" -> {
+                        if (mcpManager != null) mcpManager.shutdown();
                         System.out.println("Goodbye.");
                         return;
                     }
@@ -243,6 +273,7 @@ public class MiniclawApp implements Runnable {
                     case "/p", "/plan" -> setPermissionMode(engine, PermissionMode.PLAN);
                     case "/a", "/ask" -> setPermissionMode(engine, PermissionMode.ASK);
                     case "/auto" -> setPermissionMode(engine, PermissionMode.AUTO);
+                    case "/plan-exec" -> togglePlanExec(engine);
                     case "/c", "/clear" -> {
                         engine.clearSession();
                         System.out.println(GRAY + "  session cleared." + RESET + "\n");
@@ -296,8 +327,73 @@ public class MiniclawApp implements Runnable {
             }
         }
 
+        if (mcpManager != null) mcpManager.shutdown();
         log.info("miniclaw exiting normally.");
         System.out.println("Goodbye.");
+    }
+
+    private ApprovalResult handleApproval(ApprovalRequest req) {
+        printApprovalBox(req);
+
+        for (int attempt = 0; attempt < 5; attempt++) {
+            System.out.print(GRAY + "  [y]批准 [a]同类型全放行 [n]拒绝 [m]修改参数 > " + RESET);
+            String input = reader.readLine("").trim().toLowerCase();
+
+            return switch (input) {
+                case "", "y" -> new ApprovalResult.Approve();
+                case "a" -> new ApprovalResult.ApproveAllSameType(req.toolName());
+                case "n" -> {
+                    System.out.print(GRAY + "  拒绝原因（可选，回车跳过）> " + RESET);
+                    String reason = reader.readLine("").trim();
+                    yield new ApprovalResult.Reject(
+                        reason.isEmpty() ? "User denied " + req.toolName() : reason);
+                }
+                case "m" -> {
+                    System.out.print(GRAY + "  修改建议 > " + RESET);
+                    String guidance = reader.readLine("").trim();
+                    yield new ApprovalResult.ModifyParams(
+                        guidance.isEmpty() ? "Please use different parameters." : guidance);
+                }
+                default -> {
+                    System.out.println(GRAY + "  ?? 请输入 y/a/n/m" + RESET);
+                    yield null;
+                }
+            };
+        }
+        return new ApprovalResult.Reject("连续多次无效输入");
+    }
+
+    private void printApprovalBox(ApprovalRequest req) {
+        String riskIcon = switch (req.riskLevel()) {
+            case HIGH   -> "!!";
+            case MEDIUM -> "! ";
+            case LOW    -> "  ";
+        };
+        String riskName = switch (req.riskLevel()) {
+            case HIGH -> "高危"; case MEDIUM -> "中危"; case LOW -> "低危";
+        };
+
+        System.out.println();
+        System.out.println("  +----------------------------------------+");
+        System.out.println("  |  " + riskIcon + "  需要审批                          |");
+        System.out.println("  +----------------------------------------+");
+        System.out.println("  |  工具: " + padRight(req.toolName(), 31) + "|");
+        System.out.println("  |  等级: " + padRight(riskIcon + " " + riskName, 31) + "|");
+        System.out.println("  |  风险: " + padRight(req.riskDescription(), 31) + "|");
+        System.out.println("  +----------------------------------------+");
+        System.out.println("  |  参数:                                  |");
+        for (String line : req.parameters().split("\n")) {
+            if (line.length() > 38) line = line.substring(0, 38);
+            System.out.println("  |    " + padRight(line, 38) + "|");
+        }
+        if (req.llmIntent() != null && !req.llmIntent().isEmpty()) {
+            System.out.println("  |  ---                                   |");
+            String intent = req.llmIntent();
+            if (intent.length() > 38) intent = intent.substring(0, 38);
+            System.out.println("  |  " + padRight(intent, 38) + "|");
+        }
+        System.out.println("  +----------------------------------------+");
+        System.out.println();
     }
 
     private void printContext(AgentEngine engine) {
@@ -305,17 +401,40 @@ public class MiniclawApp implements Runnable {
         int maxTokens = 8000;
         int pct = maxTokens > 0 ? tokens * 100 / maxTokens : 0;
         String bar = "░".repeat(10);
-        int filled = pct * 10 / 100;
+        int filled = Math.min(pct * 10 / 100, 10);
         bar = "█".repeat(filled) + "░".repeat(10 - filled);
+
+        int msgCount = engine.getMessageCount();
         System.out.println();
-        System.out.println(GRAY + "  context  [" + bar + "] " + pct + "%  (~" + formatTokens(tokens) + " / " + formatTokens(maxTokens) + ")" + RESET);
+        System.out.println(GRAY + "  context  [" + bar + "] " + pct + "%  ~" + tokens
+            + " / " + maxTokens + " tokens  (" + msgCount + " msgs)" + RESET);
+
+        // Token 分类明细
+        var bd = engine.getTokenBreakdown();
+        if (!bd.isEmpty()) {
+            System.out.println(GRAY + "  tokens   system:" + bd.getOrDefault("system", 0)
+                + "  user:" + bd.getOrDefault("user", 0)
+                + "  assistant:" + bd.getOrDefault("assistant", 0)
+                + "  tool:" + bd.getOrDefault("tool", 0) + RESET);
+        }
+
         var mask = engine.getLastMaskedContext();
         if (mask != null) {
+            int evicted = mask.evictedTurnGroups() != null
+                ? mask.evictedTurnGroups().size() : 0;
             System.out.println(GRAY + "  mask     T0:" + mask.tier0Count()
                 + "  T1:" + mask.tier1Count()
                 + "  T2:" + mask.tier2Count()
-                + "  T3:" + mask.tier3Count() + RESET);
+                + "  T3:" + mask.tier3Count()
+                + (evicted > 0 ? "  (evicted:" + evicted + " groups)" : "") + RESET);
         }
+
+        // 压缩状态
+        String compStatus = engine.getCompactionStatus();
+        if (compStatus != null && !compStatus.isEmpty()) {
+            System.out.println(GRAY + "  compact  " + compStatus + RESET);
+        }
+
         System.out.println(GRAY + "  mode     " + engine.thinkingMode() + " / " + engine.permissionMode() + RESET);
         System.out.println(GRAY + "  workdir  " + engine.workDir() + RESET);
         System.out.println();
@@ -333,12 +452,14 @@ public class MiniclawApp implements Runnable {
             case "/p", "/plan" -> "plan";
             case "/a", "/ask" -> "ask";
             case "/auto" -> "auto";
+            case "/plan-exec" -> "plan-exec";
             case "/c", "/clear" -> "clear";
             case "/compact" -> "compact";
             case "/context" -> "context";
             case "/feishu-on" -> "feishu-on";
             case "/feishu-off" -> "feishu-off";
             case "/skill" -> "skill";
+            case "/mcp" -> "mcp";
             default -> null;
         };
     }
@@ -446,9 +567,40 @@ public class MiniclawApp implements Runnable {
             service.regenerateIndex();
             engine.setMemoryIndex(service.loadIndex());
             System.out.println(GRAY + "  Index regenerated from files." + RESET + "\n");
+        } else if (sub.startsWith("add ")) {
+            handleMemoryAdd(sub.substring("add ".length()).trim(), service, engine);
         } else {
-            System.out.println(GRAY + "  Usage: /memory list | /memory regen" + RESET + "\n");
+            System.out.println(GRAY + "  Usage: /memory list | /memory add <type> <name> <content> | /memory regen" + RESET + "\n");
         }
+    }
+
+    private void handleMemoryAdd(String args, DiskMemoryService service,
+                                 AgentEngine engine) {
+        // 解析: <type> <name> <content>
+        String[] parts = args.split("\\s+", 3);
+        if (parts.length < 3) {
+            System.out.println(GRAY + "  Usage: /memory add <type> <name> <content>" + RESET);
+            System.out.println(GRAY + "  Types: user, feedback, project, reference" + RESET + "\n");
+            return;
+        }
+        MemoryType type;
+        try {
+            type = MemoryType.valueOf(parts[0].toUpperCase());
+        } catch (IllegalArgumentException e) {
+            System.out.println(GRAY + "  Invalid type: " + parts[0]
+                + ". Use: user, feedback, project, reference" + RESET + "\n");
+            return;
+        }
+        String name = parts[1].replaceAll("[^a-zA-Z0-9_-]", "_");
+        String content = parts[2];
+        String description = content.length() > 100
+            ? content.substring(0, 100) + "..." : content;
+
+        MemoryEntry entry = new MemoryEntry(name, description, type, Instant.now(), content);
+        service.save(entry);
+        engine.setMemoryIndex(service.loadIndex());
+        System.out.println(GRAY + "  saved " + entry.filename()
+            + " [" + type.name().toLowerCase() + "]" + RESET + "\n");
     }
 
     /** Load hierarchical CLAUDE.md: ~/.miniclaw/CLAUDE.md + ./CLAUDE.md (fallback AGENTS.md). */
@@ -648,6 +800,85 @@ public class MiniclawApp implements Runnable {
         System.out.println();
     }
 
+    // === MCP 命令 ===
+
+    private void handleMcpCommand(String args) {
+        if (mcpManager == null) {
+            System.out.println(GRAY + "  MCP manager not initialized." + RESET + "\n");
+            return;
+        }
+
+        if (args.isEmpty()) {
+            var statuses = mcpManager.status();
+            if (statuses.isEmpty()) {
+                System.out.println(GRAY + "  No MCP servers configured." + RESET + "\n");
+                return;
+            }
+            System.out.println();
+            System.out.println(GRAY + "  MCP Servers:" + RESET);
+            for (var s : statuses) {
+                String icon = "RUNNING".equals(s.state()) ? "●" : "○";
+                String tools = s.toolCount() > 0 ? s.toolCount() + " tools" : "—";
+                System.out.println(GRAY + "    " + icon + " " + padRight(s.name(), 20)
+                    + padRight(s.transport(), 8) + padRight(s.state(), 10) + tools + RESET);
+            }
+            System.out.println();
+            return;
+        }
+
+        if (args.startsWith("restart ")) {
+            String name = args.substring("restart ".length()).trim();
+            List<Tool> tools = mcpManager.restart(name);
+            for (Tool t : tools) registry.register(t);
+            System.out.println(GRAY + "  MCP server '" + name + "' restarted with "
+                + tools.size() + " tools." + RESET + "\n");
+            return;
+        }
+
+        if (args.startsWith("logs ")) {
+            String name = args.substring("logs ".length()).trim();
+            List<String> logs = mcpManager.logs(name);
+            if (logs.isEmpty()) {
+                System.out.println(GRAY + "  No logs for: " + name + RESET + "\n");
+                return;
+            }
+            System.out.println();
+            for (String line : logs) {
+                System.out.println(GRAY + "  " + line + RESET);
+            }
+            System.out.println();
+            return;
+        }
+
+        if (args.startsWith("disable ")) {
+            String name = args.substring("disable ".length()).trim();
+            mcpManager.disable(name);
+            System.out.println(GRAY + "  MCP server '" + name + "' disabled." + RESET + "\n");
+            return;
+        }
+
+        if (args.startsWith("enable ")) {
+            String name = args.substring("enable ".length()).trim();
+            List<Tool> tools = mcpManager.restart(name);
+            for (Tool t : tools) registry.register(t);
+            System.out.println(GRAY + "  MCP server '" + name + "' enabled with "
+                + tools.size() + " tools." + RESET + "\n");
+            return;
+        }
+
+        printMcpUsage();
+    }
+
+    private void printMcpUsage() {
+        System.out.println();
+        System.out.println(GRAY + "  /mcp                    list all MCP servers" + RESET);
+        System.out.println(GRAY + "  /mcp restart <name>     restart a server" + RESET);
+        System.out.println(GRAY + "  /mcp logs <name>        show server stderr logs" + RESET);
+        System.out.println(GRAY + "  /mcp disable <name>     stop and disable a server" + RESET);
+        System.out.println(GRAY + "  /mcp enable <name>      re-enable a disabled server" + RESET);
+        System.out.println();
+    }
+
     // === 技能命令 ===
 
     private void handleSkillCommand(String args) {
@@ -727,14 +958,15 @@ public class MiniclawApp implements Runnable {
 
     private void printMenu(ThinkingMode thinking, PermissionMode perm) {
         System.out.println();
-        System.out.println(GRAY + "  /thinking   toggle thinking     (current: " + thinking + ")" + RESET);
+        System.out.println(GRAY + "  /thinking   toggle thinking     /plan-exec plan+execute" + RESET);
         System.out.println(GRAY + "  /plan       read-only mode      (current: " + perm + ")" + RESET);
         System.out.println(GRAY + "  /ask        confirm writes      /auto   full-auto" + RESET);
         System.out.println(GRAY + "  /clear      reset session       /compact compress" + RESET);
         System.out.println(GRAY + "  /context    token usage         /remember add memory" + RESET);
         System.out.println(GRAY + "  /memory     list memories       /session manage sessions" + RESET);
-        System.out.println(GRAY + "  /skill      load/unload skills  /feishu-on  /feishu-off" + RESET);
-        System.out.println(GRAY + "  /help       show all commands   /exit   quit" + RESET);
+        System.out.println(GRAY + "  /skill      load/unload skills  /mcp  MCP servers" + RESET);
+        System.out.println(GRAY + "  /help       show all commands   /feishu-on  /feishu-off" + RESET);
+        System.out.println(GRAY + "  /exit       quit" + RESET);
         System.out.println();
     }
 
@@ -754,6 +986,7 @@ public class MiniclawApp implements Runnable {
         System.out.println("    /memory      list or manage memory entries");
         System.out.println("    /session     save, load, list, search sessions");
         System.out.println("    /skill       list, load, unload skills");
+        System.out.println("    /mcp         manage MCP servers (status/restart/logs/disable/enable)");
         System.out.println("    /feishu-on   enable Feishu bot companion");
         System.out.println("    /feishu-off  disable Feishu bot companion");
         System.out.println("    /help        show this help");
@@ -791,6 +1024,56 @@ public class MiniclawApp implements Runnable {
         engine.setPermissionMode(mode);
         System.out.println(GRAY + "  permission: " + old + " -> " + mode + RESET + "\n");
         log.info("Permission mode switched: {} -> {}", old, mode);
+    }
+
+    private void togglePlanExec(AgentEngine engine) {
+        boolean isPlanExec = engine.executionMode() == ExecutionMode.PLAN_EXECUTE;
+        if (isPlanExec) {
+            engine.setExecutionMode(ExecutionMode.REACT);
+            System.out.println(GRAY + "  execution mode: PLAN_EXECUTE -> REACT" + RESET + "\n");
+        } else {
+            engine.setExecutionMode(ExecutionMode.PLAN_EXECUTE);
+            engine.setOnPlanReady(this::confirmPlan);
+            System.out.println(GRAY + "  execution mode: REACT -> PLAN_EXECUTE" + RESET + "\n");
+        }
+    }
+
+    private boolean confirmPlan(ExecutionPlan plan) {
+        System.out.println();
+        System.out.println(GRAY + "  ╔══════════════════════════════════════╗" + RESET);
+        System.out.println(GRAY + "  ║        Execution Plan                ║" + RESET);
+        System.out.println(GRAY + "  ╚══════════════════════════════════════╝" + RESET);
+        System.out.println("  Goal: " + plan.getGoal());
+        System.out.println();
+
+        List<List<String>> levels = PlanParser.computeLevels(plan.getTasks());
+
+        for (int i = 0; i < levels.size(); i++) {
+            System.out.println(GRAY + "  Level " + i + RESET);
+            for (String taskId : levels.get(i)) {
+                Task task = plan.getTask(taskId);
+                if (task == null) continue;
+                String emoji = switch (task.getTaskType()) {
+                    case EXPLORE -> "🔍"; // 🔍
+                    case MODIFY  -> "🔧"; // 🔧
+                    case VERIFY  -> "✅";       // ✅
+                };
+                System.out.println("    " + emoji + " " + taskId + " [" + task.getTaskType() + "]");
+                System.out.println("      " + task.getDescription());
+                if (!task.getDependencies().isEmpty()) {
+                    System.out.println(GRAY + "      depends on: " + String.join(", ", task.getDependencies()) + RESET);
+                }
+            }
+            System.out.println();
+        }
+
+        System.out.print(GRAY + "  Execute this plan? [Y/n] " + RESET);
+        try {
+            String input = System.console().readLine().trim().toLowerCase();
+            return input.isEmpty() || "y".equals(input) || "yes".equals(input);
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     // === 回调 ===
@@ -836,7 +1119,11 @@ public class MiniclawApp implements Runnable {
         System.out.println(boxLine(W, "", '╠', '╣'));
         System.out.println(boxLine(W, "  model     " + padRight(model, W - 12)));
         System.out.println(boxLine(W, "  workdir   " + padRight(truncatePath(workDir, W - 12), W - 12)));
-        String toolsLine = toolCount + " loaded (read,write,edit,bash,glob,grep,todo_write,web_fetch)";
+        int builtinCount = 8;
+        int mcpCount = toolCount - builtinCount;
+        String toolsLine = toolCount + " loaded (8 built-in";
+        if (mcpCount > 0) toolsLine += " + " + mcpCount + " MCP";
+        toolsLine += ")";
         System.out.println(boxLine(W, "  tools     " + padRight(truncatePath(toolsLine, W - 12), W - 12)));
         System.out.println(boxLine(W, "", '╠', '╣'));
         System.out.println(boxLine(W, "  /help     show all commands"));
@@ -845,7 +1132,8 @@ public class MiniclawApp implements Runnable {
         System.out.println(boxLine(W, "  /thinking toggle thinking  /compact compress context"));
         System.out.println(boxLine(W, "  /context  show session     /session save/load"));
         System.out.println(boxLine(W, "  /memory   list memories    /skill  manage skills"));
-        System.out.println(boxLine(W, "  /feishu-on  /feishu-off    /exit   quit"));
+        System.out.println(boxLine(W, "  /mcp      MCP servers      /feishu-on  /feishu-off"));
+        System.out.println(boxLine(W, "  /exit     quit             /help   all commands"));
         System.out.println(boxLine(W, "═".repeat(W), '╚', '╝'));
         System.out.println();
         System.out.println("  Try \"explain this project\" or \"fix the NPE in UserService.java\"");
@@ -915,10 +1203,11 @@ public class MiniclawApp implements Runnable {
             .apiKey(apiKey)
             .baseUrl(baseUrl)
             .model(model)
+            .protocol(protocolEnum)
             .build();
 
         Path workDir = resolvedWorkDir != null ? resolvedWorkDir : Path.of(System.getProperty("user.dir"));
-        OpenAIProvider provider = new OpenAIProvider(llmConfig);
+        LLMProvider provider = ProviderFactory.create(llmConfig);
         Path skillsDir = Path.of(System.getProperty("user.home"), ".agents", "skills");
         ToolRegistry registry = createToolRegistry(workDir, skillsDir);
         AgentEngine eng = new AgentEngine(provider, registry, workDir.toString(),

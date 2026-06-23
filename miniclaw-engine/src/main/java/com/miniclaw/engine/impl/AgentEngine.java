@@ -7,15 +7,26 @@ import com.miniclaw.context.SkillLoader;
 import com.miniclaw.context.impl.LadderedCompactor;
 import com.miniclaw.context.impl.MessageMasker;
 import com.miniclaw.context.impl.MessageMasker.MaskedContext;
+import com.miniclaw.context.impl.TurnGroup;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import com.miniclaw.engine.AgentLoop;
 import com.miniclaw.engine.AgentState;
 import com.miniclaw.engine.AgentStateEvent;
+import com.miniclaw.engine.ApprovalHandler;
+import com.miniclaw.engine.ApprovalRequest;
+import com.miniclaw.engine.ApprovalResult;
 import com.miniclaw.engine.PermissionMode;
 import com.miniclaw.engine.SessionMeta;
 import com.miniclaw.engine.SessionService;
+import com.miniclaw.engine.ExecutionMode;
 import com.miniclaw.engine.ThinkingMode;
+import com.miniclaw.context.PlannerPrompt;
+import com.miniclaw.tools.Result;
+import com.miniclaw.tools.schema.ExecutionPlan;
+import com.miniclaw.tools.schema.PlanStatus;
+import com.miniclaw.tools.schema.Task;
+import com.miniclaw.tools.schema.TaskStatus;
 import com.miniclaw.memory.MemoryEntry;
 import com.miniclaw.memory.MemoryType;
 import com.miniclaw.memory.impl.DiskMemoryService;
@@ -35,6 +46,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -105,7 +117,9 @@ public class AgentEngine implements AgentLoop {
                 + "- 涉及哪些文件\n"
                 + "\n"
                 + "用户会看到确认提示，批准或拒绝每次写操作。\n"
-                + "如果被拒绝：说明什么被阻止了，并提出替代方案。";
+                + "如果被拒绝：说明什么被阻止了，并提出替代方案。\n"
+                + "\n"
+                + "用户说\"记一下\"/\"记住\"/\"别忘了\"时，立即调用 memory_save 工具保存，不要仅口头确认。";
             case AUTO -> L1_KERNEL
                 + "当前处于 AUTO（自动执行）模式，拥有全部工具权限，无需用户确认。\n"
                 + "\n"
@@ -116,7 +130,9 @@ public class AgentEngine implements AgentLoop {
                 + "\n"
                 + "用 task 工具将独立的子任务（搜索代码、分析模块、隔离实现某个功能）"
                 + "委派给子 Agent 以保持上下文干净。\n"
-                + "完成后总结做了什么。";
+                + "完成后总结做了什么。\n"
+                + "\n"
+                + "用户说\"记一下\"/\"记住\"/\"别忘了\"时，立即调用 memory_save 工具保存，不要仅口头确认。";
         };
 
         if (permissionMode != PermissionMode.PLAN && enableSubAgents) {
@@ -279,9 +295,13 @@ public class AgentEngine implements AgentLoop {
         return new ToolDefinition(
             MEMORY_SAVE_TOOL_NAME,
             "Save a memory entry to persistent storage. "
-                + "Use this when the user shares information worth remembering "
-                + "across sessions (preferences, decisions, project context, feedback). "
-                + "The LLM should infer name, description, type, and content from the conversation.",
+                + "**MUST call this when the user explicitly asks you to remember something.** "
+                + "Trigger patterns: \"记一下\" / \"记住\" / \"别忘了\" / \"remember this\" / "
+                + "\"keep in mind\" / \"save this\" / \"make a note\". "
+                + "Also use proactively for: user preferences, project conventions, "
+                + "important decisions, feedback about your approach, "
+                + "and non-obvious context that future conversations will need. "
+                + "Infer name, description, type, and content from the conversation.",
             """
             {
               "type": "object",
@@ -329,11 +349,15 @@ public class AgentEngine implements AgentLoop {
     private final List<Message> sessionHistory = new ArrayList<>();
     private final List<String> recentCallSignatures = new ArrayList<>();
     private volatile ThinkingMode thinkingMode;
+    private volatile ExecutionMode executionMode = ExecutionMode.REACT;
+    private volatile PlanExecutor planExecutor;
+    private volatile Predicate<ExecutionPlan> onPlanReady;
     private volatile PermissionMode permissionMode = PermissionMode.AUTO;
     private volatile Runnable onThinkingBegin;
     private final List<Consumer<String>> onReasoningListeners = new CopyOnWriteArrayList<>();
     private final List<Consumer<String>> onThinkingTokenListeners = new CopyOnWriteArrayList<>();
-    private volatile Predicate<ToolCall> permissionHandler;
+    private volatile ApprovalHandler approvalHandler;
+    private final Set<String> autoApprovedTools = ConcurrentHashMap.newKeySet();
     private volatile boolean interrupted;
     volatile int lastRunTurns;
     volatile boolean enableSubAgents = true;
@@ -346,6 +370,11 @@ public class AgentEngine implements AgentLoop {
     private final List<Consumer<ToolEndEvent>> onToolEndListeners = new CopyOnWriteArrayList<>();
     private volatile SessionService sessionService;
     volatile MaskedContext lastMaskedContext;
+
+    // Compaction status tracking
+    private record CompactionStatus(int beforeMsgs, int afterMsgs,
+        int beforeTokens, int afterTokens, int mapBatches, boolean usedReduce) {}
+    private volatile CompactionStatus lastCompaction;
 
     // V3.6 工作内存：会话级键值存储，clearSession 时清空
     private final Map<String, String> workingMemory = new ConcurrentHashMap<>();
@@ -396,7 +425,12 @@ public class AgentEngine implements AgentLoop {
 
     @Override
     public String run(String userPrompt) {
-        log.info("[Engine] 引擎启动，锁定工作区: {}, 思考模式: {}", workDir, thinkingMode);
+        log.info("[Engine] 引擎启动，锁定工作区: {}, 思考模式: {}, 执行模式: {}",
+            workDir, thinkingMode, executionMode);
+
+        if (executionMode == ExecutionMode.PLAN_EXECUTE) {
+            return runPlanExecute(userPrompt);
+        }
 
         if (sessionHistory.isEmpty()) {
             sessionHistory.add(Message.system(buildSystemPrompt()));
@@ -480,26 +514,32 @@ public class AgentEngine implements AgentLoop {
             extractMemories(contextHistory, turnCount);
 
             // 上下文掩码（>12轮时启用角色+时效分层掩码）
+            List<TurnGroup> evictedGroups = List.of();
             if (MessageMasker.shouldMask(turnCount)) {
                 var masked = MessageMasker.mask(contextHistory, turnCount);
                 contextHistory = masked.messages();
+                evictedGroups = masked.evictedTurnGroups();
                 lastMaskedContext = masked;
-                log.info("[Engine] 上下文掩码: T0={}, T1={}, T2={}, T3={}",
+                log.info("[Engine] 上下文掩码: T0={}, T1={}, T2={}, T3={} (evicted:{} groups)",
                     masked.tier0Count(), masked.tier1Count(),
-                    masked.tier2Count(), masked.tier3Count());
+                    masked.tier2Count(), masked.tier3Count(),
+                    evictedGroups.size());
             }
 
             // 上下文压缩（always-on 规则始终执行，压力压缩按需触发）
             int beforeMsgs = contextHistory.size();
             int beforeTokens = contextManager.estimateTokens(contextHistory);
-            List<Message> compacted = contextManager.compact(contextHistory, MAX_CONTEXT_TOKENS);
+            List<Message> compacted = contextManager.compact(contextHistory, MAX_CONTEXT_TOKENS, evictedGroups);
             sessionHistory.clear();
             sessionHistory.addAll(compacted);
             int afterTokens = contextManager.estimateTokens(sessionHistory);
+            int afterMsgs = sessionHistory.size();
+            lastCompaction = new CompactionStatus(beforeMsgs, afterMsgs,
+                beforeTokens, afterTokens, evictedGroups.size(), afterTokens < beforeTokens);
             if (afterTokens < beforeTokens) {
                 int delta = beforeTokens - afterTokens;
                 log.info("[Engine] 上下文压缩: {} → {} 条消息 ({} → {} tokens, -{}%)",
-                    beforeMsgs, sessionHistory.size(), beforeTokens, afterTokens,
+                    beforeMsgs, afterMsgs, beforeTokens, afterTokens,
                     (int) (100.0 * delta / beforeTokens));
             }
 
@@ -759,11 +799,27 @@ public class AgentEngine implements AgentLoop {
                         + "Switch to ASK or AUTO mode to execute write operations."));
                     continue;
                 }
-                if (permissionMode == PermissionMode.ASK && permissionHandler != null) {
-                    if (!permissionHandler.test(call)) {
-                        contextHistory.add(Message.toolResult(call.id(),
-                            "User denied tool execution: " + call.name()));
-                        continue;
+                if (permissionMode == PermissionMode.ASK && approvalHandler != null) {
+                    if (!autoApprovedTools.contains(call.name())) {
+                        ApprovalRequest req = ApprovalRequest.from(call, lastAssistantMessage(contextHistory));
+                        ApprovalResult decision = approvalHandler.handle(req);
+                        switch (decision) {
+                            case ApprovalResult.Approve __ -> { /* 执行 */ }
+                            case ApprovalResult.ApproveAllSameType a -> {
+                                autoApprovedTools.add(a.toolName());
+                            }
+                            case ApprovalResult.Reject r -> {
+                                contextHistory.add(Message.toolResult(call.id(),
+                                    "User rejected " + call.name() + ": " + r.reason()));
+                                continue;
+                            }
+                            case ApprovalResult.ModifyParams m -> {
+                                contextHistory.add(Message.toolResult(call.id(),
+                                    "User wants you to modify the parameters. " + m.guidance()
+                                    + " Please adjust and call " + call.name() + " again."));
+                                continue;
+                            }
+                        }
                     }
                 }
             }
@@ -849,8 +905,8 @@ public class AgentEngine implements AgentLoop {
             ThinkingMode.OFF, null, null, l5MemoryIndex);
         subEngine.setPermissionMode(permissionMode);
         subEngine.enableSubAgents = false; // 防止递归委派
-        if (permissionHandler != null) {
-            subEngine.setPermissionHandler(permissionHandler);
+        if (approvalHandler != null) {
+            subEngine.setApprovalHandler(approvalHandler);
         }
         // 子引擎不流式输出（避免干扰主 Agent 显示）
         subEngine.lastRunTurns = 0;
@@ -902,11 +958,48 @@ public class AgentEngine implements AgentLoop {
         log.info("[Engine] 收到中断信号");
     }
 
+    // ── 对话结束事实提取 ──────────────────────────────────────────
+
+    private void extractFacts() {
+        if (diskMemoryService == null || permissionMode == PermissionMode.PLAN) return;
+        if (sessionHistory.size() <= 1) return; // 只有系统提示，无实际对话
+
+        log.info("[Engine] 对话结束事实提取: {} 条消息", sessionHistory.size());
+
+        List<Message> extractMsgs = new ArrayList<>();
+        extractMsgs.add(Message.system(EXTRACTION_PROMPT));
+        extractMsgs.add(Message.user(formatMessagesForExtraction(sessionHistory)));
+
+        try {
+            Message result = provider.generate(extractMsgs, EMPTY_TOOLS);
+            if (result.content() == null || result.content().isBlank()) return;
+
+            List<MemoryEntry> entries = parseExtractionResult(result.content());
+            int saved = 0;
+            for (MemoryEntry entry : entries) {
+                if (saved >= 5) break;
+                diskMemoryService.save(entry);
+                saved++;
+                log.info("[Engine] extractFacts 已保存: {} [{}]", entry.name(), entry.type());
+            }
+            if (saved > 0) {
+                setMemoryIndex(diskMemoryService.loadIndex());
+                log.info("[Engine] extractFacts 保存 {} 条记忆", saved);
+            }
+        } catch (LLMException e) {
+            log.warn("[Engine] extractFacts LLM 失败: {}", e.getMessage());
+        } catch (Exception e) {
+            log.warn("[Engine] extractFacts 失败: {}", e.getMessage());
+        }
+    }
+
     @Override
     public void clearSession() {
+        extractFacts();
         autoSaveSession();
         sessionHistory.clear();
         recentCallSignatures.clear();
+        autoApprovedTools.clear();
         workingMemory.clear();
         previousTodoContents = List.of();
         turnsWithoutTodoProgress = 0;
@@ -1356,6 +1449,179 @@ public class AgentEngine implements AgentLoop {
         }
     }
 
+    // === Plan-and-Execute ===
+
+    public void setExecutionMode(ExecutionMode mode) {
+        this.executionMode = mode;
+        if (mode == ExecutionMode.PLAN_EXECUTE && planExecutor == null) {
+            this.planExecutor = new PlanExecutor(provider, registry, workDir);
+        }
+        rebuildSystemPrompt();
+        log.info("[Engine] 执行模式切换为: {}", mode);
+    }
+
+    public ExecutionMode executionMode() {
+        return executionMode;
+    }
+
+    public void setOnPlanReady(Predicate<ExecutionPlan> handler) {
+        this.onPlanReady = handler;
+    }
+
+    /**
+     * Plan-and-Execute 流程：
+     * 1. 读取工作区状态
+     * 2. LLM 生成任务 DAG（无工具）
+     * 3. 解析 JSON → ExecutionPlan
+     * 4. 写入 plan.md + 展示计划
+     * 5. 交互确认
+     * 6. PlanExecutor 逐级执行
+     * 7. 同步结果到工作区
+     * 8. 返回摘要
+     */
+    private String runPlanExecute(String userPrompt) {
+        fireState(AgentState.PLANNING, 0);
+
+        // ── Phase 1: 读工作区状态 ──
+        String existingPlanMd = readWorkspaceFile(".miniclaw/plan.md");
+        String existingTodoMd = readWorkspaceFile(".miniclaw/todo.md");
+
+        // ── Phase 2: 规划提示词 → LLM → JSON ──
+        String planningPrompt = PlannerPrompt.buildInitialPrompt(userPrompt, existingPlanMd, existingTodoMd);
+        List<Message> planMessages = new ArrayList<>();
+        planMessages.add(Message.system("You are a task planner. Output pure JSON only."));
+        planMessages.add(Message.user(planningPrompt));
+
+        log.info("[PlanExecute] 规划阶段: 调用 LLM 生成任务计划...");
+        Message planResponse;
+        try {
+            planResponse = provider.generate(planMessages, List.of());
+        } catch (LLMException e) {
+            fireState(AgentState.ERROR, 0, Map.of("error", e.getMessage()));
+            return "[A-002] 规划阶段 LLM 调用失败: " + e.getMessage();
+        }
+
+        String planJson = planResponse.content() != null ? planResponse.content() : "";
+        if (planJson.isBlank()) {
+            return "[P-001] LLM 未返回计划内容";
+        }
+
+        // ── Phase 3: 解析计划 ──
+        Result<ExecutionPlan> parseResult = new PlanParser().parse(planJson);
+        if (parseResult instanceof Result.Err<ExecutionPlan> err) {
+            return "[P-00x] 计划解析失败: " + err.error().message();
+        }
+        ExecutionPlan plan = ((Result.Ok<ExecutionPlan>) parseResult).data();
+
+        // ── Phase 4: 写入 plan.md 持久化 ──
+        String planMarkdown = formatPlanAsMarkdown(plan);
+        writePlanToWorkspace(planMarkdown);
+
+        // ── Phase 5: 交互确认 ──
+        if (onPlanReady != null) {
+            boolean confirmed = onPlanReady.test(plan);
+            if (!confirmed) {
+                plan.setStatus(PlanStatus.CANCELLED);
+                log.info("[PlanExecute] 用户取消计划");
+                return "计划已取消。用 /auto 或 /ask 切换到执行模式手动执行。";
+            }
+        }
+
+        // ── Phase 6: 执行 ──
+        fireState(AgentState.EXECUTING, 0, Map.of("taskCount", plan.taskCount()));
+        log.info("[PlanExecute] 执行阶段: {} tasks", plan.taskCount());
+
+        if (planExecutor == null) {
+            planExecutor = new PlanExecutor(provider, registry, workDir);
+        }
+        ExecutionPlan completedPlan = planExecutor.execute(plan);
+
+        // ── Phase 7: 同步结果 ──
+        syncPlanResultsToWorkspace(completedPlan);
+        fireState(AgentState.REPLYING, completedPlan.taskCount());
+
+        // ── Phase 8: 返回摘要 ──
+        return buildPlanSummary(completedPlan);
+    }
+
+    private String readWorkspaceFile(String path) {
+        try {
+            Path file = Path.of(workDir, path);
+            if (Files.exists(file)) {
+                String content = Files.readString(file);
+                return content.isBlank() ? null : content;
+            }
+        } catch (Exception e) {
+            log.debug("[Engine] 读取 {} 失败: {}", path, e.getMessage());
+        }
+        return null;
+    }
+
+    private String formatPlanAsMarkdown(ExecutionPlan plan) {
+        StringBuilder md = new StringBuilder();
+        md.append("# Plan: ").append(plan.getGoal()).append("\n\n");
+        List<List<String>> levels = PlanParser.computeLevels(plan.getTasks());
+        for (int i = 0; i < levels.size(); i++) {
+            md.append("## Level ").append(i).append("\n\n");
+            for (String taskId : levels.get(i)) {
+                Task task = plan.getTask(taskId);
+                if (task == null) continue;
+                md.append("- **").append(taskId).append("** [").append(task.getTaskType())
+                    .append("]: ").append(task.getDescription()).append("\n");
+                if (!task.getDependencies().isEmpty()) {
+                    md.append("  - depends on: ").append(String.join(", ", task.getDependencies())).append("\n");
+                }
+            }
+            md.append("\n");
+        }
+        return md.toString();
+    }
+
+    private void syncPlanResultsToWorkspace(ExecutionPlan plan) {
+        StringBuilder md = new StringBuilder();
+        md.append("# Execution Plan\n\n");
+        md.append("Goal: ").append(plan.getGoal()).append("\n\n");
+        md.append("Status: ").append(plan.getStatus()).append("\n\n");
+
+        for (String taskId : plan.getExecutionOrder()) {
+            Task task = plan.getTask(taskId);
+            if (task == null) continue;
+            md.append("### ").append(taskId).append(": ").append(task.getDescription()).append("\n");
+            md.append("- Type: ").append(task.getTaskType()).append("\n");
+            md.append("- Status: ").append(task.getStatus()).append("\n");
+            if (task.getResult() != null && !task.getResult().isBlank()) {
+                String result = task.getResult();
+                md.append("- Result: ").append(result.length() > 200
+                    ? result.substring(0, 200) + "..." : result).append("\n");
+            }
+            if (task.getErrorMessage() != null) {
+                md.append("- Error: ").append(task.getErrorMessage()).append("\n");
+            }
+            md.append("\n");
+        }
+        md.append("Summary: ").append(plan.getSummary() != null ? plan.getSummary() : "").append("\n");
+
+        writePlanToWorkspace(md.toString());
+    }
+
+    private String buildPlanSummary(ExecutionPlan plan) {
+        long total = plan.taskCount();
+        long completed = plan.getTasks().values().stream()
+            .filter(t -> t.getStatus() == TaskStatus.COMPLETED).count();
+        long failed = plan.getTasks().values().stream()
+            .filter(t -> t.getStatus() == TaskStatus.FAILED).count();
+        long skipped = plan.getTasks().values().stream()
+            .filter(t -> t.getStatus() == TaskStatus.SKIPPED).count();
+
+        return "## 执行完成\n\n"
+            + "目标: " + plan.getGoal() + "\n\n"
+            + "结果: " + completed + "/" + total + " 成功"
+            + (failed > 0 ? ", " + failed + " 失败" : "")
+            + (skipped > 0 ? ", " + skipped + " 跳过" : "")
+            + "\n\n"
+            + (plan.getSummary() != null ? plan.getSummary() : "");
+    }
+
     private String handleRemember(ToolCall call) {
         JsonNode args = call.arguments();
         String key = args.has("key") ? args.get("key").asText() : "";
@@ -1445,8 +1711,24 @@ public class AgentEngine implements AgentLoop {
         return "Session cleared. Ready for new conversation.";
     }
 
+    private Message lastAssistantMessage(List<Message> contextHistory) {
+        for (int i = contextHistory.size() - 1; i >= 0; i--) {
+            if (contextHistory.get(i).role() == Role.ASSISTANT) {
+                return contextHistory.get(i);
+            }
+        }
+        return null;
+    }
+
+    @Deprecated
     public void setPermissionHandler(Predicate<ToolCall> handler) {
-        this.permissionHandler = handler;
+        this.approvalHandler = req -> handler.test(
+            new ToolCall("", req.toolName(), com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()))
+            ? new ApprovalResult.Approve() : new ApprovalResult.Reject("denied");
+    }
+
+    public void setApprovalHandler(ApprovalHandler handler) {
+        this.approvalHandler = handler;
     }
 
     public void setSessionService(SessionService sessionService) {
@@ -1621,6 +1903,44 @@ public class AgentEngine implements AgentLoop {
 
     public MaskedContext getLastMaskedContext() {
         return lastMaskedContext;
+    }
+
+    @Override
+    public int getMessageCount() {
+        return sessionHistory.size();
+    }
+
+    @Override
+    public Map<String, Integer> getTokenBreakdown() {
+        int systemTokens = 0, userTokens = 0, assistantTokens = 0, toolTokens = 0;
+        for (Message m : sessionHistory) {
+            int t = contextManager.estimateTokens(List.of(m));
+            switch (m.role()) {
+                case SYSTEM    -> systemTokens += t;
+                case USER      -> userTokens += t;
+                case ASSISTANT -> assistantTokens += t;
+                case TOOL      -> toolTokens += t;
+            }
+        }
+        Map<String, Integer> bd = new java.util.LinkedHashMap<>();
+        bd.put("system", systemTokens);
+        bd.put("user", userTokens);
+        bd.put("assistant", assistantTokens);
+        bd.put("tool", toolTokens);
+        return bd;
+    }
+
+    @Override
+    public String getCompactionStatus() {
+        CompactionStatus c = lastCompaction;
+        if (c == null || c.beforeTokens() == 0) return null;
+        StringBuilder sb = new StringBuilder();
+        sb.append(c.beforeTokens()).append("->").append(c.afterTokens()).append(" tokens");
+        if (c.mapBatches() > 0) {
+            sb.append(", map:").append(c.mapBatches())
+              .append(" reduce:").append(c.usedReduce() ? "yes" : "no");
+        }
+        return sb.toString();
     }
 
     public String compactSession() {

@@ -2,6 +2,7 @@ package com.miniclaw.engine.impl;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.miniclaw.engine.ApprovalResult;
 import com.miniclaw.engine.PermissionMode;
 import com.miniclaw.provider.LLMProvider;
 import com.miniclaw.tools.Registry;
@@ -143,7 +144,7 @@ class PermissionModeTest {
         AskWriteProvider provider = new AskWriteProvider();
         AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
         engine.setPermissionMode(PermissionMode.ASK);
-        engine.setPermissionHandler(call -> true);
+        engine.setApprovalHandler(req -> new ApprovalResult.Approve());
 
         engine.run("clean up");
 
@@ -157,7 +158,7 @@ class PermissionModeTest {
         AskWriteProvider provider = new AskWriteProvider();
         AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
         engine.setPermissionMode(PermissionMode.ASK);
-        engine.setPermissionHandler(call -> false);
+        engine.setApprovalHandler(req -> new ApprovalResult.Reject("denied"));
 
         String result = engine.run("clean up");
 
@@ -192,16 +193,15 @@ class PermissionModeTest {
         AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
         engine.setPermissionMode(PermissionMode.ASK);
 
-        List<ToolCall> checkedCalls = new ArrayList<>();
-        engine.setPermissionHandler(call -> {
-            checkedCalls.add(call);
-            return true;
+        List<String> checkedCalls = new ArrayList<>();
+        engine.setApprovalHandler(req -> {
+            checkedCalls.add(req.toolName());
+            return new ApprovalResult.Approve();
         });
 
         engine.run("build it");
 
-        assertThat(checkedCalls).hasSize(1);
-        assertThat(checkedCalls.get(0).name()).isEqualTo("bash");
+        assertThat(checkedCalls).containsExactly("bash");
         assertThat(registry.executedCalls).hasSize(2);
     }
 
@@ -214,8 +214,8 @@ class PermissionModeTest {
         AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
         engine.setPermissionMode(PermissionMode.AUTO);
 
-        engine.setPermissionHandler(call -> {
-            throw new AssertionError("permissionHandler should not be called in AUTO mode");
+        engine.setApprovalHandler(req -> {
+            throw new AssertionError("approvalHandler should not be called in AUTO mode");
         });
 
         engine.run("whatever");
@@ -260,7 +260,7 @@ class PermissionModeTest {
         MultiReadProvider provider = new MultiReadProvider();
         AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
         engine.setPermissionMode(PermissionMode.ASK);
-        engine.setPermissionHandler(call -> {
+        engine.setApprovalHandler(req -> {
             throw new AssertionError("should not ask for read tools");
         });
 

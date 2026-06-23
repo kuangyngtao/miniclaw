@@ -4,9 +4,9 @@
 
 miniclaw 是 [OpenClaw](https://openclaw.ai/) 的 Java CLI 实现——本地 AI 编程助手。
 
-- **做什么**: CLI Agent + 飞书 IM 通道，8 工具（read/write/edit/bash/glob/grep/todo_write/web_fetch）
-- **不做什么**: Gateway、多 Agent 调度、浏览器自动化、MCP、Web 前端
-- **做到什么程度**: JVM 本地运行、CLI + 飞书双通道、工具独立可测
+- **做什么**: CLI Agent + 飞书 IM 通道，8 内置工具（read/write/edit/bash/glob/grep/todo_write/web_fetch）+ MCP 协议支持（通用 client，stdio + HTTP 双传输，动态工具扩展）
+- **不做什么**: Gateway、多 Agent 调度、浏览器自动化、Web 前端
+- **做到什么程度**: JVM 本地运行、CLI + 飞书双通道、工具独立可测、MCP 生态兼容
 
 ---
 
@@ -14,10 +14,10 @@ miniclaw 是 [OpenClaw](https://openclaw.ai/) 的 Java CLI 实现——本地 AI
 
 | 层 | 职责 | 已实现 |
 |----|------|--------|
-| 入口交互层 | CLI REPL + HITL 审批 | JLine3 REPL（历史+补全+Ctrl+C）、HITL 审批、权限模式切换、`/clear` `/compact` `/context`、工具调用可视化（[..]/[OK]/[ER]） |
+| 入口交互层 | CLI REPL + HITL 审批 | JLine3 REPL（历史+补全+Ctrl+C）、HITL 审批面板（风险分级+四选项 y/a/n/m）、权限模式切换、`/clear` `/compact` `/context`、工具调用可视化（[..]/[OK]/[ER]） |
 | 核心引擎层 | ReAct Loop + LLM 适配器 | ReAct Loop、三层迭代控制（死循环+进度提醒+硬上限）、OpenAI/DeepSeek Provider（含熔断器）、TWO_STAGE 慢思考、流式输出、并行工具调用、Ctrl+C 中断、SubAgent 引擎 |
 | 上下文工程层 | Prompt 组装 + Token 截断 + 记忆 | LadderedCompactor + MessageMasker（mask→compact 管线）、状态外部化（todo_write→.miniclaw/todo.md + PLAN.md 同步 + 自举检测）、PromptAssembly 5 层、SkillLoader、memory_save、DiskMemoryService、SessionService（BM25 检索 + 自动保存）、L3 自动记忆提取 |
-| 工具与执行层 | ToolRegistry + Middleware | 8 工具、EditTool 四级模糊匹配、SafetyInterceptor 链、CommandSafetyInterceptor 8 规则 |
+| 工具与执行层 | ToolRegistry + Middleware | 8 内置工具 + MCP 动态扩展、EditTool 四级模糊匹配、SafetyInterceptor 链、CommandSafetyInterceptor 8 规则、McpManager 并行启动 + 故障隔离 |
 
 核心哲学：上下文即缓存，磁盘即真相。
 
@@ -94,11 +94,15 @@ miniclaw 是 [OpenClaw](https://openclaw.ai/) 的 Java CLI 实现——本地 AI
 | V3.8b | L4 会话检索升级（SessionService BM25 替换子串匹配） | ✅ |
 | V3.8c | 会话自动保存（clearSession 钩子 + [auto] 命名） | ✅ |
 | V3.8d | 启动注入相关历史会话摘要 | ✅ |
+| V3.9 | Plan-and-Execute（任务DAG + 逐级并行 + 失败重试 + 槽位传递） | ✅ |
+| V3.4e | HITL 审批面板（ApprovalRequest + RiskLevel + y/a/n/m 四选项 + autoApprovedTools） | ✅ |
+| V3.10 | MCP 协议支持（通用 client + stdio/HTTP 双传输 + schema 清洗 + 审计日志 + 两级配置 + /mcp CLI） | ✅ |
 | — | `/btw` 后台并行任务 | 待做 |
 | — | 多模型路由（Anthropic 原生 API） | 待做 |
+| — | 上下文工程优化（Masker-Compactor 去冗余 / 真实 tokenizer / 自适应分层 / L3 异步 / prompt caching） | 待做 |
 | V3.5 | GraalVM native-image | 远期 |
 
-测试: 229/229 通过（tools 46 + context 45 + engine 47 + provider 14 + memory 32 + cli 45）
+测试: 271/271 通过（tools 66 + context 45 + engine 69 + provider 14 + memory 32 + cli 45）
 
 ---
 

@@ -19,6 +19,8 @@ import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 import java.util.stream.Stream;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 在文件内容中搜索正则表达式模式。支持通过 glob 参数限定搜索的文件范围。
@@ -49,6 +51,7 @@ public class GrepTool implements Tool {
           "required": ["pattern"]
         }""";
 
+    private static final Logger log = LoggerFactory.getLogger(GrepTool.class);
     private static final ObjectMapper mapper = new ObjectMapper();
 
     private final Path workDir;
@@ -153,6 +156,7 @@ public class GrepTool implements Tool {
 
         // 6. 格式化输出
         if (matches.isEmpty()) {
+            log.info("[Grep] {} → 0 matches", patternNode.asText());
             return new Result.Ok<>("未找到匹配 \"" + patternNode.asText() + "\" 的文本。");
         }
 
@@ -160,6 +164,9 @@ public class GrepTool implements Tool {
         if (truncated) {
             matches = matches.subList(0, MAX_MATCHES);
         }
+
+        log.info("[Grep] {} → {} matches{}", patternNode.asText(), matches.size(),
+            truncated ? " (truncated)" : "");
 
         StringBuilder sb = new StringBuilder();
         for (Match m : matches) {
