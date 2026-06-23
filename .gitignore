@@ -22,6 +22,12 @@ config.yml
 *.local.yaml
 *.local.yml
 
+# Claude Code
+.claude/
+
+# miniclaw runtime
+.miniclaw/
+
 # Logs
 logs/
 *.log
