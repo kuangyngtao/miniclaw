@@ -9,6 +9,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 读取指定路径的文件内容，限制在工作区范围内，超过阈值自动截断。
@@ -29,6 +31,7 @@ public class ReadTool implements Tool {
           "required": ["path"]
         }""";
 
+    private static final Logger log = LoggerFactory.getLogger(ReadTool.class);
     private static final ObjectMapper mapper = new ObjectMapper();
 
     private final Path workDir;
@@ -92,11 +95,13 @@ public class ReadTool implements Tool {
 
         // 4. 截断保护
         if (bytes.length > MAX_BYTES) {
+            log.info("[Read] {} → {} bytes (truncated)", pathNode.asText(), bytes.length);
             String head = new String(bytes, 0, MAX_BYTES, StandardCharsets.UTF_8);
             String truncated = head + "\n\n...[由于内容过长，已被系统截断至前 " + MAX_BYTES + " 字节]...";
             return new Result.Ok<>(truncated);
         }
 
+        log.info("[Read] {} → {} bytes", pathNode.asText(), bytes.length);
         return new Result.Ok<>(new String(bytes, StandardCharsets.UTF_8));
     }
 

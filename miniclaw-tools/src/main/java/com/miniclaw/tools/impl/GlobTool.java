@@ -15,6 +15,8 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.stream.Stream;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 按文件名模式查找文件。支持 ** 递归匹配通配符。
@@ -36,6 +38,7 @@ public class GlobTool implements Tool {
           "required": ["pattern"]
         }""";
 
+    private static final Logger log = LoggerFactory.getLogger(GlobTool.class);
     private static final ObjectMapper mapper = new ObjectMapper();
 
     private final Path workDir;
@@ -101,6 +104,7 @@ public class GlobTool implements Tool {
 
         // 3. 格式化输出
         if (matches.isEmpty()) {
+            log.info("[Glob] {} → 0 matches", pattern);
             return new Result.Ok<>("未找到匹配 \"" + pattern + "\" 的文件。");
         }
 
@@ -110,6 +114,8 @@ public class GlobTool implements Tool {
         if (truncated) {
             matches = matches.subList(0, MAX_FILES);
         }
+
+        log.info("[Glob] {} → {} matches{}", pattern, matches.size(), truncated ? " (truncated)" : "");
 
         StringBuilder sb = new StringBuilder();
         sb.append("找到 ").append(matches.size()).append(" 个匹配 \"").append(pattern).append("\" 的文件");

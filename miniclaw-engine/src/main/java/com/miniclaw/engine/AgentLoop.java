@@ -35,6 +35,9 @@ public interface AgentLoop {
     /** 移除流式输出监听器 */
     void removeOnTokenListener(java.util.function.Consumer<String> listener);
 
+    /** 设置审批处理器。ASK 模式下写工具调用前触发。 */
+    default void setApprovalHandler(ApprovalHandler handler) {}
+
     /** 注册状态变更监听器，监听引擎生命周期中的状态转换。默认空操作。 */
     default void onStateChange(java.util.function.Consumer<AgentStateEvent> listener) {}
 
@@ -58,4 +61,13 @@ public interface AgentLoop {
 
     /** 启动新会话（清空当前上下文） */
     default String newSession() { throw new UnsupportedOperationException(); }
+
+    /** 返回上下文消息数 */
+    default int getMessageCount() { return 0; }
+
+    /** 返回上下文 token 分类统计（system/user/assistant/tool） */
+    default java.util.Map<String, Integer> getTokenBreakdown() { return java.util.Map.of(); }
+
+    /** 返回最近一次压缩状态描述 */
+    default String getCompactionStatus() { return null; }
 }

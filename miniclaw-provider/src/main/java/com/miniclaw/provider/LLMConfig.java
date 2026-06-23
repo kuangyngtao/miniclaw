@@ -10,10 +10,15 @@ public record LLMConfig(
     String apiKey,
     String baseUrl,
     String model,
+    Protocol protocol,
     Duration connectTimeout,
     Duration requestTimeout,
     int maxRetries
 ) {
+    public enum Protocol {
+        OPENAI_COMPAT,
+        ANTHROPIC
+    }
     public static Builder builder() {
         return new Builder();
     }
@@ -26,6 +31,7 @@ public record LLMConfig(
         private String apiKey;
         private String baseUrl = "https://api.deepseek.com";
         private String model = "deepseek-chat";
+        private Protocol protocol = Protocol.OPENAI_COMPAT;
         private Duration connectTimeout = Duration.ofSeconds(10);
         private Duration requestTimeout = Duration.ofSeconds(60);
         private int maxRetries = 3;
@@ -33,6 +39,7 @@ public record LLMConfig(
         public Builder apiKey(String apiKey)              { this.apiKey = apiKey; return this; }
         public Builder baseUrl(String baseUrl)            { this.baseUrl = baseUrl; return this; }
         public Builder model(String model)                { this.model = model; return this; }
+        public Builder protocol(Protocol protocol)        { this.protocol = protocol; return this; }
         public Builder connectTimeout(Duration timeout)   { this.connectTimeout = timeout; return this; }
         public Builder requestTimeout(Duration timeout)   { this.requestTimeout = timeout; return this; }
         public Builder maxRetries(int maxRetries)         { this.maxRetries = maxRetries; return this; }
@@ -41,7 +48,7 @@ public record LLMConfig(
             if (apiKey == null || apiKey.isBlank()) {
                 throw new IllegalArgumentException("apiKey must not be blank");
             }
-            return new LLMConfig(apiKey, baseUrl, model, connectTimeout, requestTimeout, maxRetries);
+            return new LLMConfig(apiKey, baseUrl, model, protocol, connectTimeout, requestTimeout, maxRetries);
         }
     }
 }

@@ -9,6 +9,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 创建或覆盖写入文件，自动创建父目录，限制在工作区范围内。
@@ -31,6 +33,7 @@ public class WriteTool implements Tool {
           "required": ["path", "content"]
         }""";
 
+    private static final Logger log = LoggerFactory.getLogger(WriteTool.class);
     private static final ObjectMapper mapper = new ObjectMapper();
 
     private final Path workDir;
@@ -90,9 +93,11 @@ public class WriteTool implements Tool {
         try {
             Files.writeString(resolved, contentNode.asText(), StandardCharsets.UTF_8);
         } catch (IOException e) {
+            log.warn("[Write] {} → FAILED: {}", pathNode.asText(), e.getMessage());
             return new Result.Err<>(new Result.ErrorInfo("T-005", "写入文件失败: " + e.getMessage()));
         }
 
+        log.info("[Write] {} → {} bytes", pathNode.asText(), contentNode.asText().length());
         return new Result.Ok<>("成功将内容写入到文件: " + pathNode.asText());
     }
 }

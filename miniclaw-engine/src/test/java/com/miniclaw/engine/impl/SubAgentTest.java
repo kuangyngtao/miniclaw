@@ -2,6 +2,7 @@ package com.miniclaw.engine.impl;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.miniclaw.engine.ApprovalResult;
 import com.miniclaw.engine.PermissionMode;
 import com.miniclaw.provider.LLMProvider;
 import com.miniclaw.tools.Result;
@@ -277,9 +278,9 @@ class SubAgentTest {
 
         AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
         engine.setPermissionMode(PermissionMode.ASK);
-        engine.setPermissionHandler(call -> {
-            permissionChecked.add(call.name());
-            return true; // 批准
+        engine.setApprovalHandler(req -> {
+            permissionChecked.add(req.toolName());
+            return new ApprovalResult.Approve();
         });
 
         String result = engine.run("write file");

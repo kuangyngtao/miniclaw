@@ -62,4 +62,64 @@ class CommandSafetyInterceptorTest {
     void shouldBlockDdCommand() {
         assertThat(interceptor.check(bashCall("dd if=/dev/zero of=/dev/sda"))).isNotNull();
     }
+
+    @Test
+    void shouldBlockPkexec() {
+        assertThat(interceptor.check(bashCall("pkexec rm /etc/hosts"))).isNotNull();
+    }
+
+    @Test
+    void shouldBlockDoas() {
+        assertThat(interceptor.check(bashCall("doas rm /etc/hosts"))).isNotNull();
+    }
+
+    @Test
+    void shouldBlockChmodRecursive777() {
+        assertThat(interceptor.check(bashCall("chmod -R 777 /var/www"))).isNotNull();
+    }
+
+    @Test
+    void shouldBlockChmodOctal777() {
+        assertThat(interceptor.check(bashCall("chmod 0777 /etc/passwd"))).isNotNull();
+    }
+
+    @Test
+    void shouldAllowChmodNormal() {
+        assertThat(interceptor.check(bashCall("chmod 644 /var/www"))).isNull();
+    }
+
+    @Test
+    void shouldAllowChmod755() {
+        assertThat(interceptor.check(bashCall("chmod 755 /usr/local/bin/script"))).isNull();
+    }
+
+    @Test
+    void shouldBlockShutdown() {
+        assertThat(interceptor.check(bashCall("shutdown -h now"))).isNotNull();
+    }
+
+    @Test
+    void shouldBlockReboot() {
+        assertThat(interceptor.check(bashCall("reboot"))).isNotNull();
+    }
+
+    @Test
+    void shouldBlockHalt() {
+        assertThat(interceptor.check(bashCall("halt"))).isNotNull();
+    }
+
+    @Test
+    void shouldBlockPoweroff() {
+        assertThat(interceptor.check(bashCall("poweroff"))).isNotNull();
+    }
+
+    @Test
+    void shouldBlockInit0() {
+        assertThat(interceptor.check(bashCall("init 0"))).isNotNull();
+    }
+
+    @Test
+    void shouldBlockInit6() {
+        assertThat(interceptor.check(bashCall("init 6"))).isNotNull();
+    }
 }

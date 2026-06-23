@@ -12,6 +12,8 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 编辑工具 — 四级容错降级替换。
@@ -39,6 +41,7 @@ public class EditTool implements Tool {
           "required": ["path", "old_text", "new_text"]
         }""";
 
+    private static final Logger log = LoggerFactory.getLogger(EditTool.class);
     private static final ObjectMapper mapper = new ObjectMapper();
 
     private final Path workDir;
@@ -111,9 +114,12 @@ public class EditTool implements Tool {
         try {
             Files.writeString(resolved, newContent, StandardCharsets.UTF_8);
         } catch (IOException e) {
+            log.warn("[Edit] {} → FAILED: {}", pathNode.asText(), e.getMessage());
             return new Result.Err<>(new Result.ErrorInfo("T-005", "写回文件失败: " + e.getMessage()));
         }
 
+        log.info("[Edit] {} → replaced (old={} new={} chars)", pathNode.asText(),
+            oldNode.asText().length(), newNode.asText().length());
         return new Result.Ok<>("成功修改文件: " + pathNode.asText());
     }
 

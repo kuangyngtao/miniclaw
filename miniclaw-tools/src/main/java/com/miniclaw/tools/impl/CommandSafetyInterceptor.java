@@ -11,14 +11,15 @@ import java.util.regex.Pattern;
 public class CommandSafetyInterceptor implements SafetyInterceptor {
 
     private static final List<Pattern> DANGEROUS = List.of(
-        Pattern.compile("rm\\s+(-[rRf]+\\s+)*[/~]"),      // rm -rf / 或 rm -rf ~
-        Pattern.compile("rm\\s+(-[rRf]+\\s+)*\\*"),       // rm -rf *
-        Pattern.compile("sudo\\s"),                        // sudo
-        Pattern.compile("chmod\\s+777"),                   // chmod 777
-        Pattern.compile(">\\s*/dev/sd"),                   // 覆盖磁盘
-        Pattern.compile("mkfs\\.\\w+"),                    // 格式化
-        Pattern.compile("dd\\s+if="),                      // dd
-        Pattern.compile(Pattern.quote(":(){ :|:& };:"))   // fork bomb
+        Pattern.compile("rm\\s+(-[rRf]+\\s+)*[/~]"),          // rm -rf / 或 rm -rf ~
+        Pattern.compile("rm\\s+(-[rRf]+\\s+)*\\*"),           // rm -rf *
+        Pattern.compile("\\b(sudo|pkexec|doas)\\s"),           // 提权命令
+        Pattern.compile("chmod\\s+(-R\\s+)?0*777"),           // chmod 777 / chmod -R 777 / chmod 0777
+        Pattern.compile(">\\s*/dev/sd"),                       // 覆盖磁盘
+        Pattern.compile("mkfs\\.\\w+"),                        // 格式化
+        Pattern.compile("dd\\s+if="),                          // dd
+        Pattern.compile("\\b(shutdown|reboot|halt|poweroff|init\\s+[06])\\b"), // 关机/重启
+        Pattern.compile(Pattern.quote(":(){ :|:& };:"))       // fork bomb
     );
 
     @Override

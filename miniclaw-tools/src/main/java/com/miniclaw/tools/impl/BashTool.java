@@ -9,6 +9,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 在工作区内执行 bash 命令。
@@ -31,6 +33,7 @@ public class BashTool implements Tool {
           "required": ["command"]
         }""";
 
+    private static final Logger log = LoggerFactory.getLogger(BashTool.class);
     private static final ObjectMapper mapper = new ObjectMapper();
 
     private final Path workDir;
@@ -160,15 +163,22 @@ public class BashTool implements Tool {
         // 超时警告
         if (timedOut) {
             output = output + "\n[警告: 命令执行超时(" + TIMEOUT_SECONDS + "s)，已被系统强制终止。如果是启动常驻服务，请尝试将其转入后台。]";
+            log.warn("[Bash] {} → TIMEOUT ({}s)", shellCmd(cmdNode.asText()), TIMEOUT_SECONDS);
             return new Result.Ok<>(truncate(output));
         }
 
         // 空输出
         if (output.isEmpty()) {
+            log.info("[Bash] {} → 0 bytes (empty)", shellCmd(cmdNode.asText()));
             return new Result.Ok<>("命令执行成功，无终端输出。");
         }
 
+        log.info("[Bash] {} → {} bytes", shellCmd(cmdNode.asText()), output.length());
         return new Result.Ok<>(truncate(output));
+    }
+
+    private static String shellCmd(String cmd) {
+        return cmd.length() <= 80 ? cmd : cmd.substring(0, 77) + "...";
     }
 
     /** 长度截断保护 — 防 OOM */

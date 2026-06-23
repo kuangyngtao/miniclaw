@@ -109,6 +109,7 @@ public class OpenAIProvider implements LLMProvider {
         }
 
         HttpRequest httpRequest = buildHttpRequest(requestBody);
+        long startMs = System.currentTimeMillis();
 
         try {
             byte[] responseBody = sendWithRetry(httpRequest);
@@ -123,9 +124,17 @@ public class OpenAIProvider implements LLMProvider {
                 log.debug("OpenAI response model={} id={}", response.model(), response.id());
             }
 
+            Message result = toMessage(response);
+            long elapsed = System.currentTimeMillis() - startMs;
+            log.info("[LLM] {} {}ms, {} msgs → {} chars{}",
+                config.model(), elapsed, messages.size(),
+                result.content() != null ? result.content().length() : 0,
+                result.toolCalls() != null ? " + " + result.toolCalls().size() + " tool calls" : "");
             recordSuccess();
-            return toMessage(response);
+            return result;
         } catch (LLMException e) {
+            long elapsed = System.currentTimeMillis() - startMs;
+            log.warn("[LLM] {} {}ms, {} msgs → FAILED: {}", config.model(), elapsed, messages.size(), e.getMessage());
             recordFailure();
             throw e;
         }
@@ -150,6 +159,7 @@ public class OpenAIProvider implements LLMProvider {
         }
 
         HttpRequest httpRequest = buildHttpRequest(requestBody);
+        long startMs = System.currentTimeMillis();
 
         try {
             HttpResponse<java.io.InputStream> response = httpClient.send(httpRequest,
@@ -163,13 +173,22 @@ public class OpenAIProvider implements LLMProvider {
             }
 
             Message result = parseSSEStream(response.body(), onToken);
+            long elapsed = System.currentTimeMillis() - startMs;
+            log.info("[LLM] {} {}ms stream, {} msgs → {} chars{}",
+                config.model(), elapsed, messages.size(),
+                result.content() != null ? result.content().length() : 0,
+                result.toolCalls() != null ? " + " + result.toolCalls().size() + " tool calls" : "");
             recordSuccess();
             return result;
 
         } catch (LLMException e) {
+            long elapsed = System.currentTimeMillis() - startMs;
+            log.warn("[LLM] {} {}ms stream, {} msgs → FAILED: {}", config.model(), elapsed, messages.size(), e.getMessage());
             recordFailure();
             throw e;
         } catch (IOException e) {
+            long elapsed = System.currentTimeMillis() - startMs;
+            log.warn("[LLM] {} {}ms stream, {} msgs → FAILED: {}", config.model(), elapsed, messages.size(), e.getMessage());
             recordFailure();
             throw new LLMException("流式请求失败: " + e.getMessage(), e);
         } catch (InterruptedException e) {
