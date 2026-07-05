@@ -1,56 +1,58 @@
-# Security Policy
+# 安全策略
 
-miniclaw is an experimental local-first coding agent runtime. Security issues are taken seriously, especially issues involving credential exposure, unsafe tool execution, workspace boundary bypass, command execution, MCP tool risk classification, or session and memory leaks.
+miniclaw 是一个本地 AI 编程 Agent。项目会涉及文件读写、命令执行、MCP 工具调用、会话记忆和本地配置，因此安全边界需要明确处理。
 
-## Supported Versions
+重点关注的问题包括：密钥泄露、工具权限绕过、工作目录越界、危险命令执行、MCP 工具风险分类错误、审计日志缺失、会话或记忆泄露。
 
-| Version | Supported |
+## 支持范围
+
+| 版本 | 支持状态 |
 | --- | --- |
-| `master` / active development | Yes |
-| Old snapshots | Best effort |
+| `master` / 当前开发版本 | 支持 |
+| 旧快照 | 尽力处理 |
 
-## Reporting a Vulnerability
+## 漏洞报告
 
-Do not open a public issue if the report includes credentials, tokens, private configuration, logs, exploit payloads, or private user paths.
+如果报告内容包含密钥、Token、私有配置、日志、漏洞利用细节或本地私有路径，请不要直接提交公开 Issue。
 
-Preferred reporting path:
+推荐方式：
 
-1. Use GitHub private vulnerability reporting for this repository.
-2. If private reporting is unavailable, open a public issue with only a high-level summary and no secrets.
+1. 优先使用 GitHub 的私密漏洞报告功能。
+2. 如果无法使用私密报告，只在公开 Issue 中描述高层问题，不包含密钥、私有路径和可直接利用的细节。
 
-Please include:
+报告时建议包含：
 
-- Affected component, such as `tools`, `mcp`, `engine`, `context`, `provider`, `cli`, or `im`.
-- Reproduction steps using fake tokens and sanitized paths.
-- Expected impact.
-- Whether credential rotation or repository history cleanup is required.
+- 受影响模块，例如 `tools`、`mcp`、`engine`、`context`、`provider`、`cli`、`im`。
+- 使用假 Token 和脱敏路径的复现步骤。
+- 可能造成的影响。
+- 是否需要吊销密钥、清理仓库历史或关闭 Secret Scanning 告警。
 
-## Sensitive Data Rules
+## 敏感信息规则
 
-Never commit:
+不要提交以下内容：
 
-- API keys or model provider tokens.
-- Feishu, Weixin, GitHub, or MCP server secrets.
-- `.claude/`, `.miniclaw/`, local config files, logs, or runtime sessions.
-- Private keys, keystores, `.env` files, or local credential stores.
+- API Key 或模型服务商 Token。
+- 飞书、微信、GitHub、MCP Server 等服务的密钥。
+- `.claude/`、`.miniclaw/`、本地配置文件、运行日志、会话文件。
+- 私钥、证书库、`.env` 文件、本地凭据存储。
 
-If a secret is committed:
+如果密钥已经提交：
 
-1. Rotate or revoke the exposed secret immediately.
-2. Remove the file from version control.
-3. Rewrite repository history if the repository is public.
-4. Review and close GitHub secret scanning alerts only after the secret is revoked.
+1. 立即吊销或轮换泄露的密钥。
+2. 从版本控制中移除相关文件。
+3. 如果仓库是公开仓库，需要按情况清理 Git 历史。
+4. 确认密钥已吊销后，再处理 GitHub Secret Scanning 告警。
 
-## Security Scope
+## 安全关注点
 
-High-priority areas:
+优先处理以下类型的问题：
 
-- Tool permission and approval bypass.
-- Path traversal outside the workspace root.
-- Unsafe shell command execution.
-- MCP tool metadata and risk misclassification.
-- Invalid or incomplete audit logs.
-- Runtime context leaking into persistent session history.
-- Secret exposure in config, logs, test output, or examples.
+- 工具权限或人工确认流程被绕过。
+- 文件路径逃逸到工作目录之外。
+- Shell 命令执行缺少风险控制。
+- MCP 工具的只读、写入、破坏性风险分类错误。
+- 审计日志格式不合法或关键字段缺失。
+- 运行时上下文被错误写入长期会话。
+- 配置、日志、测试输出或示例中暴露密钥。
 
-Security fixes should include regression tests when practical.
+安全修复应尽量补充回归测试，避免同类问题再次出现。
