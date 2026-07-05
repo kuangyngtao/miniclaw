@@ -70,6 +70,7 @@ public class McpConfig {
                 List<String> args = readStringList(srv.get("args"));
                 String url = srv.has("url") ? srv.get("url").asText() : null;
                 Map<String, String> env = readEnv(srv.get("env"), workDir);
+                boolean disabled = srv.has("disabled") && srv.get("disabled").asBoolean();
 
                 // 变量替换
                 if (args != null) args = args.stream().map(a -> resolveVars(a, workDir)).toList();
@@ -79,7 +80,7 @@ public class McpConfig {
                     env = resolved;
                 }
 
-                result.put(name, new McpServerConfig(name, command, args, url, env));
+                result.put(name, new McpServerConfig(name, command, args, url, env, disabled));
             }
         } catch (IOException e) {
             log.warn("[MCP] failed to parse {}: {}", file, e.getMessage());

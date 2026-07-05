@@ -20,7 +20,7 @@ import java.nio.file.Path;
  * 运行: mvn compile exec:java -pl miniclaw-engine -Dexec.classpathScope=test
  *   -Dexec.mainClass=com.miniclaw.engine.impl.EditIntegrationTest
  */
-public class EditIntegrationTest {
+public class EditIntegrationManual {
 
     private static final String SERVER_GO = """
         package main

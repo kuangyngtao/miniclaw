@@ -1,4 +1,4 @@
-package com.miniclaw.feishu;
+package com.miniclaw.im.feishu;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -12,11 +12,7 @@ import java.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/**
- * Minimal Feishu Open API client.
- * Handles tenant_access_token lifecycle, send message, and edit message.
- */
-class FeishuApi {
+public class FeishuApi {
 
     private static final Logger log = LoggerFactory.getLogger(FeishuApi.class);
     private static final String BASE = "https://open.feishu.cn/open-apis";
@@ -29,15 +25,13 @@ class FeishuApi {
     private volatile String cachedToken;
     private volatile Instant tokenExpiresAt;
 
-    FeishuApi(String appId, String appSecret) {
+    public FeishuApi(String appId, String appSecret) {
         this.appId = appId;
         this.appSecret = appSecret;
         this.http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
             .build();
     }
-
-    // ─── Token ───────────────────────────────────────────────────────
 
     synchronized String getToken() throws IOException, InterruptedException {
         if (cachedToken != null && tokenExpiresAt != null
@@ -68,12 +62,7 @@ class FeishuApi {
         return cachedToken;
     }
 
-    // ─── Send Message ────────────────────────────────────────────────
-
-    /**
-     * Send a text message to a user. Returns the message_id.
-     */
-    String sendMessage(String openId, String text) throws IOException, InterruptedException {
+    public String sendMessage(String openId, String text) throws IOException, InterruptedException {
         String contentJson = "{\"text\":" + JSON.writeValueAsString(text) + "}";
         String body = String.format(
             "{\"receive_id\":\"%s\",\"msg_type\":\"text\",\"content\":%s}",
@@ -97,12 +86,7 @@ class FeishuApi {
         return json.path("data").path("message_id").asText();
     }
 
-    // ─── Edit Message ────────────────────────────────────────────────
-
-    /**
-     * Edit (update) the text content of an existing message.
-     */
-    void editMessage(String messageId, String text) throws IOException, InterruptedException {
+    public void editMessage(String messageId, String text) throws IOException, InterruptedException {
         String contentJson = "{\"text\":" + JSON.writeValueAsString(text) + "}";
         String body = "{\"msg_type\":\"text\",\"content\":" + JSON.writeValueAsString(contentJson) + "}";
 

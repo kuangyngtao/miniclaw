@@ -18,7 +18,7 @@ import java.nio.file.Path;
  * 运行: mvn exec:java -pl miniclaw-engine -Dexec.classpathScope=test
  *   -Dexec.mainClass=com.miniclaw.engine.impl.WriteBashIntegrationTest
  */
-public class WriteBashIntegrationTest {
+public class WriteBashIntegrationManual {
 
     public static void main(String[] args) throws IOException {
         // 0. API Key

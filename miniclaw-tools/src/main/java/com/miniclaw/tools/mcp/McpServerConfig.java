@@ -9,15 +9,17 @@ public record McpServerConfig(
     String command,
     List<String> args,
     String url,
-    Map<String, String> env
+    Map<String, String> env,
+    boolean disabled
 ) {
+    public McpServerConfig(String name, String command, List<String> args,
+                           String url, Map<String, String> env) {
+        this(name, command, args, url, env, false);
+    }
+
     public enum Transport { STDIO, HTTP }
 
     public Transport transport() {
         return url != null && !url.isBlank() ? Transport.HTTP : Transport.STDIO;
-    }
-
-    public boolean disabled() {
-        return false;
     }
 }

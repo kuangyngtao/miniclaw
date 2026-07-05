@@ -1,27 +1,82 @@
 # miniclaw 项目开发纲领
 
-## 项目定义
+> 文档分工：本文件负责项目定位、架构边界和 AI 协作约束；详细工程设计规范见 [DESIGN.md](DESIGN.md)；路线图和重构任务见 [TODO.md](TODO.md)。
 
-miniclaw 是 [OpenClaw](https://openclaw.ai/) 的 Java CLI 实现——本地 AI 编程助手。
+## 项目定位
 
-- **做什么**: CLI Agent + 飞书 IM 通道，8 内置工具（read/write/edit/bash/glob/grep/todo_write/web_fetch）+ MCP 协议支持（通用 client，stdio + HTTP 双传输，动态工具扩展）
-- **不做什么**: Gateway、多 Agent 调度、浏览器自动化、Web 前端
-- **做到什么程度**: JVM 本地运行、CLI + 飞书双通道、工具独立可测、MCP 生态兼容
+miniclaw 是 [OpenClaw](https://openclaw.ai/) 的 Java CLI 实现，是一个本地运行的 AI 编程 Agent 底座。
+
+它的核心价值不是某一个垂类场景，而是把 Agent 的基本功做好：
+
+- **可控**: 工具、权限、审批、工作目录边界清晰。
+- **可测**: 工具、上下文、Provider、Agent loop 都能独立验证。
+- **可靠**: 模型超时、工具失败、上下文膨胀、任务卡死都有降级路径。
+- **可观测**: token、工具调用、失败原因、缓存命中、任务轮次都能落盘分析。
+- **可扩展**: 内置工具和 MCP 工具遵循同一套 `Tool` 契约。
+
+### 做什么
+
+- CLI Agent：本地 REPL、slash 命令、权限模式、HITL 审批。
+- Agent 引擎：ReAct loop、Plan-and-Execute、SubAgent、慢思考、流式输出。
+- 工具体系：8 个内置工具 + MCP 动态扩展 + 安全拦截链。
+- 上下文工程：Prompt 组装、MessageMasker、LadderedCompactor、会话持久化、记忆注入。
+- LLM Provider：OpenAI-compatible Provider、超时、重试、熔断、流式解析。
+- IM 通道：飞书 / 微信等消息入口，作为 CLI 能力的远程镜像。
+
+### 不做什么
+
+- 不做 Gateway。
+- 不做中心化多 Agent 调度平台。
+- 不做 Web 前端。
+- 不把浏览器自动化内置为核心能力；需要时通过 MCP/工具接入。
+- 不把某个垂类业务写死到底层引擎里。
+
+### 产品边界
+
+miniclaw 的底层应保持通用。垂类应用应该以插件、MCP server、Skill、业务工具包或上层 workflow 的方式接入。
+
+ReAct 是一种执行模式，不是唯一产品形态。对确定性任务，应优先使用 workflow、结构化工具和指标复盘；ReAct 主要用于探索、追问、异常归因和工具失败兜底。
 
 ---
 
-## 四层架构
+## 架构分层
 
-| 层 | 职责 | 已实现 |
-|----|------|--------|
-| 入口交互层 | CLI REPL + HITL 审批 | JLine3 REPL（历史+补全+Ctrl+C）、HITL 审批面板（风险分级+四选项 y/a/n/m）、权限模式切换、`/clear` `/compact` `/context`、工具调用可视化（[..]/[OK]/[ER]） |
-| 核心引擎层 | ReAct Loop + LLM 适配器 | ReAct Loop、三层迭代控制（死循环+进度提醒+硬上限）、OpenAI/DeepSeek Provider（含熔断器）、TWO_STAGE 慢思考、流式输出、并行工具调用、Ctrl+C 中断、SubAgent 引擎 |
-| 上下文工程层 | Prompt 组装 + Token 截断 + 记忆 | LadderedCompactor + MessageMasker（mask→compact 管线）、状态外部化（todo_write→.miniclaw/todo.md + PLAN.md 同步 + 自举检测）、PromptAssembly 5 层、SkillLoader、memory_save、DiskMemoryService、SessionService（BM25 检索 + 自动保存）、L3 自动记忆提取 |
-| 工具与执行层 | ToolRegistry + Middleware | 8 内置工具 + MCP 动态扩展、EditTool 四级模糊匹配、SafetyInterceptor 链、CommandSafetyInterceptor 8 规则、McpManager 并行启动 + 故障隔离 |
+| 层 | 职责 | 关键能力 |
+|----|------|---------|
+| 入口交互层 | 用户输入、命令、审批、输出 | JLine3 REPL、Picocli、slash 命令、Ctrl+C、HITL 审批、IM 镜像 |
+| 核心引擎层 | Agent loop 和任务编排 | ReAct、Plan-and-Execute、SubAgent、并行工具调用、三层迭代控制 |
+| 上下文工程层 | Prompt、历史、记忆、压缩 | PromptAssembly、MessageMasker、LadderedCompactor、SessionService、Memory |
+| Provider 层 | 模型 API 适配 | OpenAI-compatible API、流式解析、超时、重试、熔断 |
+| 工具执行层 | 工具注册、调用和拦截 | ToolRegistry、SafetyInterceptor、内置工具、MCP adapter |
+| 存储与观测层 | 本地状态和运行证据 | logs、sessions JSON、Markdown memory、metrics.jsonl |
 
 核心哲学：上下文即缓存，磁盘即真相。
 
-层间通信：`CLI → AgentLoop → LLM → tool_call → executeParallel/Sequential → ToolRegistry.execute (interceptor chain) → Tool.execute → Result → 回注 prompt`
+层间通信：
+
+```text
+CLI / IM
+  -> AgentEngine
+  -> LLMProvider
+  -> tool_calls
+  -> ToolRegistry
+  -> SafetyInterceptor
+  -> Tool.execute
+  -> ToolResult
+  -> 回注上下文
+```
+
+---
+
+## 执行模式
+
+| 模式 | 适用场景 | 约束 |
+|------|---------|------|
+| ReAct | 开放式代码任务、调试、探索、归因 | 必须受最大轮次、进度检测和工具权限限制 |
+| Plan-and-Execute | 多步骤任务、可拆 DAG、需要复盘的工作 | 计划应写入 `.miniclaw/plan.md`，执行结果可追踪 |
+| SubAgent | 并行搜索、只读探索、独立子任务 | 子 Agent 不递归再派发 SubAgent |
+| TWO_STAGE | 复杂问题先规划再执行 | 第一阶段禁止工具调用 |
+| Workflow | 周期性、确定性、可指标化任务 | 优先用于垂类业务和固定流程 |
 
 ---
 
@@ -33,11 +88,46 @@ miniclaw 是 [OpenClaw](https://openclaw.ai/) 的 Java CLI 实现——本地 AI
 | `miniclaw-memory` | 无 | Jackson, Jackson YAML, SLF4J |
 | `miniclaw-context` | tools | SLF4J |
 | `miniclaw-provider` | tools | Jackson, JDK HTTP, SLF4J |
-| `miniclaw-engine` | tools, provider, context | SLF4J |
-| `miniclaw-cli` | engine, memory | Picocli, Logback |
-| `miniclaw-feishu` | engine, tools | FeishuApi + FeishuBot + FeishuConfig + TokenBatcher |
+| `miniclaw-engine` | tools, provider, context, memory | SLF4J |
+| `miniclaw-cli` | engine, memory, im | Picocli, Logback |
+| `miniclaw-im` | engine | FeishuApi + FeishuChannel + WeixinChannel + WeixinIlinkClient, Jackson |
 
 约束：`tools` 是唯一基础层，`engine` 是组装点，`cli` 不直接依赖 tools/provider。禁止循环依赖。
+
+新增能力优先放在最窄的模块里：
+
+- 工具协议、MCP、拦截器放 `miniclaw-tools`。
+- Prompt、压缩、Skill 加载放 `miniclaw-context`。
+- 模型协议、重试、熔断、fallback 放 `miniclaw-provider`。
+- Agent loop、权限、计划执行、会话检索放 `miniclaw-engine`。
+- 终端交互、命令路由、启动组装放 `miniclaw-cli`。
+
+---
+
+## 基座设计原则
+
+1. **上下文即缓存，磁盘即真相**：会话、计划、任务、记忆和指标都应能落盘追踪。模型上下文只是运行时缓存，不是唯一状态源。
+2. **工具原子化**：一个工具只做一件事。工具输入必须有 JSON Schema，输出必须能被上层稳定解析。
+3. **失败透明**：已知错误不要裸抛异常。错误信息必须包含错误码、上下文和可操作建议。
+4. **权限先于能力**：新写工具必须先定义读写属性、风险等级、审批策略和审计证据。
+5. **确定性优先**：能用确定性 workflow 解决的任务，不依赖自由 ReAct 循环。ReAct 用于探索和兜底。
+6. **先观测再优化**：没有指标的优化不可合入为“性能提升”。至少要能记录 token、耗时、工具成功率或任务完成率。
+
+---
+
+## 权限模型
+
+| 模式 | 行为 |
+|------|------|
+| `PLAN` | 只暴露只读工具，禁止写操作 |
+| `ASK` | 写工具执行前触发审批 |
+| `AUTO` | 自动执行所有已注册工具，仍受 SafetyInterceptor 限制 |
+
+工具风险默认原则：
+
+- 只读查询可以并行。
+- 写文件、改状态、发消息、远程执行命令必须可审计。
+- 高风险动作必须要求人审，不能通过提示词绕过。
 
 ---
 
@@ -66,53 +156,36 @@ miniclaw 是 [OpenClaw](https://openclaw.ai/) 的 Java CLI 实现——本地 AI
 
 ---
 
-## 演进路径
+## 当前能力快照
 
-| 阶段 | 功能 | 状态 |
-|------|------|------|
-| V1 | 超时+重试+虚拟线程 | ✅ |
-| V1.5 | 并行工具调用 + 流式输出 + 权限模式 | ✅ |
-| V2 | 多轮上下文 + 三层迭代控制 + 阶梯压缩 | ✅ |
-| V2.5 | TodoWrite + isReadOnly 下沉 + 安全拦截器 | ✅ |
-| V2.7 | TWO_STAGE + Ctrl+C 中断 + 熔断器 | ✅ |
-| V2.8 | MemoryStore 磁盘记忆 | ✅ |
-| V2.9 | 飞书 IM 通道 | ✅ |
-| V2.10 | CLI ↔ 飞书双向共享 | ✅ |
-| V2.11 | JLine3 REPL | ✅ |
-| V2.12 | 会话持久化（JSON + LLM 摘要 + session_context） | ✅ |
-| V2.13 | LadderedCompactor 角色感知增强 | ✅ |
-| V3 | SubAgent 引擎（task + explore/general + 并行派发） | ✅ |
-| V3.1 | AgentState 状态机 + Reporter 抽象 | ✅ |
-| V3.3 | 提示词分层加载（PromptAssembly 5 层） | ✅ |
-| V3.4 | 技能外挂系统（SkillLoader + /skill） | ✅ |
-| V3.4a | MessageMasker 上下文掩码（4 层 Tier + mask→compact） | ✅ |
-| V3.4c | memory_save 引擎内部工具 | ✅ |
-| V3.4d | 状态外部化（todo.md 双写 + PLAN.md 同步 + 自举检测） | ✅ |
-| V3.6 | 工作内存（remember 工具 + ConcurrentHashMap + 每轮注入） | ✅ |
-| V3.7 | 子目标跟踪（todo 进展检测 + 3轮无进展警告 + allTodosCompleted 判定） | ✅ |
-| V3.8a | L3 自动记忆提取（提示词驱动 + 静默 LLM + 条件触发） | ✅ |
-| V3.8b | L4 会话检索升级（SessionService BM25 替换子串匹配） | ✅ |
-| V3.8c | 会话自动保存（clearSession 钩子 + [auto] 命名） | ✅ |
-| V3.8d | 启动注入相关历史会话摘要 | ✅ |
-| V3.9 | Plan-and-Execute（任务DAG + 逐级并行 + 失败重试 + 槽位传递） | ✅ |
-| V3.4e | HITL 审批面板（ApprovalRequest + RiskLevel + y/a/n/m 四选项 + autoApprovedTools） | ✅ |
-| V3.10 | MCP 协议支持（通用 client + stdio/HTTP 双传输 + schema 清洗 + 审计日志 + 两级配置 + /mcp CLI） | ✅ |
-| — | `/btw` 后台并行任务 | 待做 |
-| — | 多模型路由（Anthropic 原生 API） | 待做 |
-| — | 上下文工程优化（Masker-Compactor 去冗余 / 真实 tokenizer / 自适应分层 / L3 异步 / prompt caching） | 待做 |
-| V3.5 | GraalVM native-image | 远期 |
+已具备的底座能力：
 
-测试: 271/271 通过（tools 66 + context 45 + engine 69 + provider 14 + memory 32 + cli 45）
+- 交互：JLine3 REPL、Picocli CLI、slash 命令、Ctrl+C 中断、HITL 审批。
+- 引擎：ReAct loop、TWO_STAGE、SubAgent、Plan-and-Execute、并行工具调用、三层迭代控制。
+- 上下文：PromptAssembly、MessageMasker、LadderedCompactor、SessionService、DiskMemoryService、SkillLoader。
+- 工具：read/write/edit/bash/glob/grep/todo_write/web_fetch，统一 `Tool` 契约。
+- MCP：stdio / HTTP 双传输、schema 清洗、动态注册、审计日志、故障隔离。
+- Provider：OpenAI-compatible API、流式输出、工具调用解析、超时重试、熔断。
+- IM：飞书、微信通道和统一 IM 抽象。
+
+最近记录：295/295 测试通过（tools 66 + provider 14 + context 45 + memory 32 + engine 69 + im 23 + cli 46）。该数字是文档记录，实际合入前仍以本地测试为准。
 
 ---
 
-## LLM 调用韧性
+## Provider 韧性
 
 | 能力 | 设计 |
 |------|------|
 | 超时控制 | 连接 10s + 请求 60s，`LLMConfig` 配置 |
-| 重试策略 | 3 次指数退避（2s→4s→8s），仅对 429/5xx/IO 超时重试 |
+| 重试策略 | 3 次指数退避（2s -> 4s -> 8s），仅对 429/5xx/IO 超时重试 |
 | 熔断器 | 连续 5 次失败快速返回错误 |
+
+后续增强优先级：
+
+1. 降级链路：主模型超时或熔断后自动切换备用模型。
+2. 错误分类：区分鉴权、限流、上下文过长、工具 schema 错误和模型内容错误。
+3. 流式早期终止：发现明显幻觉或协议破坏时中止并重试。
+4. 多模型路由：在指标可观测后再做成本和质量分流。
 
 ---
 
@@ -148,18 +221,28 @@ public record ErrorInfo(String errorCode, String message) {}
 
 ### 错误码
 
-```
-T-001~T-005  工具系统    E-001~E-002  Edit 工具
-A-001~A-003  Agent       S-001~S-003  Skills
-C-001~C-003  配置        X-001~X-002  通用
+```text
+T-001~T-099  工具系统
+M-001~M-099  MCP 系统
+E-001~E-099  Edit 工具
+A-001~A-099  Agent 引擎
+P-001~P-099  Provider
+C-001~C-099  配置
+S-001~S-099  Skills
+X-001~X-099  通用
 ```
 
-### 设计原则
+---
 
-1. **约定优于配置** — 目录/注解/接口决定行为
-2. **渐进式复杂度** — 核心 Loop < 200 行，Tool 接口 < 5 方法
-3. **工具原子化** — 一个 Tool 做一件事，统一 `Result<T>` 返回
-4. **失败透明** — 错误必须含：错误码 + 上下文 + 可操作信息
+## 上下文工程准则
+
+上下文工程是 miniclaw 的核心基本功。任何新增记忆、压缩、工具结果缓存或 prompt 层级调整都必须遵循：
+
+- 不丢关键约束：用户目标、文件路径、测试结果、错误信息、未完成 todo 必须优先保留。
+- 不污染当前任务：历史记忆和会话召回必须标明来源，不能当作当前事实。
+- 不用字符数冒充长期 token 预算：应逐步迁移到真实 tokenizer。
+- 工具结果应结构化截断：优先保留命中片段、文件路径、行号、错误上下文。
+- compact 后应能解释：压缩摘要应保留它由哪些消息或工具结果生成。
 
 ---
 
@@ -174,6 +257,14 @@ public interface Tool {
     default boolean isReadOnly() { return false; }
 }
 ```
+
+要求：
+
+- `name()` 使用 kebab-case；MCP 工具使用 `mcp__server__tool`。
+- `description()` 面向模型，说明何时使用、输入限制和风险。
+- `inputSchema()` 必须是模型可消费的 JSON Schema。
+- `execute()` 返回统一 `Result<String>`。
+- 写工具必须覆盖边界测试、失败测试和审批路径测试。
 
 ### 工具清单
 
@@ -190,18 +281,42 @@ public interface Tool {
 
 全局安全拦截器：`rm -rf /~/*`、`sudo`、`chmod 777`、`> /dev/sd`、`mkfs`、`dd`、fork bomb
 
-工具工作流：`glob → grep → read → edit`
+工具工作流：`glob -> grep -> read -> edit -> test`
 
 ---
 
 ## 开发流程与检查
 
-**SPEC.md（三问裁剪）→ 实现 → 三部检查 → 合入**
+标准流程：
+
+```text
+SPEC / TODO
+  -> 实现
+  -> 单元测试
+  -> 相关集成验证
+  -> diff 自查
+  -> 更新文档
+```
 
 - **意图**: diff 是否实现 SPEC？是否有范围外改动？
 - **质量**: 命名/错误码/风格合规？无 debug 残留？
-- **边界**: null/空→明确错误 / timeout 默认值 / IO 不抛裸异常 / 线程安全
+- **边界**: null/空 -> 明确错误 / timeout 默认值 / IO 不抛裸异常 / 线程安全
 
 ---
 
-*本文件是 miniclaw 的唯一权威开发纲领。规范变更必须先改本文件，再改代码。*
+## 演进原则
+
+下一阶段重点不是继续堆“更多 Agent 能力”，而是补齐底层基座基本功：
+
+1. 上下文预算可信。
+2. 工具结果可信。
+3. 失败可恢复。
+4. 过程可观测。
+5. 任务可评测。
+6. 写操作可审计。
+
+具体优先级以 [TODO.md](TODO.md) 为准。
+
+---
+
+本文件是 miniclaw 的权威开发纲领。架构边界、模块依赖和核心原则变更，应先更新本文件，再修改实现。

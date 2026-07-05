@@ -19,7 +19,7 @@
         <module>miniclaw-context</module>
         <module>miniclaw-tools</module>
         <module>miniclaw-memory</module>
-        <module>miniclaw-feishu</module>
+        <module>miniclaw-im</module>
     </modules>
 
     <properties>

@@ -12,9 +12,9 @@ import java.util.List;
  * 从环境变量 MINICLAW-DS-API 或系统属性 apiKey 读取密钥。
  * 运行: mvn exec:java -pl miniclaw-provider \
  *   -Dexec.classpathScope=test \
- *   -Dexec.mainClass=com.miniclaw.provider.impl.openai.DeepSeekConnectivityTest
+ *   -Dexec.mainClass=com.miniclaw.provider.impl.openai.DeepSeekConnectivityDemo
  */
-public class DeepSeekConnectivityTest {
+public class DeepSeekConnectivityDemo {
 
     public static void main(String[] args) {
         String apiKey = System.getenv("MINICLAW-DS-API");

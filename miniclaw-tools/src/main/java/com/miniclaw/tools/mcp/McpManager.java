@@ -2,6 +2,9 @@ package com.miniclaw.tools.mcp;
 
 import com.miniclaw.tools.Tool;
 import java.io.IOException;
+import java.net.HttpURLConnection;
+import java.net.URI;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -69,6 +72,8 @@ public class McpManager {
 
     private List<Tool> startServer(McpServerConfig sc) {
         try {
+            ensureChromeRunning(sc);
+
             McpTransport transport;
             switch (sc.transport()) {
                 case STDIO -> transport = new StdioTransport(
@@ -94,6 +99,133 @@ public class McpManager {
         } catch (Exception e) {
             log.warn("[MCP] {}: start failed — {}", sc.name(), e.getMessage());
             return List.of();
+        }
+    }
+
+    // ---- Chrome auto-launch ----
+
+    /**
+     * 确保 Chrome 以 debug 模式运行。
+     * 优先复用用户已有的 Chrome 实例（保留登录态/插件/Cookie）。
+     */
+    private void ensureChromeRunning(McpServerConfig sc) {
+        String browserUrl = extractBrowserUrl(sc.args());
+        if (browserUrl == null) return;
+
+        if (isReachable(browserUrl)) {
+            log.debug("[MCP] Chrome debug port {} already open", browserUrl);
+            return;
+        }
+
+        Path chromePath = findChrome();
+        if (chromePath == null) {
+            log.warn("[MCP] {}: Chrome not found", sc.name());
+            return;
+        }
+
+        String port = extractPort(browserUrl);
+
+        // Chrome 已在运行但没开 debug 端口 → 无法接管，提示用户
+        if (isChromeProcessRunning()) {
+            log.warn("[MCP] {}: Chrome is running without debug port. "
+                + "Close Chrome and run 'chrome-debug.bat' to restart with --remote-debugging-port={}, "
+                + "or manually run: chrome.exe --remote-debugging-port={}", sc.name(), port, port);
+            return;
+        }
+
+        // Chrome 未运行 → 自动拉起（使用默认用户数据目录，保留登录态）
+        try {
+            log.info("[MCP] launching Chrome (default profile) with debug port {}...", port);
+            ProcessBuilder pb = new ProcessBuilder(
+                chromePath.toString(),
+                "--remote-debugging-port=" + port
+            );
+            pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+            pb.start();
+
+            for (int i = 0; i < 20; i++) {
+                try { Thread.sleep(500); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return; }
+                if (isReachable(browserUrl)) {
+                    log.info("[MCP] Chrome debug port {} ready (real browser profile)", port);
+                    return;
+                }
+            }
+            log.warn("[MCP] Chrome launched but debug port not responding after 10s");
+        } catch (IOException e) {
+            log.warn("[MCP] failed to launch Chrome: {}", e.getMessage());
+        }
+    }
+
+    /** 检测系统进程列表中是否有 Chrome 在运行 */
+    private static boolean isChromeProcessRunning() {
+        return ProcessHandle.allProcesses()
+            .anyMatch(p -> p.info().command().orElse("").toLowerCase().contains("chrome"));
+    }
+
+    /** 从 args 中提取 --browser-url 的值 */
+    private static String extractBrowserUrl(List<String> args) {
+        if (args == null) return null;
+        for (int i = 0; i < args.size(); i++) {
+            String a = args.get(i);
+            if (a.startsWith("--browser-url=")) return a.substring(a.indexOf('=') + 1);
+            if ("--browser-url".equals(a) && i + 1 < args.size()) return args.get(i + 1);
+        }
+        return null;
+    }
+
+    /** 尝试连接 URL，检测端口是否可达 */
+    private static boolean isReachable(String url) {
+        try {
+            HttpURLConnection conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
+            conn.setConnectTimeout(2000);
+            conn.connect();
+            conn.disconnect();
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 查找本地 Chrome 安装路径 */
+    private static Path findChrome() {
+        String os = System.getProperty("os.name").toLowerCase();
+        if (os.contains("win")) {
+            String[] candidates = {
+                System.getenv("LOCALAPPDATA") + "\\Google\\Chrome\\Application\\chrome.exe",
+                "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+                "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
+            };
+            for (String c : candidates) {
+                Path p = Path.of(c);
+                if (Files.exists(p)) return p;
+            }
+        } else if (os.contains("mac")) {
+            Path p = Path.of("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+            if (Files.exists(p)) return p;
+        } else {
+            String[] names = {"google-chrome", "google-chrome-stable", "chromium", "chromium-browser"};
+            for (String name : names) {
+                try {
+                    ProcessBuilder pb = new ProcessBuilder("which", name);
+                    pb.redirectErrorStream(true);
+                    var proc = pb.start();
+                    String out = new String(proc.getInputStream().readAllBytes()).trim();
+                    proc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS);
+                    if (!out.isEmpty()) return Path.of(out);
+                } catch (Exception ignored) { /* try next */ }
+            }
+        }
+        return null;
+    }
+
+    /** 从 http://host:port 提取端口号 */
+    private static String extractPort(String url) {
+        try {
+            var uri = URI.create(url);
+            int port = uri.getPort();
+            return port >= 0 ? String.valueOf(port) : "9222";
+        } catch (Exception e) {
+            return "9222";
         }
     }
 

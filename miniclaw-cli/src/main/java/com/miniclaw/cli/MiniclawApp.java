@@ -16,8 +16,13 @@ import com.miniclaw.engine.impl.AgentEngine;
 import com.miniclaw.engine.impl.PlanParser;
 import com.miniclaw.tools.schema.ExecutionPlan;
 import com.miniclaw.tools.schema.Task;
-import com.miniclaw.feishu.FeishuBot;
-import com.miniclaw.feishu.FeishuConfig;
+import com.miniclaw.im.ImChannel;
+import com.miniclaw.im.ImChannelStatus;
+import com.miniclaw.im.ConfigHelper;
+import com.miniclaw.im.feishu.FeishuChannel;
+import com.miniclaw.im.feishu.FeishuConfig;
+import com.miniclaw.im.weixin.WeixinChannel;
+import com.miniclaw.im.weixin.WeixinConfig;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.miniclaw.memory.MemoryEntry;
 import com.miniclaw.memory.MemoryType;
@@ -39,6 +44,7 @@ import com.miniclaw.tools.impl.WebFetchTool;
 import com.miniclaw.tools.impl.WriteTool;
 import com.miniclaw.tools.mcp.McpConfig;
 import com.miniclaw.tools.mcp.McpManager;
+import com.miniclaw.tools.mcp.McpServerConfig;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -79,8 +85,8 @@ public class MiniclawApp implements Runnable {
     @Option(names = {"--thinking"}, description = "Enable slow thinking mode (TWO_STAGE)")
     private boolean thinking;
 
-    @Option(names = {"--feishu"}, description = "Start in Feishu bot mode")
-    private boolean feishu;
+    @Option(names = {"--im"}, description = "Start in IM bot mode: feishu|weixin")
+    private String imMode;
 
     @Option(names = {"--root"}, description = "Restrict working directory (default: current dir)")
     private Path rootDir;
@@ -88,7 +94,7 @@ public class MiniclawApp implements Runnable {
     private Path resolvedWorkDir;
     private AgentEngine engine;
     private SessionService sessionService;
-    private FeishuBot feishuBot;
+    private final List<ImChannel> imChannels = new java.util.ArrayList<>();
     private SkillLoader skillLoader;
     private McpManager mcpManager;
     private ToolRegistry registry;
@@ -97,8 +103,8 @@ public class MiniclawApp implements Runnable {
 
     @Override
     public void run() {
-        if (feishu) {
-            startFeishuBot();
+        if (imMode != null && !imMode.isBlank()) {
+            startImBot(imMode.strip().toLowerCase());
             return;
         }
 
@@ -132,6 +138,28 @@ public class MiniclawApp implements Runnable {
         registry = createToolRegistry(resolvedWorkDir, userSkillsDir);
 
         McpConfig mcpConfig = McpConfig.load(resolvedWorkDir);
+        if (!mcpConfig.servers().isEmpty()) {
+            var servers = new java.util.LinkedHashMap<>(mcpConfig.servers());
+            boolean hasInteractive = servers.values().stream().anyMatch(s -> !s.disabled());
+            if (hasInteractive) {
+                System.out.println();
+                for (var entry : servers.entrySet()) {
+                    var sc = entry.getValue();
+                    if (sc.disabled()) continue;
+                    System.out.print("  Enable MCP [" + sc.name() + "] ("
+                        + sc.transport().name().toLowerCase() + ")? [Y/n] ");
+                    String answer = System.console().readLine().trim().toLowerCase();
+                    if ("n".equals(answer) || "no".equals(answer)) {
+                        servers.put(entry.getKey(),
+                            new McpServerConfig(sc.name(), sc.command(), sc.args(),
+                                sc.url(), sc.env(), true));
+                        System.out.println(GRAY + "    " + sc.name() + " disabled." + RESET);
+                    }
+                }
+                System.out.println();
+            }
+            mcpConfig = new McpConfig(servers);
+        }
         mcpManager = new McpManager();
         List<Tool> mcpTools = mcpManager.startAll(mcpConfig, resolvedWorkDir);
         for (Tool t : mcpTools) registry.register(t);
@@ -279,8 +307,19 @@ public class MiniclawApp implements Runnable {
                         System.out.println(GRAY + "  session cleared." + RESET + "\n");
                         log.info("Session cleared");
                     }
-                    case "/feishu-on" -> startFeishuCompanion(reader);
-                    case "/feishu-off" -> stopFeishuCompanion();
+                    case "/feishu-on" -> startImChannel("feishu", reader);
+                    case "/feishu-off" -> stopImChannel("feishu");
+                    case "/im-on" -> {
+                        String[] parts = input.split("\\s+", 3);
+                        if (parts.length >= 2) startImChannel(parts[1], reader);
+                        else System.out.println(GRAY + "  Usage: /im-on feishu|weixin" + RESET + "\n");
+                    }
+                    case "/im-off" -> {
+                        String[] parts = input.split("\\s+", 3);
+                        if (parts.length >= 2) stopImChannel(parts[1]);
+                        else stopAllImChannels();
+                    }
+                    case "/im-status" -> printImStatus();
                     case "/compact" -> {
                         String stats = engine.compactSession();
                         System.out.println(GRAY + "  " + stats + RESET + "\n");
@@ -295,12 +334,12 @@ public class MiniclawApp implements Runnable {
             }
 
             if (!engine.tryAcquire()) {
-                System.out.println(GRAY + "  Engine busy (Feishu is processing)...\n" + RESET);
+                System.out.println(GRAY + "  Engine busy (IM is processing)...\n" + RESET);
                 continue;
             }
             try {
-                if (feishuBot != null && feishuBot.isRunning()) {
-                    feishuBot.mirrorToFeishu(input);
+                for (var ch : imChannels) {
+                    if (ch.isRunning()) ch.mirrorToIm(input);
                 }
                 String result = engine.run(input);
                 // PLAN 模式：LLM 生成的计划自动同步到 .miniclaw/plan.md
@@ -308,8 +347,8 @@ public class MiniclawApp implements Runnable {
                     && result != null && !result.startsWith("[")) {
                     engine.writePlanToWorkspace(result);
                 }
-                if (feishuBot != null && feishuBot.isRunning()) {
-                    feishuBot.finalizeMirror(result);
+                for (var ch : imChannels) {
+                    if (ch.isRunning()) ch.finalizeMirror(result);
                 }
                 if (result.startsWith("[")) {
                     System.out.println("\n" + result + "\n");
@@ -319,8 +358,8 @@ public class MiniclawApp implements Runnable {
             } catch (Exception e) {
                 log.error("Engine error: {}", e.getMessage(), e);
                 System.err.println("[A-003] " + e.getMessage());
-                if (feishuBot != null && feishuBot.isRunning()) {
-                    feishuBot.finalizeMirror(null);
+                for (var ch : imChannels) {
+                    if (ch.isRunning()) ch.finalizeMirror(null);
                 }
             } finally {
                 engine.release();
@@ -458,6 +497,9 @@ public class MiniclawApp implements Runnable {
             case "/context" -> "context";
             case "/feishu-on" -> "feishu-on";
             case "/feishu-off" -> "feishu-off";
+            case "/im-on" -> "im-on";
+            case "/im-off" -> "im-off";
+            case "/im-status" -> "im-status";
             case "/skill" -> "skill";
             case "/mcp" -> "mcp";
             default -> null;
@@ -965,7 +1007,7 @@ public class MiniclawApp implements Runnable {
         System.out.println(GRAY + "  /context    token usage         /remember add memory" + RESET);
         System.out.println(GRAY + "  /memory     list memories       /session manage sessions" + RESET);
         System.out.println(GRAY + "  /skill      load/unload skills  /mcp  MCP servers" + RESET);
-        System.out.println(GRAY + "  /help       show all commands   /feishu-on  /feishu-off" + RESET);
+        System.out.println(GRAY + "  /help       show all commands   /im-on /im-off /im-status" + RESET);
         System.out.println(GRAY + "  /exit       quit" + RESET);
         System.out.println();
     }
@@ -987,8 +1029,11 @@ public class MiniclawApp implements Runnable {
         System.out.println("    /session     save, load, list, search sessions");
         System.out.println("    /skill       list, load, unload skills");
         System.out.println("    /mcp         manage MCP servers (status/restart/logs/disable/enable)");
-        System.out.println("    /feishu-on   enable Feishu bot companion");
-        System.out.println("    /feishu-off  disable Feishu bot companion");
+        System.out.println("    /im-on <id>  enable IM channel (feishu / weixin)");
+        System.out.println("    /im-off [id] disable a channel or all");
+        System.out.println("    /im-status   show all IM channel status");
+        System.out.println("    /feishu-on   (alias for /im-on feishu)");
+        System.out.println("    /feishu-off  (alias for /im-off feishu)");
         System.out.println("    /help        show this help");
         System.out.println("    /exit        quit miniclaw");
         System.out.println();
@@ -1132,7 +1177,7 @@ public class MiniclawApp implements Runnable {
         System.out.println(boxLine(W, "  /thinking toggle thinking  /compact compress context"));
         System.out.println(boxLine(W, "  /context  show session     /session save/load"));
         System.out.println(boxLine(W, "  /memory   list memories    /skill  manage skills"));
-        System.out.println(boxLine(W, "  /mcp      MCP servers      /feishu-on  /feishu-off"));
+        System.out.println(boxLine(W, "  /mcp      MCP servers      /im-on  /im-off  /im-status"));
         System.out.println(boxLine(W, "  /exit     quit             /help   all commands"));
         System.out.println(boxLine(W, "═".repeat(W), '╚', '╝'));
         System.out.println();
@@ -1189,21 +1234,31 @@ public class MiniclawApp implements Runnable {
             val = System.getenv(altEnvKey);
             if (val != null && !val.isBlank()) return val;
         }
-        return FeishuConfig.readConfig(configPath);
+        return ConfigHelper.readConfig(configPath);
     }
 
-    private void startFeishuBot() {
+    private void startImBot(String channelName) {
         String apiKey = readConfigValue("MINICLAW_API_KEY", "ANTHROPIC_AUTH_TOKEN", "apiKey");
         if (apiKey == null || apiKey.isBlank()) {
             System.err.println("[C-003] MINICLAW_API_KEY not set (env or ~/.miniclaw/config.yaml).");
             System.exit(1);
         }
 
+        LLMConfig.Protocol proto;
+        try {
+            proto = LLMConfig.Protocol.valueOf(protocol.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            System.err.println("[C-004] Unknown protocol '" + protocol
+                + "'. Valid: OPENAI_COMPAT, ANTHROPIC");
+            System.exit(1);
+            return;
+        }
+
         LLMConfig llmConfig = LLMConfig.builder()
             .apiKey(apiKey)
             .baseUrl(baseUrl)
             .model(model)
-            .protocol(protocolEnum)
+            .protocol(proto)
             .build();
 
         Path workDir = resolvedWorkDir != null ? resolvedWorkDir : Path.of(System.getProperty("user.dir"));
@@ -1215,48 +1270,100 @@ public class MiniclawApp implements Runnable {
         eng.setPermissionMode(PermissionMode.AUTO);
         eng.setWorkspaceRules(loadWorkspaceRules(workDir));
 
-        FeishuConfig feishuConfig = FeishuConfig.fromEnv();
-        FeishuBot bot = new FeishuBot(feishuConfig);
-        bot.setEngine(eng);
+        ImChannel channel = switch (channelName) {
+            case "feishu" -> new FeishuChannel(FeishuConfig.fromEnv());
+            case "weixin" -> new WeixinChannel(WeixinConfig.fromEnv());
+            default -> throw new IllegalArgumentException("Unknown channel: " + channelName);
+        };
+        channel.setEngine(eng);
         try {
-            bot.start();
-            bot.awaitShutdown();
+            channel.start();
+            channel.awaitShutdown();
         } catch (java.io.IOException | InterruptedException e) {
-            log.error("Failed to start Feishu bot: {}", e.getMessage(), e);
-            System.err.println("[C-003] Failed to start Feishu bot: " + e.getMessage());
+            log.error("Failed to start {} bot: {}", channelName, e.getMessage(), e);
+            System.err.println("[C-003] Failed to start " + channelName + " bot: " + e.getMessage());
             System.exit(1);
         }
     }
 
-    private void startFeishuCompanion(LineReader reader) {
-        if (feishuBot != null && feishuBot.isRunning()) {
-            System.out.println(GRAY + "  Feishu companion is already running." + RESET + "\n");
+    private void startImChannel(String name, LineReader reader) {
+        ImChannel existing = imChannels.stream()
+            .filter(c -> c.id().equals(name) && c.isRunning())
+            .findFirst().orElse(null);
+        if (existing != null) {
+            System.out.println(GRAY + "  " + existing.name() + " is already running." + RESET + "\n");
             return;
         }
+
         try {
-            FeishuConfig feishuConfig = FeishuConfig.fromEnv();
-            feishuBot = new FeishuBot(feishuConfig);
-            feishuBot.setEngine(engine);
-            feishuBot.setOnFeishuInput(text -> {
-                System.out.print("\r\033[K" + GRAY + "  [飞书] " + text + RESET + "\n> ");
-                System.out.flush();
-            });
-            feishuBot.start();
-            System.out.println(GRAY + "  Feishu companion started. Send a message from Feishu to link." + RESET + "\n");
+            ImChannel channel = switch (name) {
+                case "feishu" -> {
+                    var fc = new FeishuChannel(FeishuConfig.fromEnv());
+                    fc.setOnImInput(text -> {
+                        System.out.print("\r\033[K" + GRAY + "  [飞书] " + text + RESET + "\n> ");
+                        System.out.flush();
+                    });
+                    yield fc;
+                }
+                case "weixin" -> {
+                    var wc = new WeixinChannel(WeixinConfig.fromEnv());
+                    wc.setOnImInput(text -> {
+                        System.out.print("\r\033[K" + GRAY + "  [微信] " + text + RESET + "\n> ");
+                        System.out.flush();
+                    });
+                    yield wc;
+                }
+                default -> throw new IllegalArgumentException("Unknown channel: " + name);
+            };
+            channel.setEngine(engine);
+            channel.start();
+            imChannels.add(channel);
+            System.out.println(GRAY + "  " + channel.name() + " channel started." + RESET + "\n");
         } catch (Exception e) {
-            log.error("Failed to start Feishu companion: {}", e.getMessage(), e);
+            log.error("Failed to start {} channel: {}", name, e.getMessage(), e);
             System.out.println(GRAY + "  [C-003] Failed: " + e.getMessage() + RESET + "\n");
         }
     }
 
-    private void stopFeishuCompanion() {
-        if (feishuBot == null || !feishuBot.isRunning()) {
-            System.out.println(GRAY + "  Feishu companion is not running." + RESET + "\n");
+    private void stopImChannel(String name) {
+        ImChannel channel = imChannels.stream()
+            .filter(c -> c.id().equals(name) && c.isRunning())
+            .findFirst().orElse(null);
+        if (channel == null) {
+            System.out.println(GRAY + "  " + name + " is not running." + RESET + "\n");
             return;
         }
-        feishuBot.stop();
-        feishuBot = null;
-        System.out.println(GRAY + "  Feishu companion stopped." + RESET + "\n");
+        channel.stop();
+        imChannels.remove(channel);
+        System.out.println(GRAY + "  " + channel.name() + " channel stopped." + RESET + "\n");
+    }
+
+    private void stopAllImChannels() {
+        if (imChannels.isEmpty()) {
+            System.out.println(GRAY + "  No IM channels active." + RESET + "\n");
+            return;
+        }
+        for (var ch : imChannels) {
+            if (ch.isRunning()) ch.stop();
+        }
+        imChannels.clear();
+        System.out.println(GRAY + "  All IM channels stopped." + RESET + "\n");
+    }
+
+    private void printImStatus() {
+        if (imChannels.isEmpty()) {
+            System.out.println(GRAY + "  No IM channels active." + RESET + "\n");
+            return;
+        }
+        System.out.println();
+        for (var ch : imChannels) {
+            var s = ch.status();
+            String icon = s.running() ? "*" : " ";
+            String user = s.linkedUser() != null ? s.linkedUser() : "—";
+            System.out.println(GRAY + "  [" + icon + "] " + padRight(s.name(), 8)
+                + "  user: " + user + "  " + s.stateInfo() + RESET);
+        }
+        System.out.println();
     }
 
     private ToolRegistry createToolRegistry(Path workDir, Path... extraReadRoots) {

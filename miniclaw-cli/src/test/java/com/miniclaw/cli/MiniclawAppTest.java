@@ -48,7 +48,14 @@ class MiniclawAppTest {
     }
 
     @Test
-    void shouldResolveFeishuCommands() {
+    void shouldResolveImCommands() {
+        assertThat(resolveCommand("/im-on")).isEqualTo("im-on");
+        assertThat(resolveCommand("/im-off")).isEqualTo("im-off");
+        assertThat(resolveCommand("/im-status")).isEqualTo("im-status");
+    }
+
+    @Test
+    void shouldResolveFeishuCommandAliases() {
         assertThat(resolveCommand("/feishu-on")).isEqualTo("feishu-on");
         assertThat(resolveCommand("/feishu-off")).isEqualTo("feishu-off");
     }

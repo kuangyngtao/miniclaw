@@ -18,7 +18,7 @@ import java.nio.file.Path;
  *
  * 运行: mvn test -pl miniclaw-engine -Dtest=ReadToolIntegrationTest -DapiKey=xxx
  */
-public class ReadToolIntegrationTest {
+public class ReadToolIntegrationManual {
 
     private static final ObjectMapper mapper = new ObjectMapper();
 
