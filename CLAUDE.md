@@ -2,6 +2,27 @@
 
 > 文档分工：本文件负责项目定位、架构边界和 AI 协作约束；详细工程设计规范见 [DESIGN.md](DESIGN.md)；路线图和重构任务见 [TODO.md](TODO.md)。
 
+## AI 协作入口规则
+
+`CLAUDE.md` 是 AI 协作者进入项目时的入口索引。开始任何代码修改前，先判断任务类型，并读取对应文档。
+
+| 任务类型 | 必读文档 | 原因 |
+| --- | --- | --- |
+| 修 bug、加功能、改工具、改 Provider、改 CLI | [DESIGN.md](DESIGN.md) | 确认模块边界、接口契约、权限、安全、测试和代码审查规则 |
+| 底层重构、任务排序、路线调整、能力取舍 | [TODO.md](TODO.md) | 确认当前优先级、阶段顺序、前置条件和验收标准 |
+| 修改架构边界、模块依赖、项目原则 | [CLAUDE.md](CLAUDE.md) + [DESIGN.md](DESIGN.md) + [TODO.md](TODO.md) | 同步项目纲领、设计规范和路线图 |
+| 修改 README、示例、部署、CI、Docker | [README.md](README.md) + [TODO.md](TODO.md) | 保持用户入口和工程闭环路线一致 |
+| 处理安全、密钥、权限、审计问题 | [SECURITY.md](SECURITY.md) + [DESIGN.md](DESIGN.md) | 避免泄露密钥、绕过审批或破坏审计链路 |
+
+强规则：
+
+- 不要只读 `CLAUDE.md` 就直接修改核心代码；涉及实现细节时必须参考 `DESIGN.md`。
+- 不要凭临时判断调整开发顺序；涉及路线和优先级时必须参考 `TODO.md`。
+- 重构类任务必须先看 `TODO.md` 的 `P0-R`，再看 `DESIGN.md` 的重构规范和代码审查规范。
+- 新增工具、MCP、远程执行、文件写入、消息发送等能力，必须先定义风险等级、权限模式、审计字段和测试策略。
+- 如果实现改变了公共契约、模块边界、权限模型、工具协议或路线优先级，必须同步更新相关文档。
+- 文档冲突时，以职责归属判断：项目边界看 `CLAUDE.md`，工程规范看 `DESIGN.md`，执行路线看 `TODO.md`。
+
 ## 项目定位
 
 miniclaw 是 [OpenClaw](https://openclaw.ai/) 的 Java CLI 实现，是一个本地运行的 AI 编程 Agent 底座。
@@ -189,48 +210,16 @@ CLI / IM
 
 ---
 
-## 规范体系
+## 工程规范入口
 
-### 命名
+具体命名、类设计、接口设计、测试分层和代码审查标准统一维护在 [DESIGN.md](DESIGN.md)。本文件只保留 AI 协作者需要优先记住的项目边界：
 
-| 元素 | 风格 | 示例 |
-|------|------|------|
-| 包名 | 全小写 | `com.miniclaw.tools` |
-| 类/接口 | PascalCase | `AgentLoop`, `Tool` |
-| 方法/变量 | camelCase | `executeTool` |
-| 常量/枚举值 | UPPER_SNAKE_CASE | `MAX_RETRIES` |
-| 测试类 | 被测类名+Test | `ReadToolTest` |
-
-### 代码组织
-
-- 接口与实现分离：公开接口放包根，实现类放 `impl/` 子包
-- 测试目录镜像 `src/test/java/` 完整镜像 `src/main/java/` 的包结构
-- 无循环依赖
-
-### 统一返回格式
-
-```java
-public sealed interface Result<T> {
-    record Ok<T>(T data) implements Result<T> {}
-    record Err<T>(ErrorInfo error) implements Result<T> {}
-}
-public record ErrorInfo(String errorCode, String message) {}
-```
-
-禁止业务代码抛异常传递已知错误。
-
-### 错误码
-
-```text
-T-001~T-099  工具系统
-M-001~M-099  MCP 系统
-E-001~E-099  Edit 工具
-A-001~A-099  Agent 引擎
-P-001~P-099  Provider
-C-001~C-099  配置
-S-001~S-099  Skills
-X-001~X-099  通用
-```
+- 不把实现细节塞进入口文档；公共契约变化时更新 `DESIGN.md`。
+- 不把路线图塞进入口文档；任务优先级变化时更新 `TODO.md`。
+- 不把用户使用说明塞进入口文档；安装、运行和示例变化时更新 `README.md`。
+- 已知错误走结构化结果和错误码，不通过裸异常或模糊字符串传递。
+- 核心逻辑不直接输出到 `System.out`，输出展示应留在 CLI/IM 入口层。
+- 新增副作用能力必须先补权限、审计和测试策略。
 
 ---
 
@@ -246,27 +235,7 @@ X-001~X-099  通用
 
 ---
 
-## Tool 接口
-
-```java
-public interface Tool {
-    String name();              // kebab-case
-    String description();       // 给 LLM 看
-    String inputSchema();       // JSON Schema
-    Result<String> execute(String arguments);
-    default boolean isReadOnly() { return false; }
-}
-```
-
-要求：
-
-- `name()` 使用 kebab-case；MCP 工具使用 `mcp__server__tool`。
-- `description()` 面向模型，说明何时使用、输入限制和风险。
-- `inputSchema()` 必须是模型可消费的 JSON Schema。
-- `execute()` 返回统一 `Result<String>`。
-- 写工具必须覆盖边界测试、失败测试和审批路径测试。
-
-### 工具清单
+## 工具系统边界
 
 | 工具 | 读/写 | 安全机制 |
 |------|:---:|------|
@@ -279,9 +248,9 @@ public interface Tool {
 | todo_write | 写 | JSON schema 校验、双写到 .miniclaw/todo.md |
 | web_fetch | 读 | 15min TTL 缓存、1MB/8000 双截断 |
 
-全局安全拦截器：`rm -rf /~/*`、`sudo`、`chmod 777`、`> /dev/sd`、`mkfs`、`dd`、fork bomb
+工具设计细则见 [DESIGN.md](DESIGN.md)。当前路线要求逐步从 `execute(String) -> Result<String>` 演进到结构化的 `ToolMetadata`、`ToolExecutionRequest`、`ToolExecutionResult`。
 
-工具工作流：`glob -> grep -> read -> edit -> test`
+默认工具工作流：`glob -> grep -> read -> edit -> test`。
 
 ---
 
