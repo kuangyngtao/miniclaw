@@ -1,4 +1,4 @@
-# miniclaw 项目开发纲领
+# clawkit 项目开发纲领
 
 > 文档分工：本文件负责项目定位、架构边界和 AI 协作约束；详细工程设计规范见 [DESIGN.md](DESIGN.md)；路线图和重构任务见 [TODO.md](TODO.md)。
 
@@ -25,7 +25,7 @@
 
 ## 项目定位
 
-miniclaw 是 [OpenClaw](https://openclaw.ai/) 的 Java CLI 实现，是一个本地运行的 AI 编程 Agent 底座。
+clawkit 是 [OpenClaw](https://openclaw.ai/) 的 Java CLI 实现，是一个本地运行的 AI 编程 Agent 底座。
 
 它的核心价值不是某一个垂类场景，而是把 Agent 的基本功做好：
 
@@ -54,7 +54,7 @@ miniclaw 是 [OpenClaw](https://openclaw.ai/) 的 Java CLI 实现，是一个本
 
 ### 产品边界
 
-miniclaw 的底层应保持通用。垂类应用应该以插件、MCP server、Skill、业务工具包或上层 workflow 的方式接入。
+clawkit 的底层应保持通用。垂类应用应该以插件、MCP server、Skill、业务工具包或上层 workflow 的方式接入。
 
 ReAct 是一种执行模式，不是唯一产品形态。对确定性任务，应优先使用 workflow、结构化工具和指标复盘；ReAct 主要用于探索、追问、异常归因和工具失败兜底。
 
@@ -94,7 +94,7 @@ CLI / IM
 | 模式 | 适用场景 | 约束 |
 |------|---------|------|
 | ReAct | 开放式代码任务、调试、探索、归因 | 必须受最大轮次、进度检测和工具权限限制 |
-| Plan-and-Execute | 多步骤任务、可拆 DAG、需要复盘的工作 | 计划应写入 `.miniclaw/plan.md`，执行结果可追踪 |
+| Plan-and-Execute | 多步骤任务、可拆 DAG、需要复盘的工作 | 计划应写入 `.clawkit/plan.md`，执行结果可追踪 |
 | SubAgent | 并行搜索、只读探索、独立子任务 | 子 Agent 不递归再派发 SubAgent |
 | TWO_STAGE | 复杂问题先规划再执行 | 第一阶段禁止工具调用 |
 | Workflow | 周期性、确定性、可指标化任务 | 优先用于垂类业务和固定流程 |
@@ -105,23 +105,23 @@ CLI / IM
 
 | 模块 | 内部依赖 | 外部依赖 |
 |------|---------|---------|
-| `miniclaw-tools` | 无 | Jackson, SLF4J |
-| `miniclaw-memory` | 无 | Jackson, Jackson YAML, SLF4J |
-| `miniclaw-context` | tools | SLF4J |
-| `miniclaw-provider` | tools | Jackson, JDK HTTP, SLF4J |
-| `miniclaw-engine` | tools, provider, context, memory | SLF4J |
-| `miniclaw-cli` | engine, memory, im | Picocli, Logback |
-| `miniclaw-im` | engine | FeishuApi + FeishuChannel + WeixinChannel + WeixinIlinkClient, Jackson |
+| `clawkit-tools` | 无 | Jackson, SLF4J |
+| `clawkit-memory` | 无 | Jackson, Jackson YAML, SLF4J |
+| `clawkit-context` | tools | SLF4J |
+| `clawkit-provider` | tools | Jackson, JDK HTTP, SLF4J |
+| `clawkit-engine` | tools, provider, context, memory | SLF4J |
+| `clawkit-cli` | engine, memory, im | Picocli, Logback |
+| `clawkit-im` | engine | FeishuApi + FeishuChannel + WeixinChannel + WeixinIlinkClient, Jackson |
 
 约束：`tools` 是唯一基础层，`engine` 是组装点，`cli` 不直接依赖 tools/provider。禁止循环依赖。
 
 新增能力优先放在最窄的模块里：
 
-- 工具协议、MCP、拦截器放 `miniclaw-tools`。
-- Prompt、压缩、Skill 加载放 `miniclaw-context`。
-- 模型协议、重试、熔断、fallback 放 `miniclaw-provider`。
-- Agent loop、权限、计划执行、会话检索放 `miniclaw-engine`。
-- 终端交互、命令路由、启动组装放 `miniclaw-cli`。
+- 工具协议、MCP、拦截器放 `clawkit-tools`。
+- Prompt、压缩、Skill 加载放 `clawkit-context`。
+- 模型协议、重试、熔断、fallback 放 `clawkit-provider`。
+- Agent loop、权限、计划执行、会话检索放 `clawkit-engine`。
+- 终端交互、命令路由、启动组装放 `clawkit-cli`。
 
 ---
 
@@ -170,9 +170,9 @@ CLI / IM
 
 ## 运维
 
-- **日志**: `~/.miniclaw/logs/miniclaw.log`，按天滚动保留 7 天
-- **API Key**: 环境变量 > `~/.miniclaw/config.yaml` > 交互输入。硬编码零容忍
-- **工作目录**: 默认启动目录，`--root` 限制范围。元数据统一在 `~/.miniclaw/`
+- **日志**: `~/.clawkit/logs/clawkit.log`，按天滚动保留 7 天
+- **API Key**: 环境变量 > `~/.clawkit/config.yaml` > 交互输入。硬编码零容忍
+- **工作目录**: 默认启动目录，`--root` 限制范围。元数据统一在 `~/.clawkit/`
 - **存储**: 文件系统即数据库。logs + config + Markdown 记忆 + sessions JSON
 
 ---
@@ -225,7 +225,7 @@ CLI / IM
 
 ## 上下文工程准则
 
-上下文工程是 miniclaw 的核心基本功。任何新增记忆、压缩、工具结果缓存或 prompt 层级调整都必须遵循：
+上下文工程是 clawkit 的核心基本功。任何新增记忆、压缩、工具结果缓存或 prompt 层级调整都必须遵循：
 
 - 不丢关键约束：用户目标、文件路径、测试结果、错误信息、未完成 todo 必须优先保留。
 - 不污染当前任务：历史记忆和会话召回必须标明来源，不能当作当前事实。
@@ -245,7 +245,7 @@ CLI / IM
 | bash | 写 | 30s 超时强杀、workDir 绑定、高危命令拦截 |
 | glob | 读 | 200 条 + 8000 字节双截断 |
 | grep | 读 | 50 条 + 200 字符/行 + 8000 字节三层截断 |
-| todo_write | 写 | JSON schema 校验、双写到 .miniclaw/todo.md |
+| todo_write | 写 | JSON schema 校验、双写到 .clawkit/todo.md |
 | web_fetch | 读 | 15min TTL 缓存、1MB/8000 双截断 |
 
 工具设计细则见 [DESIGN.md](DESIGN.md)。当前路线要求逐步从 `execute(String) -> Result<String>` 演进到结构化的 `ToolMetadata`、`ToolExecutionRequest`、`ToolExecutionResult`。
@@ -288,4 +288,4 @@ SPEC / TODO
 
 ---
 
-本文件是 miniclaw 的权威开发纲领。架构边界、模块依赖和核心原则变更，应先更新本文件，再修改实现。
+本文件是 clawkit 的权威开发纲领。架构边界、模块依赖和核心原则变更，应先更新本文件，再修改实现。

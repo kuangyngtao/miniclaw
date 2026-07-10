@@ -1,0 +1,207 @@
+package com.clawkit.tools.impl;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.clawkit.tools.Result;
+import com.clawkit.tools.Tool;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.concurrent.TimeUnit;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * 在工作区内执行 bash 命令。
+ * 核心安全机制：超时控制 + 工作区绑定 + 错误原样回传 + 输出截断。
+ */
+public class BashTool implements Tool {
+
+    private static final int TIMEOUT_SECONDS = 30;
+    private static final int MAX_OUTPUT_BYTES = 8000;
+
+    private static final String SCHEMA = """
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "description": "要执行的 bash 命令，例如: ls -la 或 go test ./..."
+            }
+          },
+          "required": ["command"]
+        }""";
+
+    private static final Logger log = LoggerFactory.getLogger(BashTool.class);
+    private static final ObjectMapper mapper = new ObjectMapper();
+
+    private final Path workDir;
+    private final String shell;
+    private final String shellFlag;
+
+    /** 静态检测：Windows 上优先用 Git Bash 完整路径（避开 WSL shim），不存在则回退 cmd */
+    private static final String[] DETECTED_SHELL = detectShell();
+
+    private static String[] detectShell() {
+        boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+        if (!isWindows) {
+            return new String[]{"bash", "-c"};
+        }
+        // 1. 环境变量 GIT_BASH
+        String envBash = System.getenv("GIT_BASH");
+        if (envBash != null && java.nio.file.Files.exists(java.nio.file.Path.of(envBash))) {
+            return new String[]{envBash, "-c"};
+        }
+        // 2. PATH 中查找 git 安装目录下的 bash（避免 System32 的 WSL shim）
+        String pathBash = findBashInPath();
+        if (pathBash != null) {
+            return new String[]{pathBash, "-c"};
+        }
+        // 3. 常见安装路径
+        for (String candidate : new String[]{
+                "D:\\Git\\usr\\bin\\bash.exe",
+                "D:\\Git\\bin\\bash.exe",
+                "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
+                "C:\\Program Files\\Git\\bin\\bash.exe"}) {
+            if (java.nio.file.Files.exists(java.nio.file.Path.of(candidate))) {
+                return new String[]{candidate, "-c"};
+            }
+        }
+        return new String[]{"cmd", "/c"};
+    }
+
+    private static String findBashInPath() {
+        String pathEnv = System.getenv("PATH");
+        if (pathEnv == null) return null;
+        for (String dir : pathEnv.split(java.io.File.pathSeparator)) {
+            if (dir.toLowerCase().contains("system32")) continue;
+            java.nio.file.Path candidate = java.nio.file.Path.of(dir, "bash.exe");
+            if (java.nio.file.Files.exists(candidate)) {
+                return candidate.toString();
+            }
+        }
+        return null;
+    }
+
+    public BashTool(Path workDir) {
+        this.workDir = workDir.toAbsolutePath().normalize();
+        this.shell = DETECTED_SHELL[0];
+        this.shellFlag = DETECTED_SHELL[1];
+    }
+
+    @Override
+    public String name() {
+        return "bash";
+    }
+
+    @Override
+    public String description() {
+        return "在当前工作区执行任意的 bash 命令。支持链式命令(如 &&)。返回标准输出和标准错误。";
+    }
+
+    @Override
+    public String inputSchema() {
+        return SCHEMA;
+    }
+
+    @Override
+    public Result<String> execute(String arguments) {
+        // 1. 解析参数
+        JsonNode argsNode;
+        try {
+            argsNode = mapper.readTree(arguments);
+        } catch (JsonProcessingException e) {
+            return new Result.Err<>(new Result.ErrorInfo("T-002", "参数 JSON 解析失败: " + e.getMessage()));
+        }
+
+        JsonNode cmdNode = argsNode.get("command");
+        if (cmdNode == null || cmdNode.asText().isEmpty()) {
+            return new Result.Err<>(new Result.ErrorInfo("T-002", "缺少必需参数 'command'"));
+        }
+
+        // 2. 构建进程：绑定 workDir + shell 包装
+        String command = cmdNode.asText();
+        String useShell = shell;
+        String useFlag = shellFlag;
+
+        // Windows: .cmd/.bat 文件直接走 cmd.exe /c，避免 bash 嵌套引号卡死
+        if (isWindows() && needsCmdExe(command) && !"cmd".equals(shell)) {
+            useShell = "cmd";
+            useFlag = "/c";
+        }
+
+        ProcessBuilder pb = new ProcessBuilder(useShell, useFlag, command);
+        pb.directory(workDir.toFile());
+        pb.redirectErrorStream(true);
+
+        // 3. 执行 + 超时控制
+        Process process;
+        try {
+            process = pb.start();
+        } catch (IOException e) {
+            return new Result.Err<>(new Result.ErrorInfo("T-005", "启动进程失败: " + e.getMessage()));
+        }
+
+        String output;
+        boolean timedOut = false;
+        try {
+            boolean finished = process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                timedOut = true;
+            }
+            output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            process.destroyForcibly();
+            return new Result.Err<>(new Result.ErrorInfo("T-004", "命令执行被中断"));
+        } catch (IOException e) {
+            return new Result.Err<>(new Result.ErrorInfo("T-005", "读取命令输出失败: " + e.getMessage()));
+        }
+
+        // 超时警告
+        if (timedOut) {
+            output = output + "\n[警告: 命令执行超时(" + TIMEOUT_SECONDS + "s)，已被系统强制终止。如果是启动常驻服务，请尝试将其转入后台。]";
+            log.warn("[Bash] {} → TIMEOUT ({}s)", shellCmd(cmdNode.asText()), TIMEOUT_SECONDS);
+            return new Result.Ok<>(truncate(output));
+        }
+
+        // 空输出
+        if (output.isEmpty()) {
+            log.info("[Bash] {} → 0 bytes (empty)", shellCmd(cmdNode.asText()));
+            return new Result.Ok<>("命令执行成功，无终端输出。");
+        }
+
+        log.info("[Bash] {} → {} bytes", shellCmd(cmdNode.asText()), output.length());
+        return new Result.Ok<>(truncate(output));
+    }
+
+    private static String shellCmd(String cmd) {
+        return cmd.length() <= 80 ? cmd : cmd.substring(0, 77) + "...";
+    }
+
+    /** 长度截断保护 — 防 OOM */
+    private String truncate(String output) {
+        byte[] bytes = output.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > MAX_OUTPUT_BYTES) {
+            String head = new String(bytes, 0, MAX_OUTPUT_BYTES, StandardCharsets.UTF_8);
+            return head + "\n\n...[终端输出过长，已截断至前 " + MAX_OUTPUT_BYTES + " 字节]...";
+        }
+        return output;
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name").toLowerCase().contains("win");
+    }
+
+    private static boolean needsCmdExe(String command) {
+        String[] parts = command.trim().split("\\s+");
+        if (parts.length == 0) return false;
+        // Check if the first word (the executable) ends with .cmd or .bat
+        String exe = parts[0].toLowerCase();
+        return exe.endsWith(".cmd") || exe.endsWith(".bat")
+            // Also detect "cmd.exe /c ..." being passed to bash (double wrapping)
+            || exe.equals("cmd.exe") || exe.equals("cmd");
+    }
+}

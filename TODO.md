@@ -1,4 +1,4 @@
-# miniclaw TODO
+# clawkit TODO
 
 > `[ ]` 待做 `[~]` 进行中 `[x]` 已完成
 
@@ -19,7 +19,7 @@
 
 - **当前必做**：能支撑下一轮重构的最小闭环，例如护栏测试、基础 metrics、工具执行契约。
 - **当前不做**：完整评测平台、数据库化观测、Web dashboard、多用户协作、复杂垂类场景。
-- **能本地文件解决的，不先上数据库**：观测第一阶段使用 `.miniclaw/runs/**/metrics.jsonl`、`trace.jsonl`、`summary.json`。
+- **能本地文件解决的，不先上数据库**：观测第一阶段使用 `.clawkit/runs/**/metrics.jsonl`、`trace.jsonl`、`summary.json`。
 - **能自动判断的先评估**：先评估测试是否通过、工具是否调用、安全边界是否守住，不急着评估回答质量。
 - **每个阶段只证明一件事**：P0 证明“可观测、可回归、可安全重构”；P1 再证明“完成率更高”；P2 再证明“成本更低”。
 
@@ -38,12 +38,12 @@
 
 当前最重要的不是继续堆新能力，而是先把后续演进的地基打稳。
 
-1. **P0-S：重构前最小护栏**  
-   先补重构护栏测试、基础 metrics、工具执行结果模型，确保后续重构有回归依据。
-2. **P0：可靠运行闭环**  
-   补 tokenizer、上下文预算、P0-O 观测闭环和关键工具安全。
+1. **P0：可靠运行闭环**  
+   先建立观测和度量能力：tokenizer、上下文预算、P0-O 结构化指标。没有指标，后续重构无法量化证明"变好了"。
+2. **P0-S：重构前最小护栏**  
+   在 metrics 基础上补护栏测试和工具执行结果模型，让回归有据可查。
 3. **P0-R：底层结构重构**  
-   在最小观测和护栏测试具备后，再拆 `AgentEngine`、工具执行、上下文管线和 MCP 风险模型。
+   在观测和护栏测试都具备后，拆 `AgentEngine`、工具执行、上下文管线和 MCP 风险模型。每一步重构都能用 metrics 和护栏测试验证。
 4. **P0-D：工程闭环与项目可用性**  
    补 CI、Docker、示例、配置体验和文档入口，让项目更容易运行、验证和展示。
 5. **P1/P2：完成率与效率优化**  
@@ -55,14 +55,14 @@
 
 ## 当前 Harness 能力盘点
 
-一个成熟的 Agent harness 至少包括：上下文管理、工具系统、执行编排、状态与记忆、评估与观察、约束与恢复。miniclaw 已经具备原型能力，但还没有达到成熟工程标准。
+一个成熟的 Agent harness 至少包括：上下文管理、工具系统、执行编排、状态与记忆、评估与观察、约束与恢复。clawkit 已经具备原型能力，但还没有达到成熟工程标准。
 
 | 维度 | 当前已经有的能力 | 主要不足 | 后续落点 |
 |------|------------------|----------|----------|
 | 上下文管理 | system prompt、会话历史、working memory、相关历史会话注入、`/context`、compact、MessageMasker、LadderedCompactor | token 仍偏估算；上下文预算线不清晰；runtime context 和持久会话存在污染风险；compact 后保留内容缺少可解释记录 | P0 真实 tokenizer、上下文预算管理；P0-R 拆 `ContextPipeline`、分离运行时上下文和持久会话 |
 | 工具系统 | 内置文件、shell、搜索、时间等工具；MCP 动态注册；`PLAN/ASK/AUTO` 权限模式；SafetyInterceptor；只读工具概念 | 工具返回值仍偏字符串；`ToolMetadata` 不完整；MCP 工具 readOnly/riskLevel 粗糙；审计 JSONL 不稳定；工具失败不可统一统计 | P0 Git 专用工具、WriteTool 覆盖确认；P0-R 统一工具执行契约、重构 MCP 风险模型、修复审计日志 |
 | 执行编排 | ReAct 主循环、工具调用、Plan-and-Execute、SubAgent、慢思考阶段、最大轮次、进度提醒、死循环提醒 | `AgentEngine` 职责过重；状态机不显式；工具执行、上下文、记忆、计划混在主循环；恢复策略和失败分类不足 | P0-R 拆 `AgentEngine`、`ToolCallExecutor`、`PlanRuntime`、`SkillRuntime`；P1 fallback 和任务切分 |
-| 状态与记忆 | session JSON、DiskMemoryService、working memory、相关会话检索、`.miniclaw` 数据目录 | 运行时事实和长期会话边界不够清楚；记忆去重、衰减、冲突处理弱；session schema/versioning 需要收敛 | P0-R 分离运行时上下文和持久会话、`MemoryHooks`；P1 记忆质量与召回优化 |
+| 状态与记忆 | session JSON、DiskMemoryService、working memory、相关会话检索、`.clawkit` 数据目录 | 运行时事实和长期会话边界不够清楚；记忆去重、衰减、冲突处理弱；session schema/versioning 需要收敛 | P0-R 分离运行时上下文和持久会话、`MemoryHooks`；P1 记忆质量与召回优化 |
 | 评估与观察 | 基础日志、`/context` 统计、部分工具审计、TODO 中有测试记录 | 当前最明显短板：没有统一 `metrics.jsonl`；没有 benchmark runner；没有任务完成率、工具成功率、耗时、token、compact、provider retry 的结构化统计；无法量化重构是否变好 | P0 结构化指标、评测基准；P0-R 工具执行结果模型；后续建立回归评测和观测报表 |
 | 约束与恢复 | `PLAN/ASK/AUTO`、审批拦截、路径安全检查、shell timeout、Provider retry/circuit breaker、部分敏感信息遮蔽 | 风险模型偏粗；MCP 高风险动作识别不足；失败恢复多靠提示词和重试；缺少可回滚、可恢复、可审计的任务状态 | P0 WriteTool 覆盖确认；P0-R MCP 风险模型、BashTool 生命周期、Provider 输出协议；P1 错误分类与 fallback |
 
@@ -74,13 +74,17 @@
 
 这些是基座 Agent 的基本功，优先级高于新增花哨能力。
 
-- **[ ] 真实 tokenizer**（context）  
+- **[x] 真实 tokenizer**（context）  
   引入 JTokkit 或等价 tokenizer，替换字符数估算。  
   验收：`/context` 展示真实 token；上下文压缩触发点不再依赖字符估算。
 
-- **[ ] 上下文预算管理**（context / engine）  
+  ✅ 2026-07-05 — JTokkit 替换字符估算，LLMConfig 按模型检测 contextWindow/encoding，AgentEngine 移除硬编码 8000。
+
+- **[x] 上下文预算管理**（context / engine）  
   建立模型窗口预算线，例如 70% 预警、85% 强制 compact。按 system、tools、history、memory、tool result 分区预算。  
   验收：任务运行中能解释 token 分布；压缩前后保留关键约束。
+
+  ✅ 2026-07-08 — 新增 ContextBudgetPolicy(70/85/95)、ContextBudgetAnalyzer(7 分区)、CompactionResult；engine 根据预算状态决策 compact，compact 后一律重分析，>95% 硬拒绝；/context 显示分区；ConstraintExtractor 提取+验证关键约束。
 
 ### P0-O：评估与观测最小闭环
 
@@ -88,9 +92,9 @@
 
 - **[ ] 本地观测存储格式**（observability）  
   第一阶段不引入 MySQL / PostgreSQL。使用本地文件：
-  - `.miniclaw/runs/<run-id>/metrics.jsonl`
-  - `.miniclaw/runs/<run-id>/trace.jsonl`
-  - `.miniclaw/runs/<run-id>/summary.json`
+  - `.clawkit/runs/<run-id>/metrics.jsonl`
+  - `.clawkit/runs/<run-id>/trace.jsonl`
+  - `.clawkit/runs/<run-id>/summary.json`
   验收：每次任务运行生成独立 run 目录；文件可直接打开阅读；敏感字段脱敏。
 
 - **[ ] 最小 Metrics 数据模型**（observability）  
@@ -150,13 +154,13 @@
 - 每次只移动一个职责边界，不在同一个 PR 中同时做大功能、新接口和大规模格式化。
 - 先补行为测试，再移动代码；重构 PR 默认不改变外部行为。
 - 行为变化必须写进验收标准和测试名，不能靠口头说明。
-- `AgentEngine`、`MiniclawApp`、`ToolRegistry`、`ContextPipeline` 相关改动必须说明模块边界是否变好。
+- `AgentEngine`、`ClawkitApp`、`ToolRegistry`、`ContextPipeline` 相关改动必须说明模块边界是否变好。
 - 重构期间可以保留旧入口做适配层，等新路径覆盖稳定后再删除旧逻辑。
 
 ### 结构风险
 
 - `AgentEngine` 混合主循环、工具执行、审批、compact、记忆、session、skill、plan、todo 追踪。
-- `MiniclawApp` 混合 REPL、slash command、审批 UI、session、memory、MCP、skill、IM。
+- `ClawkitApp` 混合 REPL、slash command、审批 UI、session、memory、MCP、skill、IM。
 - runtime system message 和持久会话边界不清。
 - 工具风险模型、MCP 审计、Bash 生命周期、Provider 输出协议仍偏原型。
 
@@ -170,15 +174,19 @@
 
 - **[ ] 拆分 CLI 命令和交互层**（cli）  
   拆出 `ReplLoop`、`SlashCommandRouter`、命令组、`ApprovalConsole`、`ConsoleRenderer`。  
-  验收：`MiniclawApp` 只负责装配依赖和启动；slash command 可独立单测；IM 开关不影响普通 CLI 流程。
+  验收：`ClawkitApp` 只负责装配依赖和启动；slash command 可独立单测；IM 开关不影响普通 CLI 流程。
 
-- **[ ] 分离运行时上下文和持久会话**（engine / context）  
+- **[x] 分离运行时上下文和持久会话**（engine / context）  
   runtime context 不写入 session history，所有注入内容标记来源和生命周期。  
   验收：连续多轮运行不会重复累积 `[Working Memory]`、`[Runtime]`、`[Related Past Sessions]` system 消息。
 
-- **[ ] 建立 `ContextPipeline` 输入输出模型**（engine / context）  
+  ✅ 2026-07-08 — 新增 workspaceContext / memoryContext / runtimeContext 三个 ephemeral 容器；sniffWorkspaceState、injectRelatedSessions、[Runtime]、[Working Memory] 重定向到对应容器；contextHistory = new ArrayList<>(sessionHistory) 打破别名；autoSaveSession 过滤 runtime 消息；clearSession 清空 ephemeral 容器。
+
+- **[~] 建立 `ContextPipeline` 输入输出模型**（engine / context）  
   明确输入 `SessionHistory`、`RuntimeContext`、`MemoryContext`、`WorkspaceContext`、`SkillContext`，输出 `ModelContext` 和 `EphemeralContext`。  
   验收：上下文管线可以独立测试；一次 run 结束后能明确哪些内容被持久化，哪些只是本轮注入。
+
+  🔶 2026-07-08 — 容器模型已建立（workspaceContext/memoryContext/runtimeContext + assembleModelContext()）；预算模型已就绪（ContextBudgetAnalyzer/ContextBudgetPolicy/CompactionResult）。Pipeline 作为独立组件推迟到后续 PR。
 
 - **[ ] 重构 MCP 工具元数据和风险模型**（tools / mcp / engine）  
   支持 `readOnly`、`riskLevel`、`destructive`、`requiresApproval`，未知写工具默认按中高风险处理。  
@@ -293,7 +301,7 @@
   前置：MCP 风险模型、审计、ASK 审批、Bash timeout、输出截断、失败分类稳定。
 
 - **[ ] 任务级回滚**（tools / engine）  
-  写入前保存 `.miniclaw.bak`，支持按 task/action 回滚。
+  写入前保存 `.clawkit.bak`，支持按 task/action 回滚。
 
 - **[ ] 本地嵌入模型语义搜索**（memory / context）  
   用 embedding 检索历史会话、代码片段、文档片段。

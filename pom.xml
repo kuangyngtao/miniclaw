@@ -4,22 +4,22 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.miniclaw</groupId>
-    <artifactId>miniclaw-parent</artifactId>
+    <groupId>com.clawkit</groupId>
+    <artifactId>clawkit-parent</artifactId>
     <version>0.1.0-SNAPSHOT</version>
     <packaging>pom</packaging>
 
-    <name>miniclaw</name>
+    <name>clawkit</name>
     <description>A minimal AI coding assistant CLI — Java port of OpenClaw core ideas</description>
 
     <modules>
-        <module>miniclaw-cli</module>
-        <module>miniclaw-engine</module>
-        <module>miniclaw-provider</module>
-        <module>miniclaw-context</module>
-        <module>miniclaw-tools</module>
-        <module>miniclaw-memory</module>
-        <module>miniclaw-im</module>
+        <module>clawkit-cli</module>
+        <module>clawkit-engine</module>
+        <module>clawkit-provider</module>
+        <module>clawkit-context</module>
+        <module>clawkit-tools</module>
+        <module>clawkit-memory</module>
+        <module>clawkit-im</module>
     </modules>
 
     <properties>
