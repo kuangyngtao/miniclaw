@@ -19,6 +19,7 @@
         <module>clawkit-context</module>
         <module>clawkit-tools</module>
         <module>clawkit-memory</module>
+        <module>clawkit-observability</module>
         <module>clawkit-im</module>
     </modules>
 

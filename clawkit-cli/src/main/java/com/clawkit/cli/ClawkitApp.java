@@ -100,6 +100,7 @@ public class ClawkitApp implements Runnable {
     private ToolRegistry registry;
     private LLMConfig.Protocol protocolEnum;
     private LineReader reader;
+    private com.clawkit.observability.RunReader runReader;
 
     @Override
     public void run() {
@@ -183,7 +184,13 @@ public class ClawkitApp implements Runnable {
         engine.rebuildSkillCatalog(skillLoader.buildCatalog());
         engine.setDiskMemoryService(memoryService);
 
-        Path sessionsDir = Path.of(System.getProperty("user.home"), ".clawkit", "sessions");
+        // 初始化观测系统
+        Path clawkitDir = Path.of(System.getProperty("user.home"), ".clawkit");
+        var fileRunRecorder = new com.clawkit.observability.FileRunRecorder(clawkitDir);
+        engine.onRunEvent(fileRunRecorder);
+        runReader = new com.clawkit.observability.RunReader(clawkitDir);
+
+        Path sessionsDir = clawkitDir.resolve("sessions");
         sessionService = new SessionService(sessionsDir, provider);
         engine.setSessionService(sessionService);
 
@@ -328,6 +335,9 @@ public class ClawkitApp implements Runnable {
                     case "/context" -> {
                         printContext(engine);
                     }
+                    case "/runs" -> printRuns();
+                    case "/metrics" -> printMetrics(input);
+                    case "/trace" -> printTrace(input);
                     default -> System.out.println("未知命令，输入 / 查看菜单。\n");
                 }
                 continue;
@@ -500,6 +510,122 @@ public class ClawkitApp implements Runnable {
         System.out.println();
     }
 
+    // ── /runs /metrics /trace handlers ──────────────────────────────
+
+    private void printRuns() {
+        System.out.println();
+        try {
+            var runs = runReader.listRecent(10);
+            if (runs.isEmpty()) {
+                System.out.println(GRAY + "  暂无运行记录。执行一次任务后 run 记录会自动生成。" + RESET);
+                System.out.println();
+                return;
+            }
+            System.out.println(GRAY + "  run                                     status      turns  tools  fails  compact  time     mode" + RESET);
+            System.out.println(GRAY + "  ──────────────────────────────────────── ─────────── ───── ────── ────── ──────── ──────── ──────" + RESET);
+            for (var r : runs) {
+                String time = r.startTime().length() > 16 ? r.startTime().substring(11, 16) : r.startTime();
+                String duration = formatDuration(r.durationMs());
+                System.out.printf("  %-40s %-11s %5d %6d %6d %8d %8s %s%n",
+                    r.runId(), r.status(), r.turns(), r.toolCalls(),
+                    r.toolFailures(), r.compactCount(), duration, r.permissionMode());
+            }
+            System.out.println();
+        } catch (Exception e) {
+            System.out.println(GRAY + "  读取 run 记录失败: " + e.getMessage() + RESET);
+        }
+    }
+
+    private void printMetrics(String input) {
+        System.out.println();
+        try {
+            String runId = extractRunId(input, "/metrics");
+            com.clawkit.observability.model.RunMetrics m;
+            if (runId != null) {
+                m = runReader.readMetrics(runId);
+            } else {
+                var runs = runReader.listRecent(1);
+                if (runs.isEmpty()) {
+                    System.out.println(GRAY + "  暂无运行记录" + RESET);
+                    System.out.println();
+                    return;
+                }
+                m = runReader.readMetrics(runs.get(0).runId());
+            }
+            if (m == null) {
+                System.out.println(GRAY + "  run 记录不存在: " + runId + RESET);
+                System.out.println();
+                return;
+            }
+            System.out.printf("  run:      %s%n", m.runId());
+            System.out.printf("  status:   %s%n", m.status());
+            System.out.printf("  duration: %s%n", formatDuration(m.durationMs()));
+            System.out.printf("  turns:    %d%n", m.turns());
+            System.out.printf("  tools:    %d (%d failed)%n", m.toolCalls(), m.toolFailures());
+            System.out.printf("  compact:  %d%n", m.compactCount());
+            System.out.printf("  mode:     %s / %s / %s%n", m.permissionMode(), m.thinkingMode(), m.executionMode());
+            if (m.errorMessage() != null) {
+                System.out.printf("  error:    %s%n", m.errorMessage());
+            }
+            System.out.println();
+        } catch (Exception e) {
+            System.out.println(GRAY + "  读取 metrics 失败: " + e.getMessage() + RESET);
+        }
+    }
+
+    private void printTrace(String input) {
+        System.out.println();
+        try {
+            String runId = extractRunId(input, "/trace");
+            if (runId == null) {
+                var runs = runReader.listRecent(1);
+                if (runs.isEmpty()) {
+                    System.out.println(GRAY + "  暂无运行记录" + RESET);
+                    System.out.println();
+                    return;
+                }
+                runId = runs.get(0).runId();
+            }
+            var lines = runReader.readTrace(runId);
+            if (lines.isEmpty()) {
+                System.out.println(GRAY + "  trace 为空: " + runId + RESET);
+                System.out.println();
+                return;
+            }
+            System.out.println(GRAY + "  trace: " + runId + " (" + lines.size() + " events)" + RESET);
+            // 只显示关键事件摘要，不打印完整 JSON
+            int shown = 0;
+            for (String line : lines) {
+                if (line.contains("RunStarted") || line.contains("RunCompleted")
+                    || line.contains("ToolCompleted") || line.contains("CompactCompleted")) {
+                    String shortLine = line.length() > 120 ? line.substring(0, 117) + "..." : line;
+                    System.out.println(GRAY + "  " + shortLine + RESET);
+                    shown++;
+                }
+                if (shown >= 20) {
+                    System.out.println(GRAY + "  ... (" + (lines.size() - shown) + " more events)" + RESET);
+                    break;
+                }
+            }
+            System.out.println();
+        } catch (Exception e) {
+            System.out.println(GRAY + "  读取 trace 失败: " + e.getMessage() + RESET);
+        }
+    }
+
+    private String extractRunId(String input, String command) {
+        String rest = input.substring(command.length()).trim();
+        return rest.isEmpty() ? null : rest;
+    }
+
+    private String formatDuration(long ms) {
+        if (ms < 1000) return ms + "ms";
+        if (ms < 60_000) return String.format("%.1fs", ms / 1000.0);
+        long min = ms / 60_000;
+        long sec = (ms % 60_000) / 1000;
+        return min + "m" + sec + "s";
+    }
+
     /** 解析斜杠命令输入，返回规范化的命令名；非斜杠命令返回 null */
     static String resolveCommand(String input) {
         if (input == null || input.isBlank()) return null;
@@ -516,6 +642,9 @@ public class ClawkitApp implements Runnable {
             case "/c", "/clear" -> "clear";
             case "/compact" -> "compact";
             case "/context" -> "context";
+            case "/runs" -> "runs";
+            case "/metrics" -> "metrics";
+            case "/trace" -> "trace";
             case "/feishu-on" -> "feishu-on";
             case "/feishu-off" -> "feishu-off";
             case "/im-on" -> "im-on";
@@ -1026,10 +1155,11 @@ public class ClawkitApp implements Runnable {
         System.out.println(GRAY + "  /ask        confirm writes      /auto   full-auto" + RESET);
         System.out.println(GRAY + "  /clear      reset session       /compact compress" + RESET);
         System.out.println(GRAY + "  /context    token usage         /remember add memory" + RESET);
-        System.out.println(GRAY + "  /memory     list memories       /session manage sessions" + RESET);
-        System.out.println(GRAY + "  /skill      load/unload skills  /mcp  MCP servers" + RESET);
-        System.out.println(GRAY + "  /help       show all commands   /im-on /im-off /im-status" + RESET);
-        System.out.println(GRAY + "  /exit       quit" + RESET);
+        System.out.println(GRAY + "  /runs       recent runs         /metrics run summary" + RESET);
+        System.out.println(GRAY + "  /trace      run event trace     /memory  list memories" + RESET);
+        System.out.println(GRAY + "  /session    manage sessions     /skill load/unload" + RESET);
+        System.out.println(GRAY + "  /mcp        MCP servers         /im-on /im-off /im-status" + RESET);
+        System.out.println(GRAY + "  /help       show all commands   /exit  quit" + RESET);
         System.out.println();
     }
 
@@ -1045,6 +1175,9 @@ public class ClawkitApp implements Runnable {
         System.out.println("    /clear       reset conversation session");
         System.out.println("    /compact     manually compress context (L1/L2)");
         System.out.println("    /context     show token usage and session info");
+        System.out.println("    /runs        list recent runs");
+        System.out.println("    /metrics     show run summary [runId]");
+        System.out.println("    /trace       show trace events <runId>");
         System.out.println("    /remember    add a memory entry (interactive)");
         System.out.println("    /memory      list or manage memory entries");
         System.out.println("    /session     save, load, list, search sessions");

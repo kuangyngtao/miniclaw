@@ -90,14 +90,16 @@
 
 目标不是先做完整 eval 平台，而是在大规模重构前建立工程回归能力：能知道一次 run 做了什么、哪里失败、重构后有没有退化。
 
-- **[ ] 本地观测存储格式**（observability）  
+- **[x] 本地观测存储格式**（observability）  
   第一阶段不引入 MySQL / PostgreSQL。使用本地文件：
   - `.clawkit/runs/<run-id>/metrics.jsonl`
   - `.clawkit/runs/<run-id>/trace.jsonl`
   - `.clawkit/runs/<run-id>/summary.json`
   验收：每次任务运行生成独立 run 目录；文件可直接打开阅读；敏感字段脱敏。
+  
+  ✅ 2026-07-10 — 新增 clawkit-observability 模块；FileRunRecorder 写 Jackson JSONL + summary.json；参数脱敏（仅写 argSummary）。
 
-- **[ ] 最小 Metrics 数据模型**（observability）  
+- **[x] 最小 Metrics 数据模型**（observability）  
   先定义够用的结构，不追求完整平台。  
   覆盖：
   - `RunMetrics`：runId、任务摘要、开始/结束时间、总耗时、状态、失败类型。
@@ -105,19 +107,25 @@
   - `ToolCallMetrics`：工具名、readOnly、riskLevel、成功/失败、耗时、输出字节数、是否截断、是否审批。
   - `ContextMetrics`：system、tools、history、memory、tool result 的 token 分布，以及 compact 前后变化。
   验收：每个 run 至少能汇总轮次、工具调用次数、工具失败率、耗时和 compact 次数。
+  
+  ✅ 2026-07-10 — RunMetrics/TurnMetrics/ToolCallMetrics/CompactMetrics/ProviderCallMetrics 全部 record 定义在 clawkit-observability/model/；RunStatus 枚举 10 个状态；RunEvent sealed interface 10 种子类型。
 
-- **[ ] AgentEngine 观测打点**（engine / observability）  
+- **[x] AgentEngine 观测打点**（engine / observability）  
   在 run start/end、turn start/end、tool call start/end、compact start/end、provider retry、approval decision 位置打点。  
   前置：先收敛工具执行结果模型，至少要能拿到工具名、成功/失败、耗时、输出字节数。  
   验收：一次普通任务的 trace 能还原执行链路；工具失败和 provider retry 能在 metrics 中看到。
+  
+  ✅ 2026-07-10 — AgentEngine 新增 onRunEvent 监听器 + fireRunEvent 分发；在 6 个 exit point + turn loop + tool counter + compact counter 打点；approval 事件因作用域限制推迟到后续重构；ObservableLLMProvider decorator 记录 provider 调用耗时。
 
-- **[ ] CLI 观测入口**（cli / observability）  
+- **[x] CLI 观测入口**（cli / observability）  
   提供轻量查看能力，不先做 dashboard。  
   目标：
   - `/metrics` 查看最近一次 run 汇总。
   - `/runs` 列出最近若干 run。
   - `/trace <runId>` 查看关键事件摘要。
   验收：不打开源码也能知道最近一次任务用了多少轮、调用了哪些工具、哪里失败。
+  
+  ✅ 2026-07-10 — ClawkitApp 新增 /runs、/metrics、/trace 三个 slash command；ClawkitCompleter/printMenu/printHelp/resolveCommand 同步更新；RunReader 从磁盘读取 run 记录。
 
 - **[ ] 最小 Benchmark Runner**（evaluation）  
   建立 10-20 个固定任务，先覆盖可机械判断的场景：读代码、改小 bug、改文档、跑测试、权限边界、工具失败、长输出、compact 保留关键约束。  

@@ -59,6 +59,13 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
+
+import com.clawkit.observability.RunEvent;
+import com.clawkit.observability.RunStatus;
+import com.clawkit.observability.model.ProviderCallMetrics;
+import com.clawkit.observability.model.ToolCallMetrics;
+import com.clawkit.observability.model.TurnMetrics;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -417,6 +424,7 @@ public class AgentEngine implements AgentLoop {
     private final List<Consumer<AgentStateEvent>> onStateChangeListeners = new CopyOnWriteArrayList<>();
     private final List<Consumer<ToolStartEvent>> onToolStartListeners = new CopyOnWriteArrayList<>();
     private final List<Consumer<ToolEndEvent>> onToolEndListeners = new CopyOnWriteArrayList<>();
+    private final List<Consumer<RunEvent>> onRunEventListeners = new CopyOnWriteArrayList<>();
     private volatile SessionService sessionService;
     volatile MaskedContext lastMaskedContext;
 
@@ -496,6 +504,13 @@ public class AgentEngine implements AgentLoop {
             return runPlanExecute(userPrompt);
         }
 
+        String currentRunId = generateRunId();
+        Instant runStartTime = Instant.now();
+        fireRunEvent(new RunEvent.RunStarted(
+            currentRunId, userPrompt, runStartTime,
+            workDir.toString(), provider.toString(),
+            permissionMode.name(), thinkingMode.name(), executionMode.name()));
+
         if (sessionHistory.isEmpty()) {
             sessionHistory.add(Message.system(buildSystemPrompt()));
         }
@@ -508,6 +523,9 @@ public class AgentEngine implements AgentLoop {
         List<Message> contextHistory = new ArrayList<>(sessionHistory);
 
         int turnCount = 0;
+        int totalToolCalls = 0;
+        int totalToolFailures = 0;
+        int totalCompactCount = 0;
         lastRunTurns = 0;
         fireState(AgentState.IDLE, 0);
 
@@ -516,11 +534,15 @@ public class AgentEngine implements AgentLoop {
                 interrupted = false;
                 fireState(AgentState.INTERRUPTED, turnCount);
                 log.info("[Engine] 被用户中断，退出循环");
+                fireRunEvent(new RunEvent.RunCompleted(
+                    currentRunId, Instant.now(), RunStatus.INTERRUPTED,
+                    null, null, turnCount, totalToolCalls, totalToolFailures, totalCompactCount));
                 return "[A-001] 已被用户中断。";
             }
 
             turnCount++;
             log.info("========== [Turn {}] 开始 ==========", turnCount);
+            fireRunEvent(new RunEvent.TurnStarted(currentRunId, turnCount, Instant.now()));
 
             // === 运行时事件注入 ===
 
@@ -555,6 +577,9 @@ public class AgentEngine implements AgentLoop {
             // 第3层: 安全硬上限 — 50轮兜底
             if (turnCount > MAX_TURNS) {
                 log.warn("[Engine] 达到安全硬上限 ({}), 强制退出", MAX_TURNS);
+                fireRunEvent(new RunEvent.RunCompleted(
+                    currentRunId, Instant.now(), RunStatus.HARD_LIMIT,
+                    "A-001", "达到最大迭代轮次 (" + MAX_TURNS + ")", turnCount, totalToolCalls, totalToolFailures, totalCompactCount));
                 return "[A-001] 达到最大迭代轮次 (" + MAX_TURNS + ")，任务可能过于复杂，请拆分为子任务";
             }
 
@@ -611,6 +636,7 @@ public class AgentEngine implements AgentLoop {
                 case WARN -> { /* 预警，不强制压缩 */ }
                 case COMPACT_REQUIRED, HARD_LIMIT -> {
                     // 超过 85%（或 95%），强制 compact
+                    totalCompactCount++;
                     var result = contextManager.compact(modelContext,
                         budgetPolicy.targetTokens(), evictedGroups);
                     CompactionResult cr = (CompactionResult) result;
@@ -629,6 +655,9 @@ public class AgentEngine implements AgentLoop {
 
                     if (postReport.status() == ContextBudgetReport.BudgetStatus.HARD_LIMIT) {
                         log.warn("[Engine] compact 后仍超 95% 硬限制");
+                        fireRunEvent(new RunEvent.RunCompleted(
+                            currentRunId, Instant.now(), RunStatus.COMPACT_FAILED,
+                            "A-001", "compact 后仍超 95% 硬限制", turnCount, totalToolCalls, totalToolFailures, totalCompactCount));
                         return String.format(
                             "上下文过大（%d / %d tokens，%.0f%%），compact 后仍超 95%% 硬限制。"
                             + "请执行 /compact 或 /session new 开启新会话。",
@@ -699,6 +728,9 @@ public class AgentEngine implements AgentLoop {
                 } catch (LLMException e) {
                     fireState(AgentState.ERROR, turnCount, Map.of("error", e.getMessage()));
                     log.error("[Engine] 慢思考阶段1 失败: {}", e.getMessage());
+                    fireRunEvent(new RunEvent.RunCompleted(
+                        currentRunId, Instant.now(), RunStatus.PLANNING_ERROR,
+                        "A-002", e.getMessage(), turnCount, totalToolCalls, totalToolFailures, totalCompactCount));
                     return "[A-002] 慢思考规划阶段 LLM 调用失败: " + e.getMessage();
                 }
             }
@@ -751,6 +783,7 @@ public class AgentEngine implements AgentLoop {
             }
 
             fireState(AgentState.REASONING, turnCount);
+            final long providerStartMs = System.currentTimeMillis();
             final Message responseMsg;
             try {
                 if (!onTokenListeners.isEmpty()) {
@@ -762,9 +795,14 @@ public class AgentEngine implements AgentLoop {
             } catch (LLMException e) {
                 fireState(AgentState.ERROR, turnCount, Map.of("error", e.getMessage()));
                 log.error("[Engine] LLM 调用失败 (A-002): {}", e.getMessage());
+                fireRunEvent(new RunEvent.RunCompleted(
+                    currentRunId, Instant.now(), RunStatus.LLM_ERROR,
+                    "A-002", e.getMessage(), turnCount, totalToolCalls, totalToolFailures, totalCompactCount));
                 return "[A-002] LLM 调用失败: " + e.getMessage();
             }
+            long providerDurationMs = System.currentTimeMillis() - providerStartMs;
             contextHistory.add(responseMsg);
+            int toolCallCount = responseMsg.toolCalls() != null ? responseMsg.toolCalls().size() : 0;
 
             if (responseMsg.content() != null && !responseMsg.content().isEmpty()) {
                 log.debug("Model response: {} chars", responseMsg.content().length());
@@ -779,6 +817,9 @@ public class AgentEngine implements AgentLoop {
                     log.info("[Engine] LLM 未调用工具，退出循环。");
                 }
                 lastRunTurns = turnCount;
+                fireRunEvent(new RunEvent.RunCompleted(
+                    currentRunId, Instant.now(), RunStatus.COMPLETED,
+                    null, null, turnCount, totalToolCalls, totalToolFailures, totalCompactCount));
                 return responseMsg.content() != null ? responseMsg.content() : "";
             }
 
@@ -796,10 +837,13 @@ public class AgentEngine implements AgentLoop {
 
             if (calls.stream().allMatch(c -> TASK_TOOL_NAME.equals(c.name()))) {
                 log.info("[Engine] SubAgent 并行: {} 个子任务", calls.size());
+                totalToolCalls += calls.size();
                 executeSubAgentsParallel(calls, contextHistory);
             } else if (allReadOnly(calls)) {
+                totalToolCalls += calls.size();
                 executeParallel(calls, contextHistory);
             } else {
+                totalToolCalls += calls.size();
                 executeSequential(calls, contextHistory);
             }
 
@@ -1973,6 +2017,34 @@ public class AgentEngine implements AgentLoop {
         for (var l : onToolEndListeners) {
             try { l.accept(event); } catch (Exception ignored) {}
         }
+    }
+
+    // ── RunEvent 观测 ───────────────────────────────────────────────
+
+    /** 注册运行事件监听器（如 FileRunRecorder） */
+    public void onRunEvent(Consumer<RunEvent> listener) {
+        if (listener != null) onRunEventListeners.add(listener);
+    }
+
+    /** 移除运行事件监听器 */
+    public void removeOnRunEventListener(Consumer<RunEvent> listener) {
+        if (listener != null) onRunEventListeners.remove(listener);
+    }
+
+    /** 分发运行事件给所有监听器（吞异常，不中断主循环） */
+    private void fireRunEvent(RunEvent event) {
+        if (onRunEventListeners.isEmpty()) return;
+        for (var l : onRunEventListeners) {
+            try { l.accept(event); } catch (Exception ignored) {}
+        }
+    }
+
+    /** 生成 run ID：yyyyMMdd-HHmmss-4位十六进制随机数 */
+    private static String generateRunId() {
+        String ts = java.time.LocalDateTime.now()
+            .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+        int suffix = (int) (Math.random() * 0x10000);
+        return ts + "-" + String.format("%04x", suffix);
     }
 
     /** 提取工具调用中最有辨识度的参数，用于 CLI 可视化 */

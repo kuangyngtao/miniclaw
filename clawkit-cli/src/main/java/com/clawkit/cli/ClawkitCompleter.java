@@ -13,6 +13,7 @@ class ClawkitCompleter implements Completer {
 
     private static final List<String> COMMANDS = List.of(
         "/help", "/clear", "/compact", "/context",
+        "/runs", "/metrics", "/trace",
         "/remember", "/memory",
         "/thinking", "/plan", "/ask", "/auto",
         "/session", "/session save", "/session load", "/session list",
