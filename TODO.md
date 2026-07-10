@@ -143,6 +143,28 @@
 
 暂不做：MySQL 观测库、Web 报表、复杂人工评分平台、多模型大规模评测。这些等本地 JSONL 和 benchmark 稳定后再考虑。
 
+### P0-O 方案评审遗留问题（2026-07-10 评审发现，待实施）
+
+- **[ ] Provider retry 事件捕获**（observability）  
+  AgentEngine 当前无法感知 OpenAIProvider 内部重试——retry 逻辑封装在 `sendWithRetry()` 内。  
+  方案：ObservableLLMProvider decorator 已创建，但需在 ClawkitApp 装配时实际替换 provider 实例，并在 retry 计数能力可用后接入。
+
+- **[ ] `runPlanExecute()` 观测打点补充**（engine / observability）  
+  当前打点仅覆盖主 `run()` 方法（line 499），`runPlanExecute()`（line ~1631）是完全独立的代码路径，有独立的 provider 调用和 6 个 exit point。  
+  方案：为 `runPlanExecute()` 添加 RunStarted/RunCompleted 事件。
+
+- **[ ] SubAgent 运行隔离**（engine / observability）  
+  `spawnSubAgent()`（line ~980）创建独立 AgentEngine 实例，子 agent 的 run 应产生独立 `<sub-run-id>/` 目录。当前子 run 的 FileRunRecorder 未被注册。  
+  方案：在子 AgentEngine 创建时注册 FileRunRecorder，父 run trace 中记录子 run ID 引用。
+
+- **[ ] internal tools 补充 fireToolStart/End**（engine）  
+  6 个 engine-internal tools（task/session_context/skill_load/skill_unload/memory_save/remember，lines ~867-900）不触发 fireToolStart/fireToolEnd，trace 链路不完整。  
+  方案：在 executeSequential 中为 internal tools 补充事件触发。
+
+- **[ ] approval 事件接入观测**（engine / observability）  
+  approval 决策在 `executeSequential()` 内部（line ~955），无法访问 `run()` 方法中的 `currentRunId` 局部变量。当前 approval 事件未写入 trace。  
+  方案：将 currentRunId 提升为 AgentEngine 字段或以参数传递；或等 P0-R 拆分 executeSequential 后一并处理。
+
 - **[ ] Git 专用工具**（tools）  
   封装 `git status`、`git diff`、`git log`、`git show`。  
   验收：PLAN 模式可读；输出结构化；无需通过 bash 才能获得常用 git 信息。
