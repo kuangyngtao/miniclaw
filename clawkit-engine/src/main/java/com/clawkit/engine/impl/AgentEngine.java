@@ -425,6 +425,10 @@ public class AgentEngine implements AgentLoop {
     private final List<Consumer<ToolStartEvent>> onToolStartListeners = new CopyOnWriteArrayList<>();
     private final List<Consumer<ToolEndEvent>> onToolEndListeners = new CopyOnWriteArrayList<>();
     private final List<Consumer<RunEvent>> onRunEventListeners = new CopyOnWriteArrayList<>();
+    private volatile String currentRunId;
+    private volatile int currentTurnNumber;
+    private final ToolCallExecutor toolCallExecutor;
+    private final InternalToolRouter internalToolRouter = new InternalToolRouter();
     private volatile SessionService sessionService;
     volatile MaskedContext lastMaskedContext;
 
@@ -439,9 +443,7 @@ public class AgentEngine implements AgentLoop {
     private volatile ContextBudgetReport lastBudgetReport;
 
     // Phase 3b: ephemeral 上下文容器
-    private final List<Message> workspaceContext = new ArrayList<>();
-    private final List<Message> memoryContext = new ArrayList<>();
-    private final List<Message> runtimeContext = new ArrayList<>();
+    private final EphemeralContext ephemeralContext = new EphemeralContext();
 
     // V3.6 工作内存：会话级键值存储，clearSession 时清空
     private final Map<String, String> workingMemory = new ConcurrentHashMap<>();
@@ -493,6 +495,59 @@ public class AgentEngine implements AgentLoop {
         if (onReasoning != null) onReasoningListeners.add(onReasoning);
         if (onToken != null) onTokenListeners.add(onToken);
         this.l5MemoryIndex = memoryIndex != null ? memoryIndex : "";
+        this.toolCallExecutor = new ToolCallExecutor(registry);
+        registerInternalTools();
+    }
+
+    /** 将 engine-internal tools 注册到 InternalToolRouter */
+    private void registerInternalTools() {
+        internalToolRouter.register(TASK_TOOL_NAME, (req, ctx) -> {
+            String output = spawnSubAgent(new com.clawkit.tools.schema.ToolCall(
+                req.toolCallId(), req.toolName(), req.arguments()));
+            return com.clawkit.tools.ToolExecutionResult.success(
+                req.toolCallId(), req.toolName(), output, 0,
+                com.clawkit.tools.ToolMetadata.conservative(TASK_TOOL_NAME));
+        });
+        internalToolRouter.register(SESSION_CONTEXT_TOOL_NAME, (req, ctx) -> {
+            String output = searchSessionContext(new com.clawkit.tools.schema.ToolCall(
+                req.toolCallId(), req.toolName(), req.arguments()));
+            return com.clawkit.tools.ToolExecutionResult.success(
+                req.toolCallId(), req.toolName(), output, 0,
+                new com.clawkit.tools.ToolMetadata(SESSION_CONTEXT_TOOL_NAME, "", null,
+                    true, com.clawkit.tools.ToolRiskLevel.LOW, false, false, java.util.Set.of()));
+        });
+        internalToolRouter.register(SKILL_LOAD_TOOL_NAME, (req, ctx) -> {
+            String output = handleSkillLoad(new com.clawkit.tools.schema.ToolCall(
+                req.toolCallId(), req.toolName(), req.arguments()));
+            return com.clawkit.tools.ToolExecutionResult.success(
+                req.toolCallId(), req.toolName(), output, 0,
+                new com.clawkit.tools.ToolMetadata(SKILL_LOAD_TOOL_NAME, "", null,
+                    true, com.clawkit.tools.ToolRiskLevel.LOW, false, false, java.util.Set.of()));
+        });
+        internalToolRouter.register(SKILL_UNLOAD_TOOL_NAME, (req, ctx) -> {
+            String output = handleSkillUnload(new com.clawkit.tools.schema.ToolCall(
+                req.toolCallId(), req.toolName(), req.arguments()));
+            return com.clawkit.tools.ToolExecutionResult.success(
+                req.toolCallId(), req.toolName(), output, 0,
+                new com.clawkit.tools.ToolMetadata(SKILL_UNLOAD_TOOL_NAME, "", null,
+                    true, com.clawkit.tools.ToolRiskLevel.LOW, false, false, java.util.Set.of()));
+        });
+        internalToolRouter.register(MEMORY_SAVE_TOOL_NAME, (req, ctx) -> {
+            String output = handleMemorySave(new com.clawkit.tools.schema.ToolCall(
+                req.toolCallId(), req.toolName(), req.arguments()));
+            return com.clawkit.tools.ToolExecutionResult.success(
+                req.toolCallId(), req.toolName(), output, 0,
+                new com.clawkit.tools.ToolMetadata(MEMORY_SAVE_TOOL_NAME, "", null,
+                    false, com.clawkit.tools.ToolRiskLevel.MEDIUM, true, true, java.util.Set.of()));
+        });
+        internalToolRouter.register(REMEMBER_TOOL_NAME, (req, ctx) -> {
+            String output = handleRemember(new com.clawkit.tools.schema.ToolCall(
+                req.toolCallId(), req.toolName(), req.arguments()));
+            return com.clawkit.tools.ToolExecutionResult.success(
+                req.toolCallId(), req.toolName(), output, 0,
+                new com.clawkit.tools.ToolMetadata(REMEMBER_TOOL_NAME, "", null,
+                    false, com.clawkit.tools.ToolRiskLevel.LOW, false, false, java.util.Set.of()));
+        });
     }
 
     @Override
@@ -505,6 +560,7 @@ public class AgentEngine implements AgentLoop {
         }
 
         String currentRunId = generateRunId();
+        this.currentRunId = currentRunId;
         Instant runStartTime = Instant.now();
         fireRunEvent(new RunEvent.RunStarted(
             currentRunId, userPrompt, runStartTime,
@@ -541,6 +597,7 @@ public class AgentEngine implements AgentLoop {
             }
 
             turnCount++;
+            this.currentTurnNumber = turnCount;
             log.info("========== [Turn {}] 开始 ==========", turnCount);
             fireRunEvent(new RunEvent.TurnStarted(currentRunId, turnCount, Instant.now()));
 
@@ -560,7 +617,7 @@ public class AgentEngine implements AgentLoop {
                 if (deadLoop) {
                     String warning = "[Runtime] 检测到连续 " + DEAD_LOOP_THRESHOLD
                         + " 次相同操作 (" + last + ")，可能陷入循环。请换一种方法或向用户确认。";
-                    runtimeContext.add(Message.system(warning));
+                    ephemeralContext.runtime().add(Message.system(warning));
                     log.warn("[Engine] 死循环检测触发: {}", last);
                     recentCallSignatures.clear();
                 }
@@ -570,7 +627,7 @@ public class AgentEngine implements AgentLoop {
             if (turnCount > 1 && turnCount % PROGRESS_REMINDER_INTERVAL == 0) {
                 String reminder = "[Runtime] 当前已执行 " + turnCount
                     + " 轮。请简要评估推进进度，如任务复杂可考虑拆分为子步骤。";
-                runtimeContext.add(Message.system(reminder));
+                ephemeralContext.runtime().add(Message.system(reminder));
                 log.info("[Engine] 进度提醒注入: 第 {} 轮", turnCount);
             }
 
@@ -587,7 +644,7 @@ public class AgentEngine implements AgentLoop {
             if (turnsWithoutTodoProgress >= TODO_STALL_THRESHOLD) {
                 String stall = "[Runtime] 任务清单连续 " + TODO_STALL_THRESHOLD
                     + " 轮无进展。请检查当前方法是否有效，考虑换策略或向用户确认。";
-                runtimeContext.add(Message.system(stall));
+                ephemeralContext.runtime().add(Message.system(stall));
                 log.warn("[Engine] 子目标暂停检测触发");
                 turnsWithoutTodoProgress = 0;
             }
@@ -597,7 +654,7 @@ public class AgentEngine implements AgentLoop {
                 StringBuilder wm = new StringBuilder("[Working Memory]\n");
                 workingMemory.forEach((k, v) ->
                     wm.append("- ").append(k).append(": ").append(v).append("\n"));
-                memoryContext.add(Message.system(wm.toString().stripTrailing()));
+                ephemeralContext.memory().add(Message.system(wm.toString().stripTrailing()));
             }
 
             // L3 自动记忆提取（条件触发：token>60% + 冷却>=5轮 + 新增>=10条消息）
@@ -637,6 +694,8 @@ public class AgentEngine implements AgentLoop {
                 case COMPACT_REQUIRED, HARD_LIMIT -> {
                     // 超过 85%（或 95%），强制 compact
                     totalCompactCount++;
+                    fireRunEvent(new RunEvent.CompactTriggered(
+                        currentRunId, turnCount, Instant.now()));
                     var result = contextManager.compact(modelContext,
                         budgetPolicy.targetTokens(), evictedGroups);
                     CompactionResult cr = (CompactionResult) result;
@@ -652,6 +711,20 @@ public class AgentEngine implements AgentLoop {
                     var postReport = budgetAnalyzer.analyze(
                         cr.messages(), toolDefTokens, Map.of());
                     this.lastBudgetReport = postReport;
+
+                    // Compact completed metrics
+                    var beforeSections = new java.util.LinkedHashMap<String, Integer>();
+                    report.sections().forEach((k, v) -> beforeSections.put(k.name(), v));
+                    var afterSections = new java.util.LinkedHashMap<String, Integer>();
+                    postReport.sections().forEach((k, v) -> afterSections.put(k.name(), v));
+                    fireRunEvent(new RunEvent.CompactCompleted(currentRunId,
+                        new com.clawkit.observability.model.CompactMetrics(
+                            currentRunId, turnCount,
+                            modelContext.size(), cr.messages().size(),
+                            report.totalTokens(), postReport.totalTokens(),
+                            report.status().name(), postReport.status().name(),
+                            beforeSections, afterSections,
+                            evictedGroups.size(), List.of())));
 
                     if (postReport.status() == ContextBudgetReport.BudgetStatus.HARD_LIMIT) {
                         log.warn("[Engine] compact 后仍超 95% 硬限制");
@@ -804,6 +877,17 @@ public class AgentEngine implements AgentLoop {
             contextHistory.add(responseMsg);
             int toolCallCount = responseMsg.toolCalls() != null ? responseMsg.toolCalls().size() : 0;
 
+            // Fire provider + turn events
+            fireRunEvent(new RunEvent.ProviderCallCompleted(currentRunId, turnCount,
+                new ProviderCallMetrics(currentRunId, turnCount, "phase2",
+                    !onTokenListeners.isEmpty(), 0, 0, true, providerDurationMs, 0,
+                    false, null, null)));
+            fireRunEvent(new RunEvent.TurnCompleted(currentRunId,
+                new TurnMetrics(currentRunId, turnCount, "-",
+                    0, 0, true, providerDurationMs, toolCallCount,
+                    responseMsg.content() != null && !responseMsg.content().isEmpty(),
+                    false, null, null)));
+
             if (responseMsg.content() != null && !responseMsg.content().isEmpty()) {
                 log.debug("Model response: {} chars", responseMsg.content().length());
             }
@@ -835,16 +919,27 @@ public class AgentEngine implements AgentLoop {
             log.info("[Engine] 模型请求调用 {} 个工具, {} 模式...",
                 calls.size(), allReadOnly(calls) ? "并行" : "串行");
 
+            // 通过 ToolCallExecutor 统一执行（替代旧的 executeParallel/executeSequential）
             if (calls.stream().allMatch(c -> TASK_TOOL_NAME.equals(c.name()))) {
                 log.info("[Engine] SubAgent 并行: {} 个子任务", calls.size());
                 totalToolCalls += calls.size();
                 executeSubAgentsParallel(calls, contextHistory);
-            } else if (allReadOnly(calls)) {
-                totalToolCalls += calls.size();
-                executeParallel(calls, contextHistory);
             } else {
                 totalToolCalls += calls.size();
-                executeSequential(calls, contextHistory);
+                var execCtx = new ToolExecutionContext(
+                    currentRunId, turnCount, permissionMode, approvalHandler,
+                    this::fireRunEvent, internalToolRouter, autoApprovedTools);
+                var batchResult = toolCallExecutor.executeBatch(calls, execCtx);
+                for (Message msg : batchResult.toolResultMessages()) {
+                    contextHistory.add(msg);
+                    if ("todo_write".equals(
+                        calls.stream().filter(c -> c.id().equals(msg.toolCallId()))
+                            .findFirst().map(ToolCall::name).orElse(""))) {
+                        syncTodoToWorkspace(
+                            calls.stream().filter(c -> c.id().equals(msg.toolCallId()))
+                                .findFirst().map(ToolCall::arguments).orElse(null));
+                    }
+                }
             }
 
             // 记录调用签名用于死循环检测
@@ -872,11 +967,21 @@ public class AgentEngine implements AgentLoop {
             final ToolCall call = calls.get(i);
             log.info("  -> [VThread-{}] 并行执行: {}", idx, call.name());
             fireToolStart(call);
+            fireRunEvent(new RunEvent.ToolInvoked(
+                currentRunId, currentTurnNumber, call.id(), call.name(),
+                buildArgSummary(call), registry.isReadOnly(call.name())));
             Thread.ofVirtual().start(() -> {
                 try {
                     results[idx] = registry.execute(call);
                     ToolResult r = results[idx];
                     fireToolEnd(call, r);
+                    fireRunEvent(new RunEvent.ToolCompleted(currentRunId, currentTurnNumber,
+                        new ToolCallMetrics(currentRunId, currentTurnNumber,
+                            call.id(), call.name(), buildArgSummary(call),
+                            registry.isReadOnly(call.name()), false, false, null,
+                            !r.isError(), 0, r.output().length(), false,
+                            r.isError() ? "TOOL_ERROR" : null,
+                            r.isError() ? r.output().substring(0, Math.min(80, r.output().length())) : null)));
                     if (r.isError()) {
                         log.info("  -> [VThread-{}] 执行报错: {}", idx, r.output());
                     } else {
@@ -910,36 +1015,66 @@ public class AgentEngine implements AgentLoop {
             // task 工具由引擎直接处理，不走 Registry
             if (TASK_TOOL_NAME.equals(call.name())) {
                 log.info("  -> [SubAgent] 派发子任务");
-                contextHistory.add(Message.toolResult(call.id(), spawnSubAgent(call)));
+                fireRunEvent(new RunEvent.ToolInvoked(
+                    currentRunId, currentTurnNumber, call.id(), call.name(), "", false));
+                String result = spawnSubAgent(call);
+                contextHistory.add(Message.toolResult(call.id(), result));
+                fireRunEvent(new RunEvent.ToolCompleted(currentRunId, currentTurnNumber,
+                    internalToolMetrics(call, true, result)));
                 continue;
             }
             // session_context 工具由引擎直接处理
             if (SESSION_CONTEXT_TOOL_NAME.equals(call.name())) {
                 log.info("  -> [Session] 搜索历史会话");
-                contextHistory.add(Message.toolResult(call.id(), searchSessionContext(call)));
+                fireRunEvent(new RunEvent.ToolInvoked(
+                    currentRunId, currentTurnNumber, call.id(), call.name(), "", true));
+                String result = searchSessionContext(call);
+                contextHistory.add(Message.toolResult(call.id(), result));
+                fireRunEvent(new RunEvent.ToolCompleted(currentRunId, currentTurnNumber,
+                    internalToolMetrics(call, true, result)));
                 continue;
             }
             // skill_load / skill_unload — engine-internal
             if (SKILL_LOAD_TOOL_NAME.equals(call.name())) {
                 log.info("  -> [Skill] 加载技能");
-                contextHistory.add(Message.toolResult(call.id(), handleSkillLoad(call)));
+                fireRunEvent(new RunEvent.ToolInvoked(
+                    currentRunId, currentTurnNumber, call.id(), call.name(), "", true));
+                String result = handleSkillLoad(call);
+                contextHistory.add(Message.toolResult(call.id(), result));
+                fireRunEvent(new RunEvent.ToolCompleted(currentRunId, currentTurnNumber,
+                    internalToolMetrics(call, true, result)));
                 continue;
             }
             if (SKILL_UNLOAD_TOOL_NAME.equals(call.name())) {
                 log.info("  -> [Skill] 卸载技能");
-                contextHistory.add(Message.toolResult(call.id(), handleSkillUnload(call)));
+                fireRunEvent(new RunEvent.ToolInvoked(
+                    currentRunId, currentTurnNumber, call.id(), call.name(), "", true));
+                String result = handleSkillUnload(call);
+                contextHistory.add(Message.toolResult(call.id(), result));
+                fireRunEvent(new RunEvent.ToolCompleted(currentRunId, currentTurnNumber,
+                    internalToolMetrics(call, true, result)));
                 continue;
             }
             // memory_save — engine-internal
             if (MEMORY_SAVE_TOOL_NAME.equals(call.name())) {
                 log.info("  -> [Memory] 保存记忆");
-                contextHistory.add(Message.toolResult(call.id(), handleMemorySave(call)));
+                fireRunEvent(new RunEvent.ToolInvoked(
+                    currentRunId, currentTurnNumber, call.id(), call.name(), "", false));
+                String result = handleMemorySave(call);
+                contextHistory.add(Message.toolResult(call.id(), result));
+                fireRunEvent(new RunEvent.ToolCompleted(currentRunId, currentTurnNumber,
+                    internalToolMetrics(call, false, result)));
                 continue;
             }
             // remember — V3.6 工作内存
             if (REMEMBER_TOOL_NAME.equals(call.name())) {
                 log.info("  -> [WM] 工作内存写入");
-                contextHistory.add(Message.toolResult(call.id(), handleRemember(call)));
+                fireRunEvent(new RunEvent.ToolInvoked(
+                    currentRunId, currentTurnNumber, call.id(), call.name(), "", false));
+                String result = handleRemember(call);
+                contextHistory.add(Message.toolResult(call.id(), result));
+                fireRunEvent(new RunEvent.ToolCompleted(currentRunId, currentTurnNumber,
+                    internalToolMetrics(call, false, result)));
                 continue;
             }
             if (!registry.isReadOnly(call.name())) {
@@ -959,11 +1094,15 @@ public class AgentEngine implements AgentLoop {
                                 autoApprovedTools.add(a.toolName());
                             }
                             case ApprovalResult.Reject r -> {
+                                fireRunEvent(new RunEvent.ApprovalDecision(
+                                    currentRunId, currentTurnNumber, call.name(), "REJECT", r.reason()));
                                 contextHistory.add(Message.toolResult(call.id(),
                                     "User rejected " + call.name() + ": " + r.reason()));
                                 continue;
                             }
                             case ApprovalResult.ModifyParams m -> {
+                                fireRunEvent(new RunEvent.ApprovalDecision(
+                                    currentRunId, currentTurnNumber, call.name(), "MODIFY", m.guidance()));
                                 contextHistory.add(Message.toolResult(call.id(),
                                     "User wants you to modify the parameters. " + m.guidance()
                                     + " Please adjust and call " + call.name() + " again."));
@@ -974,8 +1113,20 @@ public class AgentEngine implements AgentLoop {
                 }
             }
             fireToolStart(call);
+            fireRunEvent(new RunEvent.ToolInvoked(
+                currentRunId, currentTurnNumber, call.id(), call.name(),
+                buildArgSummary(call), registry.isReadOnly(call.name())));
+            long toolStartMs = System.currentTimeMillis();
             ToolResult result = registry.execute(call);
+            long toolDurationMs = System.currentTimeMillis() - toolStartMs;
             fireToolEnd(call, result);
+            fireRunEvent(new RunEvent.ToolCompleted(currentRunId, currentTurnNumber,
+                new ToolCallMetrics(currentRunId, currentTurnNumber,
+                    call.id(), call.name(), buildArgSummary(call),
+                    registry.isReadOnly(call.name()), false, false, null,
+                    !result.isError(), toolDurationMs, result.output().length(), false,
+                    result.isError() ? "TOOL_ERROR" : null,
+                    result.isError() ? result.output().substring(0, Math.min(80, result.output().length())) : null)));
             log.info("  -> 执行工具: {}, 参数: {}", call.name(), call.arguments());
             if (result.isError()) {
                 log.info("  -> 工具执行报错: {}", result.output());
@@ -1149,9 +1300,7 @@ public class AgentEngine implements AgentLoop {
         autoSaveSession();
         sessionHistory.clear();
         // Phase 3b: 清空 ephemeral 容器
-        workspaceContext.clear();
-        memoryContext.clear();
-        runtimeContext.clear();
+        ephemeralContext.clear();
         recentCallSignatures.clear();
         autoApprovedTools.clear();
         workingMemory.clear();
@@ -1412,8 +1561,8 @@ public class AgentEngine implements AgentLoop {
                 sb.append("\n");
                 count++;
             }
-            memoryContext.add(Message.system(sb.toString().stripTrailing()));
-            log.info("[Engine] 注入 {} 条相关历史会话到 memoryContext", count);
+            ephemeralContext.memory().add(Message.system(sb.toString().stripTrailing()));
+            log.info("[Engine] 注入 {} 条相关历史会话到 ephemeral ctx", count);
         } catch (Exception e) {
             log.warn("[Engine] 历史会话注入失败: {}", e.getMessage());
         }
@@ -1535,10 +1684,10 @@ public class AgentEngine implements AgentLoop {
     /** 每轮构造给 provider 的完整 ModelContext */
     private List<Message> assembleModelContext() {
         List<Message> ctx = new ArrayList<>();
-        ctx.addAll(memoryContext);      // related sessions + working memory + conversation summary
-        ctx.addAll(workspaceContext);   // todo.md / plan.md
+        ctx.addAll(ephemeralContext.memory());      // related sessions + working memory + conversation summary
+        ctx.addAll(ephemeralContext.workspace());   // todo.md / plan.md
         ctx.addAll(sessionHistory);     // persistent messages
-        ctx.addAll(runtimeContext);     // loop detection, progress reminders
+        ctx.addAll(ephemeralContext.runtime());     // loop detection, progress reminders
         return ctx;
     }
 
@@ -1595,8 +1744,8 @@ public class AgentEngine implements AgentLoop {
 
         if (!state.isEmpty()) {
             String injected = "[Workspace State] 以下是上次中断前的工作进度，请据此续接：\n" + state;
-            workspaceContext.add(Message.system(injected));
-            log.info("[Engine] 注入工作区状态到 workspaceContext ({} chars)", injected.length());
+            ephemeralContext.workspace().add(Message.system(injected));
+            log.info("[Engine] 注入工作区状态到 ephemeral ctx ({} chars)", injected.length());
         }
     }
 
@@ -2037,6 +2186,13 @@ public class AgentEngine implements AgentLoop {
         for (var l : onRunEventListeners) {
             try { l.accept(event); } catch (Exception ignored) {}
         }
+    }
+
+    /** 为 internal tool 构造 ToolCallMetrics */
+    private ToolCallMetrics internalToolMetrics(ToolCall call, boolean readOnly, String output) {
+        return new ToolCallMetrics(currentRunId, currentTurnNumber,
+            call.id(), call.name(), "", readOnly, true, false, null,
+            true, 0, output.length(), false, null, null);
     }
 
     /** 生成 run ID：yyyyMMdd-HHmmss-4位十六进制随机数 */

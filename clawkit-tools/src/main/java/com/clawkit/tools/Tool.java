@@ -20,4 +20,34 @@ public interface Tool {
 
     /** 是否为只读工具。读工具可并行执行，写工具需串行。默认 false（写工具）。 */
     default boolean isReadOnly() { return false; }
+
+    /** 工具元数据（风险等级、副作用等）。默认从 isReadOnly() 推导。 */
+    default ToolMetadata metadata() {
+        return ToolMetadata.from(this);
+    }
+
+    /**
+     * 结构化执行入口（新接口）。默认适配旧 execute(String) 接口。
+     * 工具实现可 override 以获得结构化结果。
+     */
+    default ToolExecutionResult execute(ToolExecutionRequest req) {
+        long start = System.currentTimeMillis();
+        try {
+            String args = req.arguments() != null ? req.arguments().toString() : "{}";
+            Result<String> result = execute(args);
+            long duration = System.currentTimeMillis() - start;
+            return switch (result) {
+                case Result.Ok<String> ok -> ToolExecutionResult.success(
+                    req.toolCallId(), req.toolName(), ok.data(), duration, metadata());
+                case Result.Err<String> err -> ToolExecutionResult.error(
+                    req.toolCallId(), req.toolName(),
+                    err.error().errorCode(), err.error().message(), duration, metadata());
+            };
+        } catch (Exception e) {
+            long duration = System.currentTimeMillis() - start;
+            return ToolExecutionResult.error(
+                req.toolCallId(), req.toolName(), "INTERNAL_ERROR",
+                e.getMessage(), duration, metadata());
+        }
+    }
 }

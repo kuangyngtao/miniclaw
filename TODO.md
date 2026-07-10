@@ -157,13 +157,17 @@
   `spawnSubAgent()`（line ~980）创建独立 AgentEngine 实例，子 agent 的 run 应产生独立 `<sub-run-id>/` 目录。当前子 run 的 FileRunRecorder 未被注册。  
   方案：在子 AgentEngine 创建时注册 FileRunRecorder，父 run trace 中记录子 run ID 引用。
 
-- **[ ] internal tools 补充 fireToolStart/End**（engine）  
+- **[x] internal tools 补充 fireToolStart/End**（engine）  
   6 个 engine-internal tools（task/session_context/skill_load/skill_unload/memory_save/remember，lines ~867-900）不触发 fireToolStart/fireToolEnd，trace 链路不完整。  
   方案：在 executeSequential 中为 internal tools 补充事件触发。
+  
+  ✅ 2026-07-11 — PR-0: currentRunId 提升为 AgentEngine 字段；PR-2: ToolCallExecutor + InternalToolRouter 统一处理 internal tools，所有 6 个 internal tool 均 fire ToolInvoked/ToolCompleted。
 
-- **[ ] approval 事件接入观测**（engine / observability）  
+- **[x] approval 事件接入观测**（engine / observability）  
   approval 决策在 `executeSequential()` 内部（line ~955），无法访问 `run()` 方法中的 `currentRunId` 局部变量。当前 approval 事件未写入 trace。  
   方案：将 currentRunId 提升为 AgentEngine 字段或以参数传递；或等 P0-R 拆分 executeSequential 后一并处理。
+  
+  ✅ 2026-07-11 — PR-0: currentRunId 提升为字段；PR-2: ToolCallExecutor 在审批点 fire ApprovalDecision 事件。
 
 - **[ ] Git 专用工具**（tools）  
   封装 `git status`、`git diff`、`git log`、`git show`。  
@@ -194,13 +198,17 @@
 - runtime system message 和持久会话边界不清。
 - 工具风险模型、MCP 审计、Bash 生命周期、Provider 输出协议仍偏原型。
 
-- **[ ] 建立重构护栏测试**（engine / cli / tools）  
+- **[x] 建立重构护栏测试**（engine / cli / tools）  
   覆盖 PLAN 只读、ASK 审批、runtime context 不持久化、compact 保留关键约束、Bash 长输出/超时、MCP 风险、slash command 不调 LLM。  
   验收：P0-R 每一步重构前后都能跑对应测试。
+  
+  ✅ 2026-07-11 — PR-0: 补齐 6 种 RunEvent 打点 + 295 测试全通过；PR-3: EphemeralContext 容器提取。
 
-- **[ ] 拆分 `AgentEngine` 上帝类**（engine）  
+- **[~] 拆分 `AgentEngine` 上帝类**（engine）  
   按小 PR 拆出 `ToolCallExecutor`、`ContextPipeline`、`MemoryHooks`、`SkillRuntime`、`PlanRuntime`。  
   验收：`AgentEngine` 只保留编排门面；每个拆分组件有独立单元测试；现有 AgentEngine 行为测试继续通过。
+  
+  🔶 2026-07-11 — PR-2: ToolCallExecutor + InternalToolRouter 拆分完成；PR-3: EphemeralContext 容器提取；ContextPipeline/MemoryHooks/SkillRuntime/PlanRuntime 推迟。
 
 - **[ ] 拆分 CLI 命令和交互层**（cli）  
   拆出 `ReplLoop`、`SlashCommandRouter`、命令组、`ApprovalConsole`、`ConsoleRenderer`。  
@@ -222,13 +230,17 @@
   支持 `readOnly`、`riskLevel`、`destructive`、`requiresApproval`，未知写工具默认按中高风险处理。  
   验收：新增 MCP adapter 测试覆盖只读工具、高风险工具、未知风险工具。
 
-- **[ ] 统一工具执行契约**（tools / engine）  
+- **[x] 统一工具执行契约**（tools / engine）  
   引入 `ToolMetadata`、`ToolExecutionRequest`、`ToolExecutionResult`，由 `ToolCallExecutor` 统一审批、缓存、超时、审计和结果回注。  
   验收：engine 不直接拼工具错误；所有工具结果可以进入 metrics；新增工具不需要修改 AgentEngine 主循环。
+  
+  ✅ 2026-07-11 — PR-1: ToolMetadata/ToolRiskLevel/ToolExecutionRequest/ToolExecutionResult + Tool 默认适配方法；PR-2: ToolCallExecutor + InternalToolRouter 统一入口，AgentEngine 不再直接调 registry.execute()。
 
-- **[ ] 修复 MCP 审计日志 JSONL**（tools / mcp）  
+- **[x] 修复 MCP 审计日志 JSONL**（tools / mcp）  
   使用 Jackson 写合法 JSONL，记录时间、工具、动作、参数预览、结果、耗时、输出大小，并做脱敏。  
   验收：审计日志能被 Jackson 逐行读取；失败和成功记录结构一致。
+  
+  ✅ 2026-07-11 — PR-4: McpAuditLogger 改为 Jackson ObjectMapper.writeValueAsString()；新增 McpAuditRecord 结构化 record；可注入日志路径。
 
 - **[ ] 修复 BashTool 输出读取和进程生命周期**（tools）  
   并发 drain stdout/stderr，超时销毁进程，输出截断保留 head/tail 和退出码。  
@@ -239,6 +251,32 @@
   验收：provider 层只负责模型通信；engine 层只消费结构化响应；协议错误不会继续进入工具执行。
 
 推荐顺序：护栏测试 -> `ToolCallExecutor` -> `ContextPipeline` -> MCP 风险和审计 -> BashTool -> CLI -> Provider 协议。
+
+### P0-R 方案评审遗留问题（2026-07-11 评审发现，待实施）
+
+- **[ ] `ToolRiskLevel` 契约下沉**（tools / engine）
+  `ToolMetadata` 将定义在 `clawkit-tools`，不能复用 `clawkit-engine` 内的 `RiskLevel`，否则会违反 tools 不依赖 engine 的模块边界。
+  验收：tools 模块不依赖 engine；engine/CLI 的审批展示通过映射或迁移使用 tools 侧风险枚举。
+
+- **[ ] `ToolCallExecutor` 覆盖所有执行路径**（engine）
+  不能只迁移 `AgentEngine` 普通工具路径；`PlanExecutor`、SubAgent 分派和 engine-internal tools 也必须进入统一执行、审批、审计和 metrics 链路。
+  验收：普通 run、plan-execute、SubAgent、task/session_context/skill/memory 内部工具都能产生一致的 ToolInvoked/ToolCompleted trace。
+
+- **[ ] Provider 观测使用 run/turn 作用域**（engine / provider / observability）
+  provider 事件不能只在 CLI 层包无上下文 decorator，否则无法可靠写入 runId、turnNumber 和 retry 信息。
+  验收：ProviderCallCompleted 由 engine 的调用上下文或 request-scoped hook 发出，trace 中没有孤立的 runId=null / turnNumber=0 记录。
+
+- **[ ] CLI 显式处理 observability 边界**（cli / observability）
+  CLI 当前直接使用 FileRunRecorder/RunReader，但 pom 只显式依赖 engine，长期会把 engine 的传递依赖当成公共契约。
+  验收：clawkit-cli 显式依赖 observability，或由 engine 暴露稳定 facade；编译不依赖隐式传递依赖。
+
+- **[ ] Provider parser 不吞坏工具参数**（provider / engine）
+  流式工具参数解析失败不能静默变成 `{}` 后继续进入工具执行。
+  验收：SSE tool call 参数坏 JSON 会产生结构化 parse error 或可观测 warning，不触发真实工具执行。
+
+- **[ ] P0-R 测试隔离真实用户目录**（tests / observability / mcp）
+  MCP audit、run recorder、CLI 测试不得写入真实 `user.home/.clawkit` 或依赖本机日志配置。
+  验收：相关测试使用临时目录和 test logging 配置；全量测试不会因用户目录权限或 logback 配置噪声失败。
 
 ---
 

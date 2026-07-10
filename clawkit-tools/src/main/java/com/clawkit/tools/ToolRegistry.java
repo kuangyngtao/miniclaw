@@ -85,6 +85,31 @@ public class ToolRegistry implements Registry {
         }
     }
 
+    /** 查询工具元数据。未知工具返回保守默认值。 */
+    public ToolMetadata metadata(String toolName) {
+        Tool tool = tools.get(toolName);
+        return tool != null ? tool.metadata() : ToolMetadata.conservative(toolName);
+    }
+
+    /** 结构化执行入口（新接口），支持耗时和 outputBytes 统计。 */
+    public ToolExecutionResult execute(ToolExecutionRequest req) {
+        for (SafetyInterceptor i : interceptors) {
+            String blockReason = i.check(new com.clawkit.tools.schema.ToolCall(
+                req.toolCallId(), req.toolName(), req.arguments()));
+            if (blockReason != null) {
+                return ToolExecutionResult.error(
+                    req.toolCallId(), req.toolName(), "BLOCKED", blockReason, 0, metadata(req.toolName()));
+            }
+        }
+        Tool tool = tools.get(req.toolName());
+        if (tool == null) {
+            return ToolExecutionResult.error(
+                req.toolCallId(), req.toolName(), "NOT_FOUND",
+                "tool not found: " + req.toolName(), 0, ToolMetadata.conservative(req.toolName()));
+        }
+        return tool.execute(req);
+    }
+
     /** 工具数量 */
     public int count() {
         return tools.size();
