@@ -1209,6 +1209,10 @@ public class AgentEngine implements AgentLoop {
         if (approvalHandler != null) {
             subEngine.setApprovalHandler(approvalHandler);
         }
+        // 子引擎继承父引擎的观测监听器（确保子 run 进入 trace）
+        for (var l : onRunEventListeners) {
+            subEngine.onRunEvent(l);
+        }
         // 子引擎不流式输出（避免干扰主 Agent 显示）
         subEngine.lastRunTurns = 0;
 
@@ -1822,6 +1826,13 @@ public class AgentEngine implements AgentLoop {
      * 8. 返回摘要
      */
     private String runPlanExecute(String userPrompt) {
+        String planRunId = generateRunId();
+        this.currentRunId = planRunId;
+        Instant startTime = Instant.now();
+        fireRunEvent(new RunEvent.RunStarted(
+            planRunId, userPrompt, startTime,
+            workDir, provider.toString(),
+            permissionMode.name(), thinkingMode.name(), "PLAN_EXECUTE"));
         fireState(AgentState.PLANNING, 0);
 
         // ── Phase 1: 读工作区状态 ──
@@ -1840,17 +1851,26 @@ public class AgentEngine implements AgentLoop {
             planResponse = provider.generate(planMessages, List.of());
         } catch (LLMException e) {
             fireState(AgentState.ERROR, 0, Map.of("error", e.getMessage()));
+            fireRunEvent(new RunEvent.RunCompleted(
+                planRunId, Instant.now(), RunStatus.PLANNING_ERROR,
+                "A-002", e.getMessage(), 0, 0, 0, 0));
             return "[A-002] 规划阶段 LLM 调用失败: " + e.getMessage();
         }
 
         String planJson = planResponse.content() != null ? planResponse.content() : "";
         if (planJson.isBlank()) {
+            fireRunEvent(new RunEvent.RunCompleted(
+                planRunId, Instant.now(), RunStatus.PLAN_PARSE_ERROR,
+                "P-001", "LLM 未返回计划内容", 0, 0, 0, 0));
             return "[P-001] LLM 未返回计划内容";
         }
 
         // ── Phase 3: 解析计划 ──
         Result<ExecutionPlan> parseResult = new PlanParser().parse(planJson);
         if (parseResult instanceof Result.Err<ExecutionPlan> err) {
+            fireRunEvent(new RunEvent.RunCompleted(
+                planRunId, Instant.now(), RunStatus.PLAN_PARSE_ERROR,
+                "P-00x", err.error().message(), 0, 0, 0, 0));
             return "[P-00x] 计划解析失败: " + err.error().message();
         }
         ExecutionPlan plan = ((Result.Ok<ExecutionPlan>) parseResult).data();
@@ -1865,6 +1885,9 @@ public class AgentEngine implements AgentLoop {
             if (!confirmed) {
                 plan.setStatus(PlanStatus.CANCELLED);
                 log.info("[PlanExecute] 用户取消计划");
+                fireRunEvent(new RunEvent.RunCompleted(
+                    planRunId, Instant.now(), RunStatus.PLAN_REJECTED,
+                    null, "用户取消计划", 0, 0, 0, 0));
                 return "计划已取消。用 /auto 或 /ask 切换到执行模式手动执行。";
             }
         }
@@ -1883,6 +1906,9 @@ public class AgentEngine implements AgentLoop {
         fireState(AgentState.REPLYING, completedPlan.taskCount());
 
         // ── Phase 8: 返回摘要 ──
+        fireRunEvent(new RunEvent.RunCompleted(
+            planRunId, Instant.now(), RunStatus.COMPLETED,
+            null, null, completedPlan.taskCount(), 0, 0, 0));
         return buildPlanSummary(completedPlan);
     }
 

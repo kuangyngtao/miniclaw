@@ -136,7 +136,11 @@ public class ClawkitApp implements Runnable {
             .protocol(protocolEnum)
             .build();
 
-        this.provider = ProviderFactory.create(config);
+        // 包装 provider 以记录调用指标（retry 计数待 OpenAIProvider 暴露后接入）
+        this.provider = new com.clawkit.observability.ObservableLLMProvider(
+            ProviderFactory.create(config),
+            metrics -> { /* 由 AgentEngine 内部 ProviderCallCompleted 事件记录 */ });
+        log.info("Provider wrapped with ObservableLLMProvider");
 
         Path userSkillsDir = Path.of(System.getProperty("user.home"), ".agents", "skills");
         registry = createToolRegistry(resolvedWorkDir, userSkillsDir);

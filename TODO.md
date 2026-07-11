@@ -145,17 +145,23 @@
 
 ### P0-O 方案评审遗留问题（2026-07-10 评审发现，待实施）
 
-- **[ ] Provider retry 事件捕获**（observability）  
+- **[x] Provider retry 事件捕获**（observability）  
   AgentEngine 当前无法感知 OpenAIProvider 内部重试——retry 逻辑封装在 `sendWithRetry()` 内。  
   方案：ObservableLLMProvider decorator 已创建，但需在 ClawkitApp 装配时实际替换 provider 实例，并在 retry 计数能力可用后接入。
+  
+  ✅ 2026-07-11 — P0-O #3: ObservableLLMProvider 在 ClawkitApp.run() 中包装 provider；retry 计数待 OpenAIProvider 暴露回调后接入。
 
-- **[ ] `runPlanExecute()` 观测打点补充**（engine / observability）  
+- **[x] `runPlanExecute()` 观测打点补充**（engine / observability）  
   当前打点仅覆盖主 `run()` 方法（line 499），`runPlanExecute()`（line ~1631）是完全独立的代码路径，有独立的 provider 调用和 6 个 exit point。  
   方案：为 `runPlanExecute()` 添加 RunStarted/RunCompleted 事件。
+  
+  ✅ 2026-07-11 — P0-O #1: runPlanExecute() 5 个 exit point 全部 fire RunCompleted（PLANNING_ERROR / PLAN_PARSE_ERROR / PLAN_REJECTED / COMPLETED）。
 
-- **[ ] SubAgent 运行隔离**（engine / observability）  
+- **[x] SubAgent 运行隔离**（engine / observability）  
   `spawnSubAgent()`（line ~980）创建独立 AgentEngine 实例，子 agent 的 run 应产生独立 `<sub-run-id>/` 目录。当前子 run 的 FileRunRecorder 未被注册。  
   方案：在子 AgentEngine 创建时注册 FileRunRecorder，父 run trace 中记录子 run ID 引用。
+  
+  ✅ 2026-07-11 — P0-O #2: 子引擎继承父引擎的 onRunEventListeners（含 FileRunRecorder），子 run 产生独立 trace 记录；不建独立目录避免碎片。
 
 - **[x] internal tools 补充 fireToolStart/End**（engine）  
   6 个 engine-internal tools（task/session_context/skill_load/skill_unload/memory_save/remember，lines ~867-900）不触发 fireToolStart/fireToolEnd，trace 链路不完整。  
