@@ -21,6 +21,7 @@
         <module>clawkit-memory</module>
         <module>clawkit-observability</module>
         <module>clawkit-im</module>
+        <module>clawkit-evaluation</module>
     </modules>
 
     <properties>

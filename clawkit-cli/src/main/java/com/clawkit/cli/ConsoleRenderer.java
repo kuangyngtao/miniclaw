@@ -137,7 +137,7 @@ public class ConsoleRenderer {
     public void renderRuns(RunReader runReader) {
         System.out.println();
         try {
-            var runs = runReader.listRecent(10);
+            var runs = runReader.listRuns(10);
             if (runs.isEmpty()) {
                 System.out.println(GRAY + "  暂无运行记录。执行一次任务后 run 记录会自动生成。" + RESET);
                 System.out.println();
@@ -146,10 +146,12 @@ public class ConsoleRenderer {
             System.out.println(GRAY + "  run                                     status      turns  tools  fails  compact  time     mode" + RESET);
             System.out.println(GRAY + "  ──────────────────────────────────────── ─────────── ───── ────── ────── ──────── ──────── ──────" + RESET);
             for (var r : runs) {
-                String time = r.startTime().length() > 16 ? r.startTime().substring(11, 16) : r.startTime();
+                String time = r.startTime() != null
+                    ? java.time.LocalTime.from(r.startTime().atZone(java.time.ZoneId.systemDefault())).toString()
+                    : "-";
                 String duration = formatDuration(r.durationMs());
                 System.out.printf("  %-40s %-11s %5d %6d %6d %8d %8s %s%n",
-                    r.runId(), r.status(), r.turns(), r.toolCalls(),
+                    r.runId(), r.status().name(), r.turns(), r.toolCalls(),
                     r.toolFailures(), r.compactCount(), duration, r.permissionMode());
             }
             System.out.println();
@@ -161,32 +163,35 @@ public class ConsoleRenderer {
     public void renderMetrics(RunReader runReader, String runId) {
         System.out.println();
         try {
-            com.clawkit.observability.model.RunMetrics m;
+            com.clawkit.observability.RunMetrics m;
             if (runId != null) {
-                m = runReader.readMetrics(runId);
+                var result = runReader.readMetrics(runId);
+                m = result.value();
             } else {
-                var runs = runReader.listRecent(1);
+                var runs = runReader.listRuns(1);
                 if (runs.isEmpty()) {
                     System.out.println(GRAY + "  暂无运行记录" + RESET);
                     System.out.println();
                     return;
                 }
-                m = runReader.readMetrics(runs.get(0).runId());
+                var result = runReader.readMetrics(runs.get(0).runId());
+                m = result.value();
             }
             if (m == null) {
                 System.out.println(GRAY + "  run 记录不存在: " + runId + RESET);
                 System.out.println();
                 return;
             }
+            var s = m.summary();
             System.out.printf("  run:      %s%n", m.runId());
-            System.out.printf("  status:   %s%n", m.status());
-            System.out.printf("  duration: %s%n", formatDuration(m.durationMs()));
-            System.out.printf("  turns:    %d%n", m.turns());
-            System.out.printf("  tools:    %d (%d failed)%n", m.toolCalls(), m.toolFailures());
-            System.out.printf("  compact:  %d%n", m.compactCount());
-            System.out.printf("  mode:     %s / %s / %s%n", m.permissionMode(), m.thinkingMode(), m.executionMode());
-            if (m.errorMessage() != null) {
-                System.out.printf("  error:    %s%n", m.errorMessage());
+            System.out.printf("  status:   %s%n", s.status());
+            System.out.printf("  duration: %s%n", formatDuration(s.durationMs()));
+            System.out.printf("  turns:    %d%n", s.turns());
+            System.out.printf("  tools:    %d (%d failed)%n", s.toolCalls(), s.toolFailures());
+            System.out.printf("  compact:  %d%n", s.compactCount());
+            System.out.printf("  mode:     %s / %s / %s%n", s.permissionMode(), s.thinkingMode(), s.executionMode());
+            if (s.errorMessage() != null) {
+                System.out.printf("  error:    %s%n", s.errorMessage());
             }
             System.out.println();
         } catch (Exception e) {
@@ -198,7 +203,7 @@ public class ConsoleRenderer {
         System.out.println();
         try {
             if (runId == null) {
-                var runs = runReader.listRecent(1);
+                var runs = runReader.listRuns(1);
                 if (runs.isEmpty()) {
                     System.out.println(GRAY + "  暂无运行记录" + RESET);
                     System.out.println();
@@ -206,23 +211,30 @@ public class ConsoleRenderer {
                 }
                 runId = runs.get(0).runId();
             }
-            var lines = runReader.readTrace(runId);
-            if (lines.isEmpty()) {
+            var result = runReader.readEvents(runId);
+            var events = result.value();
+            if (events.isEmpty()) {
                 System.out.println(GRAY + "  trace 为空: " + runId + RESET);
                 System.out.println();
                 return;
             }
-            System.out.println(GRAY + "  trace: " + runId + " (" + lines.size() + " events)" + RESET);
-            int shown = 0;
-            for (String line : lines) {
-                if (line.contains("RunStarted") || line.contains("RunCompleted")
-                    || line.contains("ToolCompleted") || line.contains("CompactCompleted")) {
-                    String shortLine = line.length() > 120 ? line.substring(0, 117) + "..." : line;
-                    System.out.println(GRAY + "  " + shortLine + RESET);
-                    shown++;
+            // Show warnings if any
+            if (!result.warnings().isEmpty()) {
+                for (var w : result.warnings()) {
+                    System.out.println(GRAY + "  ⚠ " + w.code() + " @ line " + w.lineNumber() + ": " + w.message() + RESET);
                 }
-                if (shown >= 20) {
-                    System.out.println(GRAY + "  ... (" + (lines.size() - shown) + " more events)" + RESET);
+            }
+            System.out.println(GRAY + "  trace: " + runId + " (" + events.size() + " events)" + RESET);
+            int shown = 0;
+            for (var env : events) {
+                String time = env.occurredAt() != null
+                    ? java.time.LocalTime.from(env.occurredAt().atZone(java.time.ZoneId.systemDefault())).toString()
+                    : "--:--:--";
+                System.out.printf(GRAY + "  %03d %s %-30s turn=%s%n" + RESET,
+                    env.sequence(), time, env.eventType(),
+                    env.turnNumber() != null ? env.turnNumber().toString() : "-");
+                if (++shown >= 20) {
+                    System.out.println(GRAY + "  ... (" + (events.size() - shown) + " more events)" + RESET);
                     break;
                 }
             }

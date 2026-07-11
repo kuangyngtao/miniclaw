@@ -26,5 +26,9 @@ public enum RunStatus {
     /** 任务被安全拦截器阻止 */
     SAFETY_BLOCKED,
     /** 未知错误 */
-    UNKNOWN_ERROR
+    UNKNOWN_ERROR,
+    /** run 仍在执行中（初始状态） */
+    RUNNING,
+    /** recorder 关闭时 run 仍未完成 */
+    INCOMPLETE
 }

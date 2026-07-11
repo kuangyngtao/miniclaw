@@ -4,20 +4,25 @@ import com.clawkit.engine.ApprovalHandler;
 import com.clawkit.engine.ApprovalRequest;
 import com.clawkit.engine.ApprovalResult;
 import com.clawkit.engine.PermissionMode;
-import com.clawkit.observability.RunEvent;
-import com.clawkit.observability.model.ToolCallMetrics;
+import com.clawkit.observability.ApprovalDecidedPayload;
+import com.clawkit.observability.ObservabilityRedactor;
+import com.clawkit.observability.ToolCompletedPayload;
+import com.clawkit.observability.ToolInvokedPayload;
 import com.clawkit.tools.Registry;
 import com.clawkit.tools.ToolExecutionRequest;
 import com.clawkit.tools.ToolExecutionResult;
+import com.clawkit.tools.ToolMetadata;
+import com.clawkit.tools.ToolRiskLevel;
 import com.clawkit.tools.schema.Message;
 import com.clawkit.tools.schema.ToolCall;
+import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
-import java.util.function.Consumer;
 
 /**
  * 工具调用统一执行器。
@@ -47,21 +52,20 @@ public class ToolCallExecutor {
         boolean allInternal = calls.stream().allMatch(c -> ctx.internalTools().isInternal(c.name()));
 
         if (allInternal) {
-            // internal tools 串行
             for (ToolCall call : calls) {
-                fireToolInvoked(call, ctx, true);
+                ToolMetadata meta = metadataFor(call.name());
+                fireToolInvoked(call, ctx, meta, true);
                 ToolExecutionResult r = executeOne(call, ctx);
                 results.add(r);
                 messages.add(Message.toolResult(call.id(), r.output()));
                 fireToolCompleted(call, ctx, r, true);
             }
         } else if (allReadOnly && n > 1) {
-            // 只读 registry 工具并行
             executeParallel(calls, ctx, results, messages);
         } else {
-            // 混合或单个工具串行
             for (ToolCall call : calls) {
-                fireToolInvoked(call, ctx, false);
+                ToolMetadata meta = metadataFor(call.name());
+                fireToolInvoked(call, ctx, meta, false);
                 ToolExecutionResult r = executeOne(call, ctx);
                 results.add(r);
                 messages.add(Message.toolResult(call.id(), r.output()));
@@ -74,22 +78,17 @@ public class ToolCallExecutor {
 
     /** 执行单个工具调用（internal → registry） */
     private ToolExecutionResult executeOne(ToolCall call, ToolExecutionContext ctx) {
-        // internal tools
         if (ctx.internalTools().isInternal(call.name())) {
             return ctx.internalTools().execute(ToolExecutionRequest.from(call), ctx);
         }
 
-        // PLAN 模式拦截写工具
         if (!registry.isReadOnly(call.name()) && ctx.permissionMode() == PermissionMode.PLAN) {
             return ToolExecutionResult.error(call.id(), call.name(),
                 "PLAN_BLOCKED", "Tool '" + call.name()
                 + "' is not available in PLAN mode.", 0,
-                registry instanceof com.clawkit.tools.ToolRegistry tr
-                    ? tr.metadata(call.name())
-                    : com.clawkit.tools.ToolMetadata.conservative(call.name()));
+                metadataFor(call.name()));
         }
 
-        // ASK 模式审批
         if (!registry.isReadOnly(call.name())
             && ctx.permissionMode() == PermissionMode.ASK
             && ctx.approvalHandler() != null
@@ -103,40 +102,31 @@ public class ToolCallExecutor {
                     ctx.autoApprovedTools().add(a.toolName());
                 }
                 case ApprovalResult.Reject r -> {
-                    ctx.eventSink().accept(new RunEvent.ApprovalDecision(
-                        ctx.runId(), ctx.turnNumber(), call.name(), "REJECT", r.reason()));
+                    fireApproval(call, ctx, "REJECT", "USER", r.reason());
                     return ToolExecutionResult.error(call.id(), call.name(),
                         "REJECTED", "User rejected: " + r.reason(), 0,
-                        registry instanceof com.clawkit.tools.ToolRegistry tr
-                            ? tr.metadata(call.name())
-                            : com.clawkit.tools.ToolMetadata.conservative(call.name()));
+                        metadataFor(call.name()));
                 }
                 case ApprovalResult.ModifyParams m -> {
-                    ctx.eventSink().accept(new RunEvent.ApprovalDecision(
-                        ctx.runId(), ctx.turnNumber(), call.name(), "MODIFY", m.guidance()));
+                    fireApproval(call, ctx, "MODIFY", "USER", m.guidance());
                     return ToolExecutionResult.error(call.id(), call.name(),
                         "MODIFY_PARAMS", m.guidance(), 0,
-                        registry instanceof com.clawkit.tools.ToolRegistry tr
-                            ? tr.metadata(call.name())
-                            : com.clawkit.tools.ToolMetadata.conservative(call.name()));
+                        metadataFor(call.name()));
                 }
             }
         }
 
-        // registry 执行
         if (registry instanceof com.clawkit.tools.ToolRegistry tr) {
             return tr.execute(ToolExecutionRequest.from(call));
         }
-        // fallback: 旧 Registry 接口
         var toolResult = registry.execute(call);
         return new ToolExecutionResult(call.id(), call.name(),
             toolResult.output(), toolResult.isError(),
             toolResult.isError() ? "TOOL_ERROR" : null,
             0, toolResult.output().length(), false, false, null,
-            com.clawkit.tools.ToolMetadata.conservative(call.name()));
+            ToolMetadata.conservative(call.name()));
     }
 
-    /** 并行执行只读工具 */
     private void executeParallel(List<ToolCall> calls, ToolExecutionContext ctx,
                                   List<ToolExecutionResult> results, List<Message> messages) {
         int n = calls.size();
@@ -146,7 +136,7 @@ public class ToolCallExecutor {
         for (int i = 0; i < n; i++) {
             final int idx = i;
             final ToolCall call = calls.get(i);
-            fireToolInvoked(call, ctx, false);
+            fireToolInvoked(call, ctx, metadataFor(call.name()), false);
             Thread.ofVirtual().start(() -> {
                 try {
                     resultArray[idx] = executeOne(call, ctx);
@@ -174,26 +164,46 @@ public class ToolCallExecutor {
 
     // ── event helpers ──────────────────────────────────────────────
 
-    private void fireToolInvoked(ToolCall call, ToolExecutionContext ctx, boolean isInternal) {
+    private void fireToolInvoked(ToolCall call, ToolExecutionContext ctx,
+                                  ToolMetadata meta, boolean isInternal) {
         String argSummary = buildArgSummary(call);
-        ctx.eventSink().accept(new RunEvent.ToolInvoked(
-            ctx.runId(), ctx.turnNumber(), call.id(), call.name(),
-            argSummary, isInternal || registry.isReadOnly(call.name())));
+        ToolInvokedPayload payload = new ToolInvokedPayload(
+            call.id(), call.name(),
+            ObservabilityRedactor.summarizeArguments(call.arguments()),
+            isInternal, meta.readOnly(), meta.riskLevel(),
+            meta.destructive(), meta.requiresApproval());
+        ctx.recorder().record(payload, ctx.runId(), null, ctx.turnNumber(), Instant.now());
     }
 
     private void fireToolCompleted(ToolCall call, ToolExecutionContext ctx,
                                     ToolExecutionResult r, boolean isInternal) {
-        String argSummary = buildArgSummary(call);
-        ctx.eventSink().accept(new RunEvent.ToolCompleted(ctx.runId(), ctx.turnNumber(),
-            new ToolCallMetrics(ctx.runId(), ctx.turnNumber(),
-                call.id(), call.name(), argSummary,
-                registry.isReadOnly(call.name()), isInternal, false, null,
-                !r.error(), r.durationMs(), r.outputBytes(), r.truncated(),
-                r.errorCode(), r.error() ? r.output() : null)));
+        ToolCompletedPayload payload = new ToolCompletedPayload(
+            call.id(), call.name(),
+            !r.error(), r.durationMs(), r.outputBytes(), r.truncated(),
+            r.timedOut(), r.exitCode(),
+            r.errorCode(),
+            r.error() ? ObservabilityRedactor.summarizeError(r.output()) : null);
+        ctx.recorder().record(payload, ctx.runId(), null, ctx.turnNumber(), Instant.now());
     }
 
-    private static String buildArgSummary(ToolCall call) {
-        var args = call.arguments();
+    private void fireApproval(ToolCall call, ToolExecutionContext ctx,
+                               String decision, String source, String reason) {
+        ToolMetadata meta = metadataFor(call.name());
+        ApprovalDecidedPayload payload = new ApprovalDecidedPayload(
+            call.id(), call.name(), meta.riskLevel(), decision, source,
+            reason != null ? reason : "");
+        ctx.recorder().record(payload, ctx.runId(), null, ctx.turnNumber(), Instant.now());
+    }
+
+    private ToolMetadata metadataFor(String toolName) {
+        if (registry instanceof com.clawkit.tools.ToolRegistry tr) {
+            return tr.metadata(toolName);
+        }
+        return ToolMetadata.conservative(toolName);
+    }
+
+    static String buildArgSummary(ToolCall call) {
+        JsonNode args = call.arguments();
         if (args == null) return "";
         for (String key : List.of("path", "file_path", "pattern", "command", "query", "url")) {
             if (args.has(key)) {

@@ -60,11 +60,22 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
-import com.clawkit.observability.RunEvent;
+import com.clawkit.observability.ApprovalDecidedPayload;
+import com.clawkit.observability.CompactCompletedPayload;
+import com.clawkit.observability.CompactTriggeredPayload;
+import com.clawkit.observability.ContextPreparedPayload;
+import com.clawkit.observability.ObservabilityRedactor;
+import com.clawkit.observability.ProviderCallCompletedPayload;
+import com.clawkit.observability.ProviderCallStartedPayload;
+import com.clawkit.observability.RunCompletedPayload;
+import com.clawkit.observability.RunEventPayload;
+import com.clawkit.observability.RunRecorder;
+import com.clawkit.observability.RunStartedPayload;
 import com.clawkit.observability.RunStatus;
-import com.clawkit.observability.model.ProviderCallMetrics;
-import com.clawkit.observability.model.ToolCallMetrics;
-import com.clawkit.observability.model.TurnMetrics;
+import com.clawkit.observability.ToolCompletedPayload;
+import com.clawkit.observability.ToolInvokedPayload;
+import com.clawkit.observability.TurnCompletedPayload;
+import com.clawkit.observability.TurnStartedPayload;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -424,8 +435,10 @@ public class AgentEngine implements AgentLoop {
     private final List<Consumer<AgentStateEvent>> onStateChangeListeners = new CopyOnWriteArrayList<>();
     private final List<Consumer<ToolStartEvent>> onToolStartListeners = new CopyOnWriteArrayList<>();
     private final List<Consumer<ToolEndEvent>> onToolEndListeners = new CopyOnWriteArrayList<>();
-    private final List<Consumer<RunEvent>> onRunEventListeners = new CopyOnWriteArrayList<>();
+    private final List<RunRecorder> recorders = new CopyOnWriteArrayList<>();
     private volatile String currentRunId;
+    private volatile String parentRunId;
+    private volatile boolean completedEventSent;
     private volatile int currentTurnNumber;
     private final ToolCallExecutor toolCallExecutor;
     private final InternalToolRouter internalToolRouter = new InternalToolRouter();
@@ -561,21 +574,20 @@ public class AgentEngine implements AgentLoop {
 
         String currentRunId = generateRunId();
         this.currentRunId = currentRunId;
+        this.parentRunId = null;
+        this.completedEventSent = false;
         Instant runStartTime = Instant.now();
-        fireRunEvent(new RunEvent.RunStarted(
-            currentRunId, userPrompt, runStartTime,
+        fireEvent(new RunStartedPayload(
+            ObservabilityRedactor.summarizeTask(userPrompt),
             workDir.toString(), provider.toString(),
-            permissionMode.name(), thinkingMode.name(), executionMode.name()));
+            permissionMode.name(), thinkingMode.name(), executionMode.name()), null);
 
         if (sessionHistory.isEmpty()) {
             sessionHistory.add(Message.system(buildSystemPrompt()));
         }
-        // Phase 3b: 工作区状态注入 → workspaceContext（ephemeral）
         sniffWorkspaceState();
         sessionHistory.add(Message.user(userPrompt));
-        // Phase 3b: 相关历史会话注入 → memoryContext（ephemeral）
         injectRelatedSessions();
-        // Phase 3a: 打破别名 — contextHistory 是独立副本
         List<Message> contextHistory = new ArrayList<>(sessionHistory);
 
         int turnCount = 0;
@@ -585,21 +597,21 @@ public class AgentEngine implements AgentLoop {
         lastRunTurns = 0;
         fireState(AgentState.IDLE, 0);
 
+        try {
         while (true) {
             if (interrupted) {
                 interrupted = false;
                 fireState(AgentState.INTERRUPTED, turnCount);
                 log.info("[Engine] 被用户中断，退出循环");
-                fireRunEvent(new RunEvent.RunCompleted(
-                    currentRunId, Instant.now(), RunStatus.INTERRUPTED,
-                    null, null, turnCount, totalToolCalls, totalToolFailures, totalCompactCount));
+                completedEventSent = true;
+            fireEvent(new RunCompletedPayload(RunStatus.INTERRUPTED, null, null), null);
                 return "[A-001] 已被用户中断。";
             }
 
             turnCount++;
             this.currentTurnNumber = turnCount;
             log.info("========== [Turn {}] 开始 ==========", turnCount);
-            fireRunEvent(new RunEvent.TurnStarted(currentRunId, turnCount, Instant.now()));
+            fireEvent(new TurnStartedPayload(), turnCount);
 
             // === 运行时事件注入 ===
 
@@ -634,9 +646,9 @@ public class AgentEngine implements AgentLoop {
             // 第3层: 安全硬上限 — 50轮兜底
             if (turnCount > MAX_TURNS) {
                 log.warn("[Engine] 达到安全硬上限 ({}), 强制退出", MAX_TURNS);
-                fireRunEvent(new RunEvent.RunCompleted(
-                    currentRunId, Instant.now(), RunStatus.HARD_LIMIT,
-                    "A-001", "达到最大迭代轮次 (" + MAX_TURNS + ")", turnCount, totalToolCalls, totalToolFailures, totalCompactCount));
+                completedEventSent = true;
+            fireEvent(new RunCompletedPayload(RunStatus.HARD_LIMIT,
+                    "A-001", "达到最大迭代轮次 (" + MAX_TURNS + ")"), null);
                 return "[A-001] 达到最大迭代轮次 (" + MAX_TURNS + ")，任务可能过于复杂，请拆分为子任务";
             }
 
@@ -694,8 +706,7 @@ public class AgentEngine implements AgentLoop {
                 case COMPACT_REQUIRED, HARD_LIMIT -> {
                     // 超过 85%（或 95%），强制 compact
                     totalCompactCount++;
-                    fireRunEvent(new RunEvent.CompactTriggered(
-                        currentRunId, turnCount, Instant.now()));
+                    fireEvent(new CompactTriggeredPayload(), turnCount);
                     var result = contextManager.compact(modelContext,
                         budgetPolicy.targetTokens(), evictedGroups);
                     CompactionResult cr = (CompactionResult) result;
@@ -717,20 +728,19 @@ public class AgentEngine implements AgentLoop {
                     report.sections().forEach((k, v) -> beforeSections.put(k.name(), v));
                     var afterSections = new java.util.LinkedHashMap<String, Integer>();
                     postReport.sections().forEach((k, v) -> afterSections.put(k.name(), v));
-                    fireRunEvent(new RunEvent.CompactCompleted(currentRunId,
-                        new com.clawkit.observability.model.CompactMetrics(
-                            currentRunId, turnCount,
+                    fireEvent(new CompactCompletedPayload(
                             modelContext.size(), cr.messages().size(),
                             report.totalTokens(), postReport.totalTokens(),
                             report.status().name(), postReport.status().name(),
                             beforeSections, afterSections,
-                            evictedGroups.size(), List.of())));
+                            evictedGroups.size(), List.of(),
+                            0L, false, null), turnCount);
 
                     if (postReport.status() == ContextBudgetReport.BudgetStatus.HARD_LIMIT) {
                         log.warn("[Engine] compact 后仍超 95% 硬限制");
-                        fireRunEvent(new RunEvent.RunCompleted(
-                            currentRunId, Instant.now(), RunStatus.COMPACT_FAILED,
-                            "A-001", "compact 后仍超 95% 硬限制", turnCount, totalToolCalls, totalToolFailures, totalCompactCount));
+                        completedEventSent = true;
+            fireEvent(new RunCompletedPayload(RunStatus.COMPACT_FAILED,
+                            "A-001", "compact 后仍超 95% 硬限制"), null);
                         return String.format(
                             "上下文过大（%d / %d tokens，%.0f%%），compact 后仍超 95%% 硬限制。"
                             + "请执行 /compact 或 /session new 开启新会话。",
@@ -801,9 +811,9 @@ public class AgentEngine implements AgentLoop {
                 } catch (LLMException e) {
                     fireState(AgentState.ERROR, turnCount, Map.of("error", e.getMessage()));
                     log.error("[Engine] 慢思考阶段1 失败: {}", e.getMessage());
-                    fireRunEvent(new RunEvent.RunCompleted(
-                        currentRunId, Instant.now(), RunStatus.PLANNING_ERROR,
-                        "A-002", e.getMessage(), turnCount, totalToolCalls, totalToolFailures, totalCompactCount));
+                    completedEventSent = true;
+            fireEvent(new RunCompletedPayload(RunStatus.PLANNING_ERROR,
+                        "A-002", e.getMessage()), null);
                     return "[A-002] 慢思考规划阶段 LLM 调用失败: " + e.getMessage();
                 }
             }
@@ -868,9 +878,9 @@ public class AgentEngine implements AgentLoop {
             } catch (LLMException e) {
                 fireState(AgentState.ERROR, turnCount, Map.of("error", e.getMessage()));
                 log.error("[Engine] LLM 调用失败 (A-002): {}", e.getMessage());
-                fireRunEvent(new RunEvent.RunCompleted(
-                    currentRunId, Instant.now(), RunStatus.LLM_ERROR,
-                    "A-002", e.getMessage(), turnCount, totalToolCalls, totalToolFailures, totalCompactCount));
+                completedEventSent = true;
+            fireEvent(new RunCompletedPayload(RunStatus.LLM_ERROR,
+                    "A-002", e.getMessage()), null);
                 return "[A-002] LLM 调用失败: " + e.getMessage();
             }
             long providerDurationMs = System.currentTimeMillis() - providerStartMs;
@@ -878,15 +888,12 @@ public class AgentEngine implements AgentLoop {
             int toolCallCount = responseMsg.toolCalls() != null ? responseMsg.toolCalls().size() : 0;
 
             // Fire provider + turn events
-            fireRunEvent(new RunEvent.ProviderCallCompleted(currentRunId, turnCount,
-                new ProviderCallMetrics(currentRunId, turnCount, "phase2",
-                    !onTokenListeners.isEmpty(), 0, 0, true, providerDurationMs, 0,
-                    false, null, null)));
-            fireRunEvent(new RunEvent.TurnCompleted(currentRunId,
-                new TurnMetrics(currentRunId, turnCount, "-",
-                    0, 0, true, providerDurationMs, toolCallCount,
-                    responseMsg.content() != null && !responseMsg.content().isEmpty(),
-                    false, null, null)));
+            fireEvent(new ProviderCallCompletedPayload(null, "phase2",
+                !onTokenListeners.isEmpty(), 0, 0, true,
+                providerDurationMs, 0, false, null, null), turnCount);
+            fireEvent(new TurnCompletedPayload(toolCallCount,
+                responseMsg.content() != null && !responseMsg.content().isEmpty(),
+                false, null, null), turnCount);
 
             if (responseMsg.content() != null && !responseMsg.content().isEmpty()) {
                 log.debug("Model response: {} chars", responseMsg.content().length());
@@ -901,9 +908,8 @@ public class AgentEngine implements AgentLoop {
                     log.info("[Engine] LLM 未调用工具，退出循环。");
                 }
                 lastRunTurns = turnCount;
-                fireRunEvent(new RunEvent.RunCompleted(
-                    currentRunId, Instant.now(), RunStatus.COMPLETED,
-                    null, null, turnCount, totalToolCalls, totalToolFailures, totalCompactCount));
+                completedEventSent = true;
+            fireEvent(new RunCompletedPayload(RunStatus.COMPLETED, null, null), null);
                 return responseMsg.content() != null ? responseMsg.content() : "";
             }
 
@@ -928,7 +934,13 @@ public class AgentEngine implements AgentLoop {
                 totalToolCalls += calls.size();
                 var execCtx = new ToolExecutionContext(
                     currentRunId, turnCount, permissionMode, approvalHandler,
-                    this::fireRunEvent, internalToolRouter, autoApprovedTools);
+                    (p, rid, prid, tn, t) -> {
+                        for (var r : recorders) {
+                            try { r.record(p, rid, prid, tn, t); }
+                            catch (Exception ignored) {}
+                        }
+                    },
+                    internalToolRouter, autoApprovedTools);
                 var batchResult = toolCallExecutor.executeBatch(calls, execCtx);
                 for (Message msg : batchResult.toolResultMessages()) {
                     contextHistory.add(msg);
@@ -950,6 +962,23 @@ public class AgentEngine implements AgentLoop {
             while (recentCallSignatures.size() > 10) {
                 recentCallSignatures.remove(0);
             }
+        } // end while
+        } catch (Exception e) {
+            log.error("[Engine] 未捕获异常，强制发送 RunCompleted", e);
+            if (!completedEventSent) {
+                completedEventSent = true;
+                completedEventSent = true;
+            fireEvent(new RunCompletedPayload(RunStatus.UNKNOWN_ERROR, "UNEXPECTED",
+                    e.getMessage() != null ? e.getMessage() : "Unexpected error"), null);
+            }
+            throw e;
+        } finally {
+            if (!completedEventSent) {
+                completedEventSent = true;
+                completedEventSent = true;
+            fireEvent(new RunCompletedPayload(RunStatus.UNKNOWN_ERROR, null,
+                    "No RunCompleted emitted (UNEXPECTED)"), null);
+            }
         }
     }
 
@@ -967,21 +996,19 @@ public class AgentEngine implements AgentLoop {
             final ToolCall call = calls.get(i);
             log.info("  -> [VThread-{}] 并行执行: {}", idx, call.name());
             fireToolStart(call);
-            fireRunEvent(new RunEvent.ToolInvoked(
-                currentRunId, currentTurnNumber, call.id(), call.name(),
-                buildArgSummary(call), registry.isReadOnly(call.name())));
+            fireEvent(new ToolInvokedPayload(call.id(), call.name(),
+                ObservabilityRedactor.summarizeArguments(call.arguments()), false, registry.isReadOnly(call.name()),
+                registry.isReadOnly(call.name()) ? com.clawkit.tools.ToolRiskLevel.LOW : com.clawkit.tools.ToolRiskLevel.HIGH,
+                !registry.isReadOnly(call.name()), !registry.isReadOnly(call.name())), currentTurnNumber);
             Thread.ofVirtual().start(() -> {
                 try {
                     results[idx] = registry.execute(call);
                     ToolResult r = results[idx];
                     fireToolEnd(call, r);
-                    fireRunEvent(new RunEvent.ToolCompleted(currentRunId, currentTurnNumber,
-                        new ToolCallMetrics(currentRunId, currentTurnNumber,
-                            call.id(), call.name(), buildArgSummary(call),
-                            registry.isReadOnly(call.name()), false, false, null,
-                            !r.isError(), 0, r.output().length(), false,
-                            r.isError() ? "TOOL_ERROR" : null,
-                            r.isError() ? r.output().substring(0, Math.min(80, r.output().length())) : null)));
+                    fireEvent(new ToolCompletedPayload(call.id(), call.name(),
+                        !r.isError(), 0, r.output().length(), false, false, null,
+                        r.isError() ? "TOOL_ERROR" : null,
+                        r.isError() ? r.output() : null), currentTurnNumber);
                     if (r.isError()) {
                         log.info("  -> [VThread-{}] 执行报错: {}", idx, r.output());
                     } else {
@@ -1015,66 +1042,54 @@ public class AgentEngine implements AgentLoop {
             // task 工具由引擎直接处理，不走 Registry
             if (TASK_TOOL_NAME.equals(call.name())) {
                 log.info("  -> [SubAgent] 派发子任务");
-                fireRunEvent(new RunEvent.ToolInvoked(
-                    currentRunId, currentTurnNumber, call.id(), call.name(), "", false));
+                fireEvent(new ToolInvokedPayload(call.id(), call.name(), "", false, false, com.clawkit.tools.ToolRiskLevel.HIGH, true, true), currentTurnNumber);
                 String result = spawnSubAgent(call);
                 contextHistory.add(Message.toolResult(call.id(), result));
-                fireRunEvent(new RunEvent.ToolCompleted(currentRunId, currentTurnNumber,
-                    internalToolMetrics(call, true, result)));
+                fireEvent(new ToolCompletedPayload(call.id(), call.name(), true, 0, 0, false, false, null, null, null), currentTurnNumber);
                 continue;
             }
             // session_context 工具由引擎直接处理
             if (SESSION_CONTEXT_TOOL_NAME.equals(call.name())) {
                 log.info("  -> [Session] 搜索历史会话");
-                fireRunEvent(new RunEvent.ToolInvoked(
-                    currentRunId, currentTurnNumber, call.id(), call.name(), "", true));
+                fireEvent(new ToolInvokedPayload(call.id(), call.name(), "", false, true, com.clawkit.tools.ToolRiskLevel.LOW, false, false), currentTurnNumber);
                 String result = searchSessionContext(call);
                 contextHistory.add(Message.toolResult(call.id(), result));
-                fireRunEvent(new RunEvent.ToolCompleted(currentRunId, currentTurnNumber,
-                    internalToolMetrics(call, true, result)));
+                fireEvent(new ToolCompletedPayload(call.id(), call.name(), true, 0, 0, false, false, null, null, null), currentTurnNumber);
                 continue;
             }
             // skill_load / skill_unload — engine-internal
             if (SKILL_LOAD_TOOL_NAME.equals(call.name())) {
                 log.info("  -> [Skill] 加载技能");
-                fireRunEvent(new RunEvent.ToolInvoked(
-                    currentRunId, currentTurnNumber, call.id(), call.name(), "", true));
+                fireEvent(new ToolInvokedPayload(call.id(), call.name(), "", false, true, com.clawkit.tools.ToolRiskLevel.LOW, false, false), currentTurnNumber);
                 String result = handleSkillLoad(call);
                 contextHistory.add(Message.toolResult(call.id(), result));
-                fireRunEvent(new RunEvent.ToolCompleted(currentRunId, currentTurnNumber,
-                    internalToolMetrics(call, true, result)));
+                fireEvent(new ToolCompletedPayload(call.id(), call.name(), true, 0, 0, false, false, null, null, null), currentTurnNumber);
                 continue;
             }
             if (SKILL_UNLOAD_TOOL_NAME.equals(call.name())) {
                 log.info("  -> [Skill] 卸载技能");
-                fireRunEvent(new RunEvent.ToolInvoked(
-                    currentRunId, currentTurnNumber, call.id(), call.name(), "", true));
+                fireEvent(new ToolInvokedPayload(call.id(), call.name(), "", false, true, com.clawkit.tools.ToolRiskLevel.LOW, false, false), currentTurnNumber);
                 String result = handleSkillUnload(call);
                 contextHistory.add(Message.toolResult(call.id(), result));
-                fireRunEvent(new RunEvent.ToolCompleted(currentRunId, currentTurnNumber,
-                    internalToolMetrics(call, true, result)));
+                fireEvent(new ToolCompletedPayload(call.id(), call.name(), true, 0, 0, false, false, null, null, null), currentTurnNumber);
                 continue;
             }
             // memory_save — engine-internal
             if (MEMORY_SAVE_TOOL_NAME.equals(call.name())) {
                 log.info("  -> [Memory] 保存记忆");
-                fireRunEvent(new RunEvent.ToolInvoked(
-                    currentRunId, currentTurnNumber, call.id(), call.name(), "", false));
+                fireEvent(new ToolInvokedPayload(call.id(), call.name(), "", false, false, com.clawkit.tools.ToolRiskLevel.HIGH, true, true), currentTurnNumber);
                 String result = handleMemorySave(call);
                 contextHistory.add(Message.toolResult(call.id(), result));
-                fireRunEvent(new RunEvent.ToolCompleted(currentRunId, currentTurnNumber,
-                    internalToolMetrics(call, false, result)));
+                fireEvent(new ToolCompletedPayload(call.id(), call.name(), true, 0, 0, false, false, null, null, null), currentTurnNumber);
                 continue;
             }
             // remember — V3.6 工作内存
             if (REMEMBER_TOOL_NAME.equals(call.name())) {
                 log.info("  -> [WM] 工作内存写入");
-                fireRunEvent(new RunEvent.ToolInvoked(
-                    currentRunId, currentTurnNumber, call.id(), call.name(), "", false));
+                fireEvent(new ToolInvokedPayload(call.id(), call.name(), "", false, false, com.clawkit.tools.ToolRiskLevel.HIGH, true, true), currentTurnNumber);
                 String result = handleRemember(call);
                 contextHistory.add(Message.toolResult(call.id(), result));
-                fireRunEvent(new RunEvent.ToolCompleted(currentRunId, currentTurnNumber,
-                    internalToolMetrics(call, false, result)));
+                fireEvent(new ToolCompletedPayload(call.id(), call.name(), true, 0, 0, false, false, null, null, null), currentTurnNumber);
                 continue;
             }
             if (!registry.isReadOnly(call.name())) {
@@ -1094,15 +1109,13 @@ public class AgentEngine implements AgentLoop {
                                 autoApprovedTools.add(a.toolName());
                             }
                             case ApprovalResult.Reject r -> {
-                                fireRunEvent(new RunEvent.ApprovalDecision(
-                                    currentRunId, currentTurnNumber, call.name(), "REJECT", r.reason()));
+                                fireEvent(new ApprovalDecidedPayload(call.name(), call.name(), com.clawkit.tools.ToolRiskLevel.HIGH, "REJECT", "USER", r.reason()), currentTurnNumber);
                                 contextHistory.add(Message.toolResult(call.id(),
                                     "User rejected " + call.name() + ": " + r.reason()));
                                 continue;
                             }
                             case ApprovalResult.ModifyParams m -> {
-                                fireRunEvent(new RunEvent.ApprovalDecision(
-                                    currentRunId, currentTurnNumber, call.name(), "MODIFY", m.guidance()));
+                                fireEvent(new ApprovalDecidedPayload(call.name(), call.name(), com.clawkit.tools.ToolRiskLevel.HIGH, "MODIFY", "USER", m.guidance()), currentTurnNumber);
                                 contextHistory.add(Message.toolResult(call.id(),
                                     "User wants you to modify the parameters. " + m.guidance()
                                     + " Please adjust and call " + call.name() + " again."));
@@ -1113,20 +1126,18 @@ public class AgentEngine implements AgentLoop {
                 }
             }
             fireToolStart(call);
-            fireRunEvent(new RunEvent.ToolInvoked(
-                currentRunId, currentTurnNumber, call.id(), call.name(),
-                buildArgSummary(call), registry.isReadOnly(call.name())));
+            fireEvent(new ToolInvokedPayload(call.id(), call.name(),
+                ObservabilityRedactor.summarizeArguments(call.arguments()), false, registry.isReadOnly(call.name()),
+                registry.isReadOnly(call.name()) ? com.clawkit.tools.ToolRiskLevel.LOW : com.clawkit.tools.ToolRiskLevel.HIGH,
+                !registry.isReadOnly(call.name()), !registry.isReadOnly(call.name())), currentTurnNumber);
             long toolStartMs = System.currentTimeMillis();
             ToolResult result = registry.execute(call);
             long toolDurationMs = System.currentTimeMillis() - toolStartMs;
             fireToolEnd(call, result);
-            fireRunEvent(new RunEvent.ToolCompleted(currentRunId, currentTurnNumber,
-                new ToolCallMetrics(currentRunId, currentTurnNumber,
-                    call.id(), call.name(), buildArgSummary(call),
-                    registry.isReadOnly(call.name()), false, false, null,
-                    !result.isError(), toolDurationMs, result.output().length(), false,
-                    result.isError() ? "TOOL_ERROR" : null,
-                    result.isError() ? result.output().substring(0, Math.min(80, result.output().length())) : null)));
+            fireEvent(new ToolCompletedPayload(call.id(), call.name(),
+                !result.isError(), toolDurationMs, result.output().length(), false, false, null,
+                result.isError() ? "TOOL_ERROR" : null,
+                result.isError() ? result.output() : null), currentTurnNumber);
             log.info("  -> 执行工具: {}, 参数: {}", call.name(), call.arguments());
             if (result.isError()) {
                 log.info("  -> 工具执行报错: {}", result.output());
@@ -1204,14 +1215,15 @@ public class AgentEngine implements AgentLoop {
         // 创建子引擎：不继承 TWO_STAGE，继承 permissionMode
         AgentEngine subEngine = new AgentEngine(provider, subRegistry, workDir,
             ThinkingMode.OFF, null, null, l5MemoryIndex);
+        subEngine.parentRunId = currentRunId;
         subEngine.setPermissionMode(permissionMode);
         subEngine.enableSubAgents = false; // 防止递归委派
         if (approvalHandler != null) {
             subEngine.setApprovalHandler(approvalHandler);
         }
         // 子引擎继承父引擎的观测监听器（确保子 run 进入 trace）
-        for (var l : onRunEventListeners) {
-            subEngine.onRunEvent(l);
+        for (var r : recorders) {
+            subEngine.addRecorder(r);
         }
         // 子引擎不流式输出（避免干扰主 Agent 显示）
         subEngine.lastRunTurns = 0;
@@ -1829,11 +1841,10 @@ public class AgentEngine implements AgentLoop {
         String planRunId = generateRunId();
         this.currentRunId = planRunId;
         Instant startTime = Instant.now();
-        fireRunEvent(new RunEvent.RunStarted(
-            planRunId, userPrompt, startTime,
-            workDir, provider.toString(),
-            permissionMode.name(), thinkingMode.name(), "PLAN_EXECUTE"));
+        this.completedEventSent = false;
+        fireEvent(new RunStartedPayload(ObservabilityRedactor.summarizeTask(userPrompt), workDir.toString(), provider.toString(), permissionMode.name(), thinkingMode.name(), "PLAN_EXECUTE"), null);
         fireState(AgentState.PLANNING, 0);
+        try {
 
         // ── Phase 1: 读工作区状态 ──
         String existingPlanMd = readWorkspaceFile(".clawkit/plan.md");
@@ -1851,26 +1862,23 @@ public class AgentEngine implements AgentLoop {
             planResponse = provider.generate(planMessages, List.of());
         } catch (LLMException e) {
             fireState(AgentState.ERROR, 0, Map.of("error", e.getMessage()));
-            fireRunEvent(new RunEvent.RunCompleted(
-                planRunId, Instant.now(), RunStatus.PLANNING_ERROR,
-                "A-002", e.getMessage(), 0, 0, 0, 0));
+            completedEventSent = true;
+            fireEvent(new RunCompletedPayload(RunStatus.PLANNING_ERROR, "A-002", e.getMessage()), null);
             return "[A-002] 规划阶段 LLM 调用失败: " + e.getMessage();
         }
 
         String planJson = planResponse.content() != null ? planResponse.content() : "";
         if (planJson.isBlank()) {
-            fireRunEvent(new RunEvent.RunCompleted(
-                planRunId, Instant.now(), RunStatus.PLAN_PARSE_ERROR,
-                "P-001", "LLM 未返回计划内容", 0, 0, 0, 0));
+            completedEventSent = true;
+            fireEvent(new RunCompletedPayload(RunStatus.PLAN_PARSE_ERROR, "P-001", "LLM 未返回计划内容"), null);
             return "[P-001] LLM 未返回计划内容";
         }
 
         // ── Phase 3: 解析计划 ──
         Result<ExecutionPlan> parseResult = new PlanParser().parse(planJson);
         if (parseResult instanceof Result.Err<ExecutionPlan> err) {
-            fireRunEvent(new RunEvent.RunCompleted(
-                planRunId, Instant.now(), RunStatus.PLAN_PARSE_ERROR,
-                "P-00x", err.error().message(), 0, 0, 0, 0));
+            completedEventSent = true;
+            fireEvent(new RunCompletedPayload(RunStatus.PLAN_PARSE_ERROR, "P-00x", err.error().message()), null);
             return "[P-00x] 计划解析失败: " + err.error().message();
         }
         ExecutionPlan plan = ((Result.Ok<ExecutionPlan>) parseResult).data();
@@ -1885,9 +1893,8 @@ public class AgentEngine implements AgentLoop {
             if (!confirmed) {
                 plan.setStatus(PlanStatus.CANCELLED);
                 log.info("[PlanExecute] 用户取消计划");
-                fireRunEvent(new RunEvent.RunCompleted(
-                    planRunId, Instant.now(), RunStatus.PLAN_REJECTED,
-                    null, "用户取消计划", 0, 0, 0, 0));
+                completedEventSent = true;
+            fireEvent(new RunCompletedPayload(RunStatus.PLAN_REJECTED, null, "用户取消计划"), null);
                 return "计划已取消。用 /auto 或 /ask 切换到执行模式手动执行。";
             }
         }
@@ -1906,10 +1913,24 @@ public class AgentEngine implements AgentLoop {
         fireState(AgentState.REPLYING, completedPlan.taskCount());
 
         // ── Phase 8: 返回摘要 ──
-        fireRunEvent(new RunEvent.RunCompleted(
-            planRunId, Instant.now(), RunStatus.COMPLETED,
-            null, null, completedPlan.taskCount(), 0, 0, 0));
+        completedEventSent = true;
+        fireEvent(new RunCompletedPayload(RunStatus.COMPLETED, null, null), null);
         return buildPlanSummary(completedPlan);
+        } catch (Exception e) {
+            log.error("[PlanExecute] 未捕获异常", e);
+            if (!completedEventSent) {
+                completedEventSent = true;
+                fireEvent(new RunCompletedPayload(RunStatus.UNKNOWN_ERROR, "UNEXPECTED",
+                    e.getMessage() != null ? e.getMessage() : "Unexpected error"), null);
+            }
+            throw e;
+        } finally {
+            if (!completedEventSent) {
+                completedEventSent = true;
+                fireEvent(new RunCompletedPayload(RunStatus.UNKNOWN_ERROR, null,
+                    "No RunCompleted emitted"), null);
+            }
+        }
     }
 
     private String readWorkspaceFile(String path) {
@@ -2196,29 +2217,24 @@ public class AgentEngine implements AgentLoop {
 
     // ── RunEvent 观测 ───────────────────────────────────────────────
 
-    /** 注册运行事件监听器（如 FileRunRecorder） */
-    public void onRunEvent(Consumer<RunEvent> listener) {
-        if (listener != null) onRunEventListeners.add(listener);
+    /** 注册运行事件 recorder（如 FileRunRecorder） */
+    public void addRecorder(RunRecorder recorder) {
+        if (recorder != null) recorders.add(recorder);
     }
 
-    /** 移除运行事件监听器 */
-    public void removeOnRunEventListener(Consumer<RunEvent> listener) {
-        if (listener != null) onRunEventListeners.remove(listener);
+    /** 移除运行事件 recorder */
+    public void removeRecorder(RunRecorder recorder) {
+        if (recorder != null) recorders.remove(recorder);
     }
 
-    /** 分发运行事件给所有监听器（吞异常，不中断主循环） */
-    private void fireRunEvent(RunEvent event) {
-        if (onRunEventListeners.isEmpty()) return;
-        for (var l : onRunEventListeners) {
-            try { l.accept(event); } catch (Exception ignored) {}
+    /** 分发事件给所有 recorder（吞异常，不中断主循环） */
+    private void fireEvent(RunEventPayload payload, Integer turnNumber) {
+        if (recorders.isEmpty()) return;
+        Instant now = Instant.now();
+        for (var r : recorders) {
+            try { r.record(payload, currentRunId, parentRunId, turnNumber, now); }
+            catch (Exception ignored) {}
         }
-    }
-
-    /** 为 internal tool 构造 ToolCallMetrics */
-    private ToolCallMetrics internalToolMetrics(ToolCall call, boolean readOnly, String output) {
-        return new ToolCallMetrics(currentRunId, currentTurnNumber,
-            call.id(), call.name(), "", readOnly, true, false, null,
-            true, 0, output.length(), false, null, null);
     }
 
     /** 生成 run ID：yyyyMMdd-HHmmss-4位十六进制随机数 */

@@ -112,7 +112,7 @@ public class ApplicationBootstrap {
 
         // Observability
         Path clawkitDir = Path.of(System.getProperty("user.home"), ".clawkit");
-        engine.onRunEvent(new FileRunRecorder(clawkitDir));
+        engine.addRecorder(new FileRunRecorder(clawkitDir));
         RunReader runReader = new RunReader(clawkitDir);
 
         // Sessions

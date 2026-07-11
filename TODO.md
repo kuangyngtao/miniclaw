@@ -1,404 +1,387 @@
 # clawkit TODO
 
-> `[ ]` 待做 `[~]` 进行中 `[x]` 已完成
+> 状态：`[ ]` 未开始，`[~]` 部分完成或正在迁移，`[x]` 已满足全部验收标准。
 
-本 TODO 按“底层基座 Agent 基本功”排序。模块分层见 [CLAUDE.md](CLAUDE.md)。  
-本文件是可执行路线图，不写泛泛想法；每个任务都应有边界、前置条件和验收标准。
+本文档只维护当前事实、实施顺序和验收标准。项目边界看 [CLAUDE.md](CLAUDE.md)，稳定工程规范看 [DESIGN.md](DESIGN.md)。
 
-## TODO 维护规则
+## 维护规则
 
-- 完成任意一项后，必须同步修改本文件，把对应任务从 `[ ]` 改为 `[x]`。
-- 如果任务只完成了一部分，保持 `[ ]`，或在明确进入实施中时改为 `[~]`；不要为了显得进度好看而提前划掉。
-- 划掉任务时，要在该任务下补充完成记录：完成日期、核心改动、验证命令或验证方式。
-- 父任务拆成多个子步骤时，只有所有子步骤和验收标准都满足，父任务才能标记为 `[x]`。
-- 没有跑测试或无法验证时，不能只写“已完成”；必须写明未验证原因和剩余风险。
+- 状态必须由代码和测试证明；创建类、接口或模块不等于完成迁移。
+- `[x]` 需要记录完成日期、核心变化和验证方式。
+- 一个任务只在一个章节维护；跨章节依赖使用引用，不复制待办。
+- 父项只有在全部子项和验收标准满足后才能标记 `[x]`。
+- 无法运行验证时保持 `[~]` 或 `[ ]`，并写明原因和残余风险。
+- 新发现的问题放入所属主链，不新增“评审遗留问题”堆积区。
 
-## TODO 减重原则
+## 当前代码事实
 
-本文件不是一次性偿还所有技术债的清单，而是演进路线。执行时只允许按阶段推进：
+截至 2026-07-11：
 
-- **当前必做**：能支撑下一轮重构的最小闭环，例如护栏测试、基础 metrics、工具执行契约。
-- **当前不做**：完整评测平台、数据库化观测、Web dashboard、多用户协作、复杂垂类场景。
-- **能本地文件解决的，不先上数据库**：观测第一阶段使用 `.clawkit/runs/**/metrics.jsonl`、`trace.jsonl`、`summary.json`。
-- **能自动判断的先评估**：先评估测试是否通过、工具是否调用、安全边界是否守住，不急着评估回答质量。
-- **每个阶段只证明一件事**：P0 证明“可观测、可回归、可安全重构”；P1 再证明“完成率更高”；P2 再证明“成本更低”。
+- Maven 多模块原型可运行，文档记录的测试基线为 295 个测试通过；合入前仍需重新验证。
+- `AgentEngine` 约 2368 行，仍混合 Agent loop、上下文、记忆、Session、Skill、Plan 和 SubAgent。
+- `ClawkitApp` 约 1529 行，仍混合装配、REPL、命令、审批和 IM 生命周期。
+- `ToolCallExecutor` 已接入普通 ReAct 和 internal tools，但 PlanExecutor、SubAgent 特殊路径和旧执行方法尚未全部收敛。
+- runtime/session 已有 ephemeral 容器隔离，但独立 `ContextPipeline`、`MemoryHooks`、`SkillRuntime` 尚未形成。
+- observability 已有 RunEvent、trace 和 summary 骨架，但没有 `metrics.jsonl`，并发 run 隔离和 Provider 作用域不完整。
+- CLI 已出现 Bootstrap/Context/Renderer，但存在重复装配和依赖传递依赖的问题。
 
-## 优先级定义
+## 当前执行顺序
 
-| 优先级 | 目标 | 判断标准 |
-|--------|------|---------|
-| P0 | 可靠运行闭环 | 上下文可信、工具安全、过程可观测、任务可评测 |
-| P1 | 任务完成率提升 | 减少失败、减少重复调用、提高复杂任务完成质量 |
-| P2 | 成本与效率优化 | 降 token、降延迟、降模型成本，但不牺牲可靠性 |
-| P3 | 高级扩展能力 | 后台任务、远程运维、语义搜索、native image 等 |
+只按以下顺序推进 P0，避免继续并行铺开半成品：
 
----
+1. **O1 可信记录器**：修正 run 隔离、三文件契约和观测测试。
+2. **S1 工具契约与风险**：统一 metadata、结构化结果和审批来源。
+3. **R1 工具执行主链**：迁移 Plan/SubAgent，删除旧执行路径。
+4. **R2 上下文主链**：提取 ContextPipeline，再迁移 Memory/Skill。
+5. **R3 入口主链**：收敛唯一装配、REPL、命令和审批 UI。
+6. **R4 Provider 主链**：统一 ModelResponse、流式 parser 和 request-scoped 观测。
+7. **O2 Benchmark + P0-D**：用稳定指标建立回归对比，再补工程交付闭环。
 
-## 执行阶段建议
+未达到前一项完成定义时，不开启下一项的大规模实现；可以补测试或修阻断 bug。
 
-当前最重要的不是继续堆新能力，而是先把后续演进的地基打稳。
+## P0：可靠运行与安全重构
 
-1. **P0：可靠运行闭环**  
-   先建立观测和度量能力：tokenizer、上下文预算、P0-O 结构化指标。没有指标，后续重构无法量化证明"变好了"。
-2. **P0-S：重构前最小护栏**  
-   在 metrics 基础上补护栏测试和工具执行结果模型，让回归有据可查。
-3. **P0-R：底层结构重构**  
-   在观测和护栏测试都具备后，拆 `AgentEngine`、工具执行、上下文管线和 MCP 风险模型。每一步重构都能用 metrics 和护栏测试验证。
-4. **P0-D：工程闭环与项目可用性**  
-   补 CI、Docker、示例、配置体验和文档入口，让项目更容易运行、验证和展示。
-5. **P1/P2：完成率与效率优化**  
-   在观测能力稳定后，再做缓存、截断、fallback、多模型路由等优化。
-6. **P3：高级扩展能力**  
-   后台任务、远程运维、语义搜索、native image 等能力放到基座稳定之后。
+### 已完成基础能力
 
----
+- **[x] 真实 tokenizer 与模型窗口配置**（context / provider）
+  JTokkit 替代字符估算，LLMConfig 按模型选择 context window/encoding。
 
-## 当前 Harness 能力盘点
+  ✅ 2026-07-05 — `/context` 和 compact 阈值使用 tokenizer；相关 context 测试通过。
 
-一个成熟的 Agent harness 至少包括：上下文管理、工具系统、执行编排、状态与记忆、评估与观察、约束与恢复。clawkit 已经具备原型能力，但还没有达到成熟工程标准。
+- **[x] 上下文预算模型**（context / engine）
+  已建立预算阈值、分区分析、compact 结果和硬限制。
 
-| 维度 | 当前已经有的能力 | 主要不足 | 后续落点 |
-|------|------------------|----------|----------|
-| 上下文管理 | system prompt、会话历史、working memory、相关历史会话注入、`/context`、compact、MessageMasker、LadderedCompactor | token 仍偏估算；上下文预算线不清晰；runtime context 和持久会话存在污染风险；compact 后保留内容缺少可解释记录 | P0 真实 tokenizer、上下文预算管理；P0-R 拆 `ContextPipeline`、分离运行时上下文和持久会话 |
-| 工具系统 | 内置文件、shell、搜索、时间等工具；MCP 动态注册；`PLAN/ASK/AUTO` 权限模式；SafetyInterceptor；只读工具概念 | 工具返回值仍偏字符串；`ToolMetadata` 不完整；MCP 工具 readOnly/riskLevel 粗糙；审计 JSONL 不稳定；工具失败不可统一统计 | P0 Git 专用工具、WriteTool 覆盖确认；P0-R 统一工具执行契约、重构 MCP 风险模型、修复审计日志 |
-| 执行编排 | ReAct 主循环、工具调用、Plan-and-Execute、SubAgent、慢思考阶段、最大轮次、进度提醒、死循环提醒 | `AgentEngine` 职责过重；状态机不显式；工具执行、上下文、记忆、计划混在主循环；恢复策略和失败分类不足 | P0-R 拆 `AgentEngine`、`ToolCallExecutor`、`PlanRuntime`、`SkillRuntime`；P1 fallback 和任务切分 |
-| 状态与记忆 | session JSON、DiskMemoryService、working memory、相关会话检索、`.clawkit` 数据目录 | 运行时事实和长期会话边界不够清楚；记忆去重、衰减、冲突处理弱；session schema/versioning 需要收敛 | P0-R 分离运行时上下文和持久会话、`MemoryHooks`；P1 记忆质量与召回优化 |
-| 评估与观察 | 基础日志、`/context` 统计、部分工具审计、TODO 中有测试记录 | 当前最明显短板：没有统一 `metrics.jsonl`；没有 benchmark runner；没有任务完成率、工具成功率、耗时、token、compact、provider retry 的结构化统计；无法量化重构是否变好 | P0 结构化指标、评测基准；P0-R 工具执行结果模型；后续建立回归评测和观测报表 |
-| 约束与恢复 | `PLAN/ASK/AUTO`、审批拦截、路径安全检查、shell timeout、Provider retry/circuit breaker、部分敏感信息遮蔽 | 风险模型偏粗；MCP 高风险动作识别不足；失败恢复多靠提示词和重试；缺少可回滚、可恢复、可审计的任务状态 | P0 WriteTool 覆盖确认；P0-R MCP 风险模型、BashTool 生命周期、Provider 输出协议；P1 错误分类与 fallback |
+  ✅ 2026-07-08 — ContextBudgetPolicy、ContextBudgetAnalyzer、CompactionResult 和约束提取接入；相关 context/engine 测试通过。
 
-结论：项目已经不是“只有提示词的 demo”，而是有了 harness 雏形；但成熟度还卡在工程闭环上，尤其是评估与观察。没有 metrics 和 benchmark，后续重构很难证明“变好了”，只能凭体感判断。
+## P0-O：可信观测与评测闭环
 
----
+目标：一次 run 的事件能够隔离、完整地落盘，被 CLI 正确读取，并成为重构和 benchmark 的可信证据。
 
-## P0：可靠运行闭环
+### O1：本地运行记录
 
-这些是基座 Agent 的基本功，优先级高于新增花哨能力。
+✅ **2026-07-11 完成 — 4 PR / 186 测试全部通过**
 
-- **[x] 真实 tokenizer**（context）  
-  引入 JTokkit 或等价 tokenizer，替换字符数估算。  
-  验收：`/context` 展示真实 token；上下文压缩触发点不再依赖字符估算。
+- **[x] 按 run 隔离 `FileRunRecorder`**（observability）
+  每个 run 固定产出（两文件契约）：
+  - `.clawkit/runs/<run-id>/events.jsonl` — 唯一事实来源，每行一个 `RunEventEnvelope`
+  - `.clawkit/runs/<run-id>/summary.json` — 由 `RunAccumulator` 从事件聚合的原子快照
+  recorder 按 `ConcurrentHashMap<String, RunState>` 管理独立 writer、lock、sequence 和 accumulator；写入 `taskSummary`（脱敏、截断到 160 字符）；成功、失败或中断时正确关闭对应资源。
+  验收：根 run、并行 SubAgent、失败 run 互不串写；两文件均为合法 JSON/JSONL；敏感参数只保留脱敏摘要。
 
-  ✅ 2026-07-05 — JTokkit 替换字符估算，LLMConfig 按模型检测 contextWindow/encoding，AgentEngine 移除硬编码 8000。
+- **[x] 补齐 Metrics 模型与事件投影**（observability）
+  创建 12 种 `RunEventPayload` sealed 子类型 + `RunEventEnvelope` + `RunEventCodec`；
+  `RunAccumulator` 流式聚合 20+ 指标字段（Run/Turn/Provider/Tool/Context/Compact/Approval）；
+  `RunMetricsProjector` 批量回放投影；`RunMetrics` 拆分 Provider/Tool/Context/Compact/Approval 子指标。
+  验收：summary 与回放投影使用同一套 `RunAccumulator`；工具指标包含 riskLevel、审批、耗时、输出大小、截断和错误码。
 
-- **[x] 上下文预算管理**（context / engine）  
-  建立模型窗口预算线，例如 70% 预警、85% 强制 compact。按 system、tools、history、memory、tool result 分区预算。  
-  验收：任务运行中能解释 token 分布；压缩前后保留关键约束。
+- **[x] 完整覆盖运行事件**（engine / observability）
+  全部 20+ 事件调用点从旧 `RunEvent` sealed interface 迁移到新 `RunEventPayload` 类型；
+  `ToolCallExecutor` 从 `ToolMetadata` 读取风险信息；审批事件携带结构化 decision/source；
+  SubAgent 通过 `parentRunId` 关联父子 run；`RunCompleted` 不含聚合字段（由 accumulator 投影）。
+  验收：ReAct / TWO_STAGE / Plan / SubAgent / internal tools × 成功 / 失败 / 中断 矩阵覆盖。
 
-  ✅ 2026-07-08 — 新增 ContextBudgetPolicy(70/85/95)、ContextBudgetAnalyzer(7 分区)、CompactionResult；engine 根据预算状态决策 compact，compact 后一律重分析，>95% 硬拒绝；/context 显示分区；ConstraintExtractor 提取+验证关键约束。
+- **[x] CLI 观测入口与 Reader**（cli / observability）
+  `/runs` 只读 `summary.json` 列表；`/metrics <runId>` 从 events 动态投影指标；
+  `/trace <runId>` 结构化展示时间线（`sequence`、`eventType`、`turnNumber`）；
+  `RunReader` 流式逐行容错：无效 JSON 跳过 + `INVALID_JSON` warning，未知事件保留为 `UnknownEventPayload`；
+  CLI `pom.xml` 显式依赖 `clawkit-observability`；删除 `ClawkitApp` 与 `ApplicationBootstrap` 中的重复装配。
+  验收：`/trace` 不再使用 `line.contains("ToolCompleted")` 字符串猜测；单行损坏提示 warning 并继续读取。
 
-### P0-O：评估与观测最小闭环
+- **[x] Observability 独立测试**（observability / engine / cli）
+  186 个测试全部使用临时目录，不访问真实 HOME、网络、模型或 MCP：
+  - observability：71 个（codec / accumulator / projector / redactor / recorder / reader）
+  - engine：69 个（AgentEngine / PlanExecutor / SubAgent / Session / Permission）
+  - cli：46 个（ClawkitApp / ClawkitCompleter）
 
-目标不是先做完整 eval 平台，而是在大规模重构前建立工程回归能力：能知道一次 run 做了什么、哪里失败、重构后有没有退化。
+### O2：Benchmark 与回归报告
 
-- **[x] 本地观测存储格式**（observability）  
-  第一阶段不引入 MySQL / PostgreSQL。使用本地文件：
-  - `.clawkit/runs/<run-id>/metrics.jsonl`
-  - `.clawkit/runs/<run-id>/trace.jsonl`
-  - `.clawkit/runs/<run-id>/summary.json`
-  验收：每次任务运行生成独立 run 目录；文件可直接打开阅读；敏感字段脱敏。
-  
-  ✅ 2026-07-10 — 新增 clawkit-observability 模块；FileRunRecorder 写 Jackson JSONL + summary.json；参数脱敏（仅写 argSummary）。
+✅ **2026-07-11 完成 — 4 PR / 37 evaluation 测试全部通过**
 
-- **[x] 最小 Metrics 数据模型**（observability）  
-  先定义够用的结构，不追求完整平台。  
-  覆盖：
-  - `RunMetrics`：runId、任务摘要、开始/结束时间、总耗时、状态、失败类型。
-  - `TurnMetrics`：轮次、模型、输入/输出 token、provider 耗时、是否重试。
-  - `ToolCallMetrics`：工具名、readOnly、riskLevel、成功/失败、耗时、输出字节数、是否截断、是否审批。
-  - `ContextMetrics`：system、tools、history、memory、tool result 的 token 分布，以及 compact 前后变化。
-  验收：每个 run 至少能汇总轮次、工具调用次数、工具失败率、耗时和 compact 次数。
-  
-  ✅ 2026-07-10 — RunMetrics/TurnMetrics/ToolCallMetrics/CompactMetrics/ProviderCallMetrics 全部 record 定义在 clawkit-observability/model/；RunStatus 枚举 10 个状态；RunEvent sealed interface 10 种子类型。
+- **[x] 最小 Benchmark Runner**（evaluation）
+  新建 `clawkit-evaluation` 模块，16 个可机械判断的固定任务：read-search / glob-grep / edit-fix / run-verification / tool-failure-recovery / long-output-truncation / multi-turn / compact-trigger / dead-loop-stop / provider-failure / two-stage / plan-write-block / ask-approve-reject / auto-safety-block / plan-execute / parallel-subagents。
+  验收：`BenchmarkRunner.runAll(BenchmarkCatalog.allCases())` 一键运行 16 个 case，输出 pass rate / avgTurns / avgToolCalls / avgDuration / toolFailureRate。
+  前置：O1 两文件契约与事件 schema 稳定。
 
-- **[x] AgentEngine 观测打点**（engine / observability）  
-  在 run start/end、turn start/end、tool call start/end、compact start/end、provider retry、approval decision 位置打点。  
-  前置：先收敛工具执行结果模型，至少要能拿到工具名、成功/失败、耗时、输出字节数。  
-  验收：一次普通任务的 trace 能还原执行链路；工具失败和 provider retry 能在 metrics 中看到。
-  
-  ✅ 2026-07-10 — AgentEngine 新增 onRunEvent 监听器 + fireRunEvent 分发；在 6 个 exit point + turn loop + tool counter + compact counter 打点；approval 事件因作用域限制推迟到后续重构；ObservableLLMProvider decorator 记录 provider 调用耗时。
+- **[x] 基线与回归对比报告**（evaluation）
+  `BaselineStore` 读写版本化 baseline JSON（fingerprint + 每 case 指标）；`RegressionComparator` 逐 case 对比，硬门禁（PASS→FAIL / 安全约束 / 缺少 RunCompleted）+ 结构指标（turns/tools/failures/provider 按 case 比较，不比全局平均值）。
+  验收：`RegressionComparator.compare(report, baseline)` 输出 DEGRADED / UNCHANGED / IMPROVED / INCOMPATIBLE_BASELINE，含具体差异。
 
-- **[x] CLI 观测入口**（cli / observability）  
-  提供轻量查看能力，不先做 dashboard。  
-  目标：
-  - `/metrics` 查看最近一次 run 汇总。
-  - `/runs` 列出最近若干 run。
-  - `/trace <runId>` 查看关键事件摘要。
-  验收：不打开源码也能知道最近一次任务用了多少轮、调用了哪些工具、哪里失败。
-  
-  ✅ 2026-07-10 — ClawkitApp 新增 /runs、/metrics、/trace 三个 slash command；ClawkitCompleter/printMenu/printHelp/resolveCommand 同步更新；RunReader 从磁盘读取 run 记录。
+暂不做数据库观测库、Web dashboard、复杂人工评分和多模型大规模评测。真实模型 benchmark 作为后续能力展开。
 
-- **[ ] 最小 Benchmark Runner**（evaluation）  
-  建立 10-20 个固定任务，先覆盖可机械判断的场景：读代码、改小 bug、改文档、跑测试、权限边界、工具失败、长输出、compact 保留关键约束。  
-  每个 case 至少包含：任务描述、初始 workspace、允许工具、最大轮次、自动校验命令或校验规则。  
-  验收：一条命令跑完 benchmark，并输出 success、avgTurns、avgToolCalls、avgDuration、toolFailureRate。
+## P0-S：工具契约与安全闭环
 
-- **[ ] 回归对比报告**（evaluation）  
-  不做复杂智能评分，先对比工程指标。  
-  对比维度：
-  - 成功率是否下降。
-  - 平均轮次、耗时、工具调用次数是否明显上升。
-  - 工具失败率、provider retry、compact 次数是否异常。
-  - `PLAN/ASK/AUTO` 安全边界是否被破坏。
-  验收：能把 current run 和 baseline summary 做对比，输出“退化 / 持平 / 改善”的简单结论。
+### S1：统一契约和风险
 
-暂不做：MySQL 观测库、Web 报表、复杂人工评分平台、多模型大规模评测。这些等本地 JSONL 和 benchmark 稳定后再考虑。
+- **[~] 完整结构化工具契约**（tools）
+  `ToolMetadata`、`ToolExecutionRequest`、`ToolExecutionResult` 已存在；补齐 timeout、exitCode、截断、审批和审计关联字段。
+  验收：结果能表达成功、拒绝、超时、截断、非零退出、工具错误和内部错误；旧 String 接口只保留薄适配层。
 
-### P0-O 方案评审遗留问题（2026-07-10 评审发现，待实施）
+- **[ ] 统一 ToolRiskLevel 与审批来源**（tools / engine / cli）
+  删除 engine/CLI 按工具名推断的第二套 RiskLevel；审批完全读取 ToolMetadata。未知 MCP 工具默认高风险且要求审批。
+  验收：内置、MCP、未知工具在 PLAN/ASK/AUTO 下使用同一策略；不存在 unknown -> LOW。
 
-- **[x] Provider retry 事件捕获**（observability）  
-  AgentEngine 当前无法感知 OpenAIProvider 内部重试——retry 逻辑封装在 `sendWithRetry()` 内。  
-  方案：ObservableLLMProvider decorator 已创建，但需在 ClawkitApp 装配时实际替换 provider 实例，并在 retry 计数能力可用后接入。
-  
-  ✅ 2026-07-11 — P0-O #3: ObservableLLMProvider 在 ClawkitApp.run() 中包装 provider；retry 计数待 OpenAIProvider 暴露回调后接入。
+- **[ ] MCP 元数据与坏参数保护**（tools / mcp）
+  adapter 映射 readOnly、riskLevel、destructive、requiresApproval；参数 JSON 解析失败返回协议错误，不替换成空对象调用远端。
+  验收：只读、高风险、未知风险、坏参数和异常 transport 均有测试。
 
-- **[x] `runPlanExecute()` 观测打点补充**（engine / observability）  
-  当前打点仅覆盖主 `run()` 方法（line 499），`runPlanExecute()`（line ~1631）是完全独立的代码路径，有独立的 provider 调用和 6 个 exit point。  
-  方案：为 `runPlanExecute()` 添加 RunStarted/RunCompleted 事件。
-  
-  ✅ 2026-07-11 — P0-O #1: runPlanExecute() 5 个 exit point 全部 fire RunCompleted（PLANNING_ERROR / PLAN_PARSE_ERROR / PLAN_REJECTED / COMPLETED）。
+### S2：工具生命周期
 
-- **[x] SubAgent 运行隔离**（engine / observability）  
-  `spawnSubAgent()`（line ~980）创建独立 AgentEngine 实例，子 agent 的 run 应产生独立 `<sub-run-id>/` 目录。当前子 run 的 FileRunRecorder 未被注册。  
-  方案：在子 AgentEngine 创建时注册 FileRunRecorder，父 run trace 中记录子 run ID 引用。
-  
-  ✅ 2026-07-11 — P0-O #2: 子引擎继承父引擎的 onRunEventListeners（含 FileRunRecorder），子 run 产生独立 trace 记录；不建独立目录避免碎片。
+- **[ ] BashTool 进程与输出模型**（tools）
+  并发 drain stdout/stderr，timeout 终止进程树，保留 exitCode，截断保留 head/tail 和总字节数。
+  验收：长 stdout、长 stderr、无输出、timeout、取消、非零退出码均有测试并进入 ToolExecutionResult。
 
-- **[x] internal tools 补充 fireToolStart/End**（engine）  
-  6 个 engine-internal tools（task/session_context/skill_load/skill_unload/memory_save/remember，lines ~867-900）不触发 fireToolStart/fireToolEnd，trace 链路不完整。  
-  方案：在 executeSequential 中为 internal tools 补充事件触发。
-  
-  ✅ 2026-07-11 — PR-0: currentRunId 提升为 AgentEngine 字段；PR-2: ToolCallExecutor + InternalToolRouter 统一处理 internal tools，所有 6 个 internal tool 均 fire ToolInvoked/ToolCompleted。
+- **[ ] WriteTool 覆盖确认**（tools / safety）
+  已存在的非空目标必须显式 overwrite 或经过审批，AUTO 也不能静默覆盖。
+  验收：ASK 可拒绝/修改，AUTO 缺少 overwrite 时拒绝，workspace 边界测试通过。
 
-- **[x] approval 事件接入观测**（engine / observability）  
-  approval 决策在 `executeSequential()` 内部（line ~955），无法访问 `run()` 方法中的 `currentRunId` 局部变量。当前 approval 事件未写入 trace。  
-  方案：将 currentRunId 提升为 AgentEngine 字段或以参数传递；或等 P0-R 拆分 executeSequential 后一并处理。
-  
-  ✅ 2026-07-11 — PR-0: currentRunId 提升为字段；PR-2: ToolCallExecutor 在审批点 fire ApprovalDecision 事件。
+- **[~] MCP 审计 JSONL**（tools / mcp）
+  已使用 Jackson 和 McpAuditRecord；需接入统一 risk/approval/result schema 并补测试。
+  验收：成功、失败、拒绝、坏参数均为同一合法 JSONL schema，敏感字段脱敏。
 
-- **[ ] Git 专用工具**（tools）  
-  封装 `git status`、`git diff`、`git log`、`git show`。  
-  验收：PLAN 模式可读；输出结构化；无需通过 bash 才能获得常用 git 信息。
-
-- **[ ] WriteTool 覆盖确认**（tools / safety）  
-  目标文件已存在时触发确认或强制参数。  
-  验收：`ASK` 模式可拦截覆盖；`AUTO` 模式也不能静默覆盖非空文件，除非显式传入 overwrite。
-
----
+- **[ ] Git 只读工具**（tools）
+  封装 `git status`、`git diff`、`git log`、`git show`，避免常见只读操作依赖 Bash。
+  验收：PLAN 可用、输出结构化、路径受 workspace 限制。
 
 ## P0-R：底层结构重构
 
-目标：把运行时状态、持久会话、工具执行、上下文管线和安全审计拆清楚。详细设计原则见 [DESIGN.md](DESIGN.md)。
+目标：通过迁移真实运行路径拆分超大类；不以新增类数量作为进度。
 
-### 重构约束
+### R0：重构护栏
 
-- 每次只移动一个职责边界，不在同一个 PR 中同时做大功能、新接口和大规模格式化。
-- 先补行为测试，再移动代码；重构 PR 默认不改变外部行为。
-- 行为变化必须写进验收标准和测试名，不能靠口头说明。
-- `AgentEngine`、`ClawkitApp`、`ToolRegistry`、`ContextPipeline` 相关改动必须说明模块边界是否变好。
-- 重构期间可以保留旧入口做适配层，等新路径覆盖稳定后再删除旧逻辑。
-
-### 结构风险
-
-- `AgentEngine` 混合主循环、工具执行、审批、compact、记忆、session、skill、plan、todo 追踪。
-- `ClawkitApp` 混合 REPL、slash command、审批 UI、session、memory、MCP、skill、IM。
-- runtime system message 和持久会话边界不清。
-- 工具风险模型、MCP 审计、Bash 生命周期、Provider 输出协议仍偏原型。
-
-- **[x] 建立重构护栏测试**（engine / cli / tools）  
-  覆盖 PLAN 只读、ASK 审批、runtime context 不持久化、compact 保留关键约束、Bash 长输出/超时、MCP 风险、slash command 不调 LLM。  
-  验收：P0-R 每一步重构前后都能跑对应测试。
+- **[~] 核心行为矩阵**（engine / tools / cli / observability）
+  覆盖普通 ReAct、TWO_STAGE、Plan、SubAgent、internal tools × 成功/失败 × PLAN/ASK/AUTO。
+  验收：每条主链迁移前后运行相同测试；文件测试使用临时目录。
   
-  ✅ 2026-07-11 — PR-0: 补齐 6 种 RunEvent 打点 + 295 测试全通过；PR-3: EphemeralContext 容器提取。
+  🔶 已有 295 个测试基线，但缺 ToolCallExecutor、BashTool、MCP adapter/audit、RunRecorder 和跨执行模式权限矩阵。
 
-- **[~] 拆分 `AgentEngine` 上帝类**（engine）  
-  按小 PR 拆出 `ToolCallExecutor`、`ContextPipeline`、`MemoryHooks`、`SkillRuntime`、`PlanRuntime`。  
-  验收：`AgentEngine` 只保留编排门面；每个拆分组件有独立单元测试；现有 AgentEngine 行为测试继续通过。
-  
-  🔶 2026-07-11 — PR-2: ToolCallExecutor + InternalToolRouter 拆分完成；PR-3: EphemeralContext 容器提取；ContextPipeline/MemoryHooks/SkillRuntime/PlanRuntime 推迟。
+### R1：唯一工具执行主链
 
-- **[~] 拆分 CLI 命令和交互层**（cli）  
-  拆出 `ReplLoop`、`SlashCommandRouter`、命令组、`ApprovalConsole`、`ConsoleRenderer`。  
-  验收：`ClawkitApp` 只负责装配依赖和启动；slash command 可独立单测；IM 开关不影响普通 CLI 流程。
-  
-  🔶 2026-07-11 — PR-5: ApplicationBootstrap + ApplicationContext（装配提取）、ConsoleRenderer（展示集中）、dispatchCommand()（路由分派提取）、OpenAIResponseParser（Provider 解析分离）。ReplLoop 和 ApprovalConsole 推迟（IM 通道耦合+审批UI依赖reader）。
+- **[~] 普通 ReAct 与 internal tools 接入 ToolCallExecutor**（engine）
+  普通 registry 与 task/session_context/skill/memory/remember 已接入；删除旧 `executeParallel()` / `executeSequential()` 和重复事件代码。
+  验收：AgentEngine 不直接执行 registry 工具；internal tools 返回结构化结果并产生一致事件。
 
-- **[x] 分离运行时上下文和持久会话**（engine / context）  
-  runtime context 不写入 session history，所有注入内容标记来源和生命周期。  
-  验收：连续多轮运行不会重复累积 `[Working Memory]`、`[Runtime]`、`[Related Past Sessions]` system 消息。
+- **[ ] 迁移 SubAgent 工具路径**（engine）
+  task 分派和子 engine 使用同一 executor、权限、审计、metrics 与独立 run scope。
+  验收：并行子任务不绕过审批、不串写 recorder，父子 run 可关联。
 
-  ✅ 2026-07-08 — 新增 workspaceContext / memoryContext / runtimeContext 三个 ephemeral 容器；sniffWorkspaceState、injectRelatedSessions、[Runtime]、[Working Memory] 重定向到对应容器；contextHistory = new ArrayList<>(sessionHistory) 打破别名；autoSaveSession 过滤 runtime 消息；clearSession 清空 ephemeral 容器。
+- **[ ] 迁移 PlanExecutor 工具路径**（engine）
+  执行和 reviewer 工具调用进入同一 executor，移除 `registry.execute()` 直调。
+  验收：Plan 的写工具受 ASK/AUTO、安全拦截和审计约束；trace 与普通 ReAct 字段一致。
 
-- **[~] 建立 `ContextPipeline` 输入输出模型**（engine / context）  
-  明确输入 `SessionHistory`、`RuntimeContext`、`MemoryContext`、`WorkspaceContext`、`SkillContext`，输出 `ModelContext` 和 `EphemeralContext`。  
-  验收：上下文管线可以独立测试；一次 run 结束后能明确哪些内容被持久化，哪些只是本轮注入。
+- **[ ] 提取 PlanRuntime**（engine）
+  将计划生成、解析、执行、失败恢复和结果汇总从 AgentEngine 移出；交互确认通过窄接口交给入口层。
+  验收：AgentEngine 只选择执行模式并委托；PlanRuntime 有独立成功、拒绝、解析失败和任务失败测试。
 
-  🔶 2026-07-08 — 容器模型已建立（workspaceContext/memoryContext/runtimeContext + assembleModelContext()）；预算模型已就绪（ContextBudgetAnalyzer/ContextBudgetPolicy/CompactionResult）。Pipeline 作为独立组件推迟到后续 PR。
+- **[ ] 删除旧路径并收窄 AgentEngine**（engine）
+  删除重复执行、审批、结果拼接和事件代码；AgentEngine 只保留 runtime 编排。
+  验收：新增工具无需修改 AgentEngine；R1 组件有独立测试；相关行为测试通过。
 
-- **[ ] 重构 MCP 工具元数据和风险模型**（tools / mcp / engine）  
-  支持 `readOnly`、`riskLevel`、`destructive`、`requiresApproval`，未知写工具默认按中高风险处理。  
-  验收：新增 MCP adapter 测试覆盖只读工具、高风险工具、未知风险工具。
+### R2：上下文、会话与记忆主链
 
-- **[x] 统一工具执行契约**（tools / engine）  
-  引入 `ToolMetadata`、`ToolExecutionRequest`、`ToolExecutionResult`，由 `ToolCallExecutor` 统一审批、缓存、超时、审计和结果回注。  
-  验收：engine 不直接拼工具错误；所有工具结果可以进入 metrics；新增工具不需要修改 AgentEngine 主循环。
-  
-  ✅ 2026-07-11 — PR-1: ToolMetadata/ToolRiskLevel/ToolExecutionRequest/ToolExecutionResult + Tool 默认适配方法；PR-2: ToolCallExecutor + InternalToolRouter 统一入口，AgentEngine 不再直接调 registry.execute()。
+- **[x] 分离 ephemeral context 与持久 session**（engine / context）
+  workspace/memory/runtime 容器已建立，自动保存过滤临时消息，clear 同步清空 ephemeral。
 
-- **[x] 修复 MCP 审计日志 JSONL**（tools / mcp）  
-  使用 Jackson 写合法 JSONL，记录时间、工具、动作、参数预览、结果、耗时、输出大小，并做脱敏。  
-  验收：审计日志能被 Jackson 逐行读取；失败和成功记录结构一致。
-  
-  ✅ 2026-07-11 — PR-4: McpAuditLogger 改为 Jackson ObjectMapper.writeValueAsString()；新增 McpAuditRecord 结构化 record；可注入日志路径。
+  ✅ 2026-07-08 — 连续多轮不重复持久化 Working Memory、Runtime 和 Related Sessions；相关回归测试通过。
 
-- **[ ] 修复 BashTool 输出读取和进程生命周期**（tools）  
-  并发 drain stdout/stderr，超时销毁进程，输出截断保留 head/tail 和退出码。  
-  验收：长输出命令、无输出命令、超时命令、非零退出码都有测试。
+- **[ ] 提取 ContextPipeline**（context / engine）
+  唯一入口组装 system、history、workspace、runtime、memory、skill、tools 和预算；输出 ModelContext 与预算报告。
+  验收：AgentEngine 不直接拼消息、compact 或过滤持久化内容；片段来源和生命周期可测试。
 
-- **[~] 收敛 Provider 输出协议**（provider / engine）  
-  明确 `ModelResponse`，把工具调用解析移到独立 parser，流式输出先解析和安全检查再执行。  
-  验收：provider 层只负责模型通信；engine 层只消费结构化响应；协议错误不会继续进入工具执行。
-  
-  🔶 2026-07-11 — PR-5: OpenAIResponseParser 提取完成（非流式解析独立可测）；OpenAIProvider.toMessage() 改为委托。SSE 流式 parser 和 ModelResponse 推迟。
+- **[ ] 提取 MemoryHooks**（engine / memory）
+  迁移 run 前召回、run 后抽取、保存和相关 session 注入。
+  验收：可注入 fake store；失败不污染 session；自动写入可关闭和审计。
 
-推荐顺序：护栏测试 -> `ToolCallExecutor` -> `ContextPipeline` -> MCP 风险和审计 -> BashTool -> CLI -> Provider 协议。
+- **[ ] 收敛 Session 持久化边界**（engine）
+  使用显式 SessionHistory/SessionStore 契约，持久化 schema 带版本号；运行时注入只能经 ContextPipeline 进入模型上下文。
+  验收：旧 session 可兼容读取；保存内容不含 ephemeral 消息；损坏文件和未知版本有结构化错误。
 
-### P0-R 方案评审遗留问题（2026-07-11 评审发现，待实施）
+- **[ ] 提取 SkillRuntime**（engine / context）
+  迁移 catalog、load/unload 和 SkillContext 生成。
+  验收：无模型 CLI 操作不污染 session；组件可独立测试。
 
-- **[ ] `ToolRiskLevel` 契约下沉**（tools / engine）
-  `ToolMetadata` 将定义在 `clawkit-tools`，不能复用 `clawkit-engine` 内的 `RiskLevel`，否则会违反 tools 不依赖 engine 的模块边界。
-  验收：tools 模块不依赖 engine；engine/CLI 的审批展示通过映射或迁移使用 tools 侧风险枚举。
+### R3：CLI 与入口主链
 
-- **[ ] `ToolCallExecutor` 覆盖所有执行路径**（engine）
-  不能只迁移 `AgentEngine` 普通工具路径；`PlanExecutor`、SubAgent 分派和 engine-internal tools 也必须进入统一执行、审批、审计和 metrics 链路。
-  验收：普通 run、plan-execute、SubAgent、task/session_context/skill/memory 内部工具都能产生一致的 ToolInvoked/ToolCompleted trace。
+- **[~] 唯一 ApplicationBootstrap**（cli）
+  已有 Bootstrap/Context/Renderer；删除 ClawkitApp 中的重复装配，并显式声明 provider/tools/observability 等实际源码依赖。
+  验收：服务只装配一次；POM 与 import 一致；IM 和普通 CLI 共用应用服务。
 
-- **[ ] Provider 观测使用 run/turn 作用域**（engine / provider / observability）
-  provider 事件不能只在 CLI 层包无上下文 decorator，否则无法可靠写入 runId、turnNumber 和 retry 信息。
-  验收：ProviderCallCompleted 由 engine 的调用上下文或 request-scoped hook 发出，trace 中没有孤立的 runId=null / turnNumber=0 记录。
+- **[ ] 拆分 ReplLoop、SlashCommandRouter 和 ApprovalConsole**（cli）
+  ClawkitApp 只负责 main/启动，Renderer 只展示。
+  验收：命令、审批、中断和 IM 开关独立测试；slash command 不调用 LLM。
 
-- **[ ] CLI 显式处理 observability 边界**（cli / observability）
-  CLI 当前直接使用 FileRunRecorder/RunReader，但 pom 只显式依赖 engine，长期会把 engine 的传递依赖当成公共契约。
-  验收：clawkit-cli 显式依赖 observability，或由 engine 暴露稳定 facade；编译不依赖隐式传递依赖。
+### R4：Provider 协议主链
 
-- **[ ] Provider parser 不吞坏工具参数**（provider / engine）
-  流式工具参数解析失败不能静默变成 `{}` 后继续进入工具执行。
-  验收：SSE tool call 参数坏 JSON 会产生结构化 parse error 或可观测 warning，不触发真实工具执行。
+- **[~] 统一 ModelResponse 与 parser**（provider / engine）
+  非流式 OpenAIResponseParser 已提取；继续统一流式 SSE、tool calls、finish reason、usage 和协议错误。
+  验收：engine 不解析具体 Provider JSON；坏工具参数不进入工具层。
 
-- **[ ] P0-R 测试隔离真实用户目录**（tests / observability / mcp）
-  MCP audit、run recorder、CLI 测试不得写入真实 `user.home/.clawkit` 或依赖本机日志配置。
-  验收：相关测试使用临时目录和 test logging 配置；全量测试不会因用户目录权限或 logback 配置噪声失败。
+- **[ ] request-scoped Provider 观测**（engine / provider / observability）
+  所有模型调用携带 runId、turn、phase、streaming、token、duration 和 retryCount。
+  验收：普通、phase1、compact、memory、Plan 和失败调用均有 ProviderCallCompleted；无 `runId=null` / `turn=0` 孤立指标。
 
----
+## P0-D：工程交付闭环
 
-## P0-D：工程闭环与项目可用性
+- **[ ] CI 测试流水线**（ci）
+  push/PR 运行 Java 21 全量测试、`git diff --check` 和必要静态检查。
 
-目标：让项目更容易运行、验证、展示和维护。
+- **[ ] Dockerfile 与 `.dockerignore`**（distribution）
+  构建并运行 shaded jar，明确配置和工作区挂载。
 
-- **[ ] GitHub Actions CI**（repo / ci）  
-  push / PR 执行 `mvn -B test`。
+- **[ ] 示例与演示路径**（docs / examples）
+  覆盖 CLI、权限模式、代码读写、测试和 MCP；不含真实密钥。
 
-- **[ ] Docker 最小运行环境**（distribution）  
-  新增 `Dockerfile` 和 `.dockerignore`，封装 Java 21 + shaded jar。
+- **[ ] 配置体验**（cli / config）
+  统一 env/config 优先级，提供 example config 和脱敏 `/config`。
 
-- **[ ] GitHub Release 产物**（distribution / ci）  
-  tag 发布时自动构建并上传可运行 jar。
+- **[ ] 用户可读错误**（cli / provider / tools）
+  常见错误展示原因、影响和下一步，不直接抛内部堆栈。
 
-- **[ ] 示例和演示路径**（docs / examples）  
-  提供最小 demo，覆盖 CLI、权限模式、读写代码、测试、MCP。
+- **[ ] 文档分层入口**（docs）
+  README 保持用户向；必要时新增 `docs/architecture.md`、`runtime.md`、`mcp.md`、`development.md`，避免根文档再次膨胀。
 
-- **[ ] 配置体验优化**（cli / config）  
-  梳理 env 和 config 优先级，提供 example 配置和 `/config` 脱敏展示。
+- **[ ] Release 产物**（ci / distribution）
+  tag 自动构建并发布可运行 jar；完成前不承诺稳定发行版。
 
-- **[ ] 用户可读错误信息**（cli / provider / tools）  
-  常见错误给出原因、影响和下一步建议，不直接抛内部堆栈。
+## P1：任务完成率
 
-- **[ ] 文档分层入口**（docs）  
-  README 保持轻量，详细内容进入 `docs/architecture.md`、`docs/runtime.md`、`docs/mcp.md`、`docs/development.md`。
+前置：P0-O/S/R 的关键链路稳定并可度量。
 
-- **[ ] GitHub 项目管理规范**（repo）  
-  整理 About、Topics、Issues、Milestones，Issues 只放可执行任务。
+- **[ ] 只读工具 session 缓存**：记录命中率，失效规则明确。
+- **[ ] 工具结果智能截断**：保留 head/tail、错误片段和匹配行。
+- **[ ] 任务感知 compact**：按任务类型保留不同证据。
+- **[ ] Provider fallback**：超时、限流、熔断后切备用模型并记录指标。
+- **[ ] 流式早停**：坏协议或明显无效输出中止，不进入工具层。
+- **[ ] 失败分类与恢复策略**：区分可重试、需用户输入、不可恢复。
 
-- **[ ] 编程规范检查清单 / Skills 化**（docs / agent）  
-  先把 `DESIGN.md` 规范整理成 checklist，高频流程再做 skill。
+## P2：成本与效率
 
----
+前置：Benchmark 能证明没有牺牲可靠性和完成率。
 
-## P1：任务完成率提升
+- **[ ] 自适应分层 compact**。
+- **[ ] 多模型路由**。
+- **[ ] Prompt caching**。
+- **[ ] 可重置的 Bash session 复用**。
+- **[ ] 记忆去重、冲突合并和衰减**。
 
-- **[ ] 应用层工具结果缓存**（tools / engine）  
-  对 read-only 工具做 session 级缓存，metrics 记录命中率。
+## P3：远程运维 Ops Loop 与高级扩展
 
-- **[ ] 工具结果智能截断**（tools / context）  
-  长输出保留 head/tail、错误片段和匹配行，避免污染上下文。
+前置：P0/P1 稳定，O2 Benchmark 可用，权限、取消、run 隔离、审计和恢复均可验证。
 
-- **[ ] 任务感知压缩策略**（context）  
-  compact 根据任务类型保留不同证据。
+Ops Loop 的主线是远程环境的“发现 → 采证 → 诊断 → 审批 → 修复 → 验证 → 回滚 → 复盘”，不包含自动修改业务代码。它是 clawkit 之上的运维应用，不是写入 AgentEngine 的垂类逻辑：
 
-- **[ ] Provider 降级链路**（provider）  
-  主模型超时、熔断或限流后自动切备用模型，并写入 metrics。
+```text
+clawkit Runtime
+  -> clawkit-ops-loop（状态机 / SOP / 调度）
+  -> clawkit-ops-mcp（结构化运维工具）
+  -> SSH
+  -> ops-fixtures / 云服务器
+```
 
-- **[ ] 流式早期终止**（provider / engine）  
-  检测明显坏输出时中止流并重试，避免错误进入工具层。
+建议目录：
 
-- **[ ] BashTool 增强**（tools）  
-  支持工作目录、环境变量白名单、跨平台 shell 策略。
+```text
+extensions/
+  clawkit-ops-mcp/
+  clawkit-ops-loop/
+ops-fixtures/
+  compose.yaml
+  cases/
+  assertions/
+  reports/
+```
 
----
+### OPS-0：本地可复现诊断闭环
 
-## P2：成本与效率优化
+- **[ ] Ops 四格检验与首批场景**（ops-fixtures）
+  选择同时满足重复性、可验证性、预算可控、工具齐备的场景。首批覆盖 app down、Nginx 502、端口未监听、Redis/DB 不可达、磁盘压力。
+  验收：每个 case 包含症状、关键证据、标准根因、允许/禁止工具、修复动作、验证断言和报告 schema。
 
-- **[ ] 自适应分层 compact**（context）  
-  按任务复杂度选择不同压缩策略，并记录 metrics。
+- **[ ] 本地故障注入环境**（ops-fixtures）
+  使用 Docker Compose 构造 nginx、app、postgres、redis、worker；故障可一键注入和恢复。
+  验收：同一 case 可重复运行，初始状态和清理过程确定，不依赖真实生产数据。
 
-- **[ ] 多模型路由**（provider）  
-  简单任务走小模型，复杂规划走强模型。
+- **[ ] 独立 `clawkit-ops-mcp` Server**（extensions / tools）
+  提供窄化只读工具：system snapshot、service/container status、logs、ports、disk、HTTP probe、DB/Redis health。SSH 只是工具 Server 的后端，不新增 clawkit MCP transport。
+  验收：不暴露通用 `shell_exec` / `ssh_exec(command)`；每个工具声明 schema、readOnly、riskLevel、timeout 和 auditFields。
 
-- **[ ] Prompt caching**（provider / context）  
-  缓存 system prompt、tool schema、repo 摘要。
+- **[ ] Incident 状态机与持久化**（clawkit-ops-loop）
+  状态至少覆盖 DISCOVERED、EVIDENCE_COLLECTED、DIAGNOSED、PLAN_READY、WAITING_APPROVAL、EXECUTING、VERIFYING、RESOLVED、ROLLED_BACK、ESCALATED。
+  验收：状态写入磁盘，可在进程中断后恢复；Incident 关联 clawkit runId、evidence、attempt、verification 和 playbook。
 
-- **[ ] Bash 会话复用**（tools）  
-  可选复用 shell session，必须支持 reset 并避免状态污染。
+- **[ ] Diagnosis Skill 与报告**（ops / skills）
+  强制按“事实 → 推理 → 候选根因 → 结论 → 缺失证据 → 建议动作”输出；证据不足返回 INCONCLUSIVE。
+  验收：本地 case 可计算关键证据覆盖率、根因命中率、平均工具数、耗时和 token。
 
-- **[ ] 记忆去重与合并**（memory）  
-  合并相似记忆，标记冲突记忆。
+### OPS-1：真实只读 SSH 运维
 
-- **[ ] 记忆衰减**（memory）  
-  给记忆增加时间权重，旧信息默认降权。
+- **[ ] SSH 执行后端**（clawkit-ops-mcp）
+  支持主机配置、密钥认证、known_hosts 严格校验、连接/命令 timeout、并发限制、输出截断和结构化错误。
+  验收：私钥不进入模型、日志或仓库；测试使用 fake SSH Server/transport；目标主机和命令模板均为 allowlist。
 
----
+- **[ ] 云服务器只读运维账号**（ops / infrastructure）
+  使用非 root、无 sudo 的专用账号，只开放所需日志、状态和健康检查权限；首个远程环境仅运行 fixture/演示服务。
+  验收：Agent 无法写文件、重启服务或执行任意命令；越权尝试被工具层和主机权限双重拒绝并审计。
 
-## P3：高级扩展能力
+- **[ ] 远程 Discovery Loop**（clawkit-ops-loop）
+  手动触发远程巡检，聚合 systemd/container、端口、HTTP 和日志证据，生成 Incident 与诊断报告。
+  验收：网络中断、SSH 鉴权失败、部分证据缺失和主机不可达均能分类并升级人工，不误判为业务根因。
 
-这些能力放在基座可靠性和观测能力稳定后推进。
+### OPS-2：审批修复、独立验证与回滚
 
-- **[ ] `/btw` 后台并行任务**（engine / cli）  
-  独立 AgentEngine 虚拟线程并发。前置：任务状态、日志、取消、资源隔离、metrics 稳定。
+- **[ ] 窄化远程写工具**（clawkit-ops-mcp）
+  仅提供 restart allowlisted service、switch known release、rollback release、cleanup fixture 等固定动作；禁止任意 sudo/bash/path。
+  验收：全部为 HIGH risk + requiresApproval；记录目标、前置状态、审批、exitCode、输出摘要和预期后置条件。
 
-- **[ ] 远程运维 MCP：分阶段验证项目**（tools / mcp / ops）  
-  Phase 0 本地沙箱模拟；Phase 1 只读 SSH；Phase 2 受控写操作；Phase 3 运维工作流。  
-  前置：MCP 风险模型、审计、ASK 审批、Bash timeout、输出截断、失败分类稳定。
+- **[ ] Remediation Skill**（ops / skills）
+  先查询 Playbook，再生成最小修复计划；每步包含 precheck、action、postcheck、rollback，最多自动重试 2–3 次。
+  验收：ASK 拒绝后零副作用；执行失败进入 VERIFYING/ROLLBACK_REQUIRED，不继续盲目尝试。
 
-- **[ ] 任务级回滚**（tools / engine）  
-  写入前保存 `.clawkit.bak`，支持按 task/action 回滚。
+- **[ ] 独立 Verification Agent**（ops / engine）
+  verifier 使用新上下文和独立采集的证据，不接受修复 Agent 的自证。优先执行确定性断言，再做模型复查。
+  验收：至少验证 exitCode、服务状态、端口、HTTP、原故障症状和新增 ERROR；能识别“隐藏日志而非解决问题”的假修复。
 
-- **[ ] 本地嵌入模型语义搜索**（memory / context）  
-  用 embedding 检索历史会话、代码片段、文档片段。
+- **[ ] 任务级回滚**（ops / tools）
+  写操作执行前记录可恢复状态；验证失败自动执行预定义回滚，回滚失败立即升级人工。
+  验收：每个写 case 有成功、修复失败、验证失败、回滚成功和回滚失败测试。
 
-- **[ ] GraalVM native-image**（cli）  
-  提供原生二进制版本，降低冷启动时间。
+### OPS-3：持续 Loop 与经验复利
 
----
+- **[ ] Discovery Automation**（ops / scheduling）
+  从手动触发升级为 Cron/健康告警触发；同类 Incident 去重并设置冷却窗口。
+  验收：连续运行三天不重复轰炸、不并发修复同一目标；支持暂停、取消和预算熔断。
+
+- **[ ] Playbook State**（ops / memory）
+  将已验证根因、证据模式、修复与回滚方案写成版本化 YAML；新事件先检索，命中后仍需重新验证前置条件。
+  验收：错误或过期 Playbook 不自动执行；记录来源、版本、命中次数、成功率和最后验证时间。
+
+- **[ ] Ops Benchmark 与回归对比**（ops / evaluation）
+  指标覆盖 discovery latency、证据覆盖、根因命中、计划可执行率、修复/回滚成功率、越权次数、假修复率、耗时和 token。
+  验收：每次 Skill、模型或 Runtime 改动可与 baseline 比较，退化时阻止自动化等级提升。
+
+- **[ ] 通知与人工升级**（ops / connector）
+  输出 Incident、证据、计划、风险、审批入口、验证和回滚结果；第一阶段可使用 CLI/文件报告，后续再接 IM。
+  验收：信息不足、预算耗尽、连续失败和高风险动作均可靠升级人工。
+
+### 其他高级扩展
+
+- **[ ] `/btw` 后台并行任务**。
+- **[ ] 本地 embedding 语义搜索**。
+- **[ ] GraalVM native-image**。
 
 ## 暂不优先
 
-- 预测性工具预热：主要节省 50-200ms，低于上下文和工具可靠性优先级。
-- 大而全垂类业务包：应作为上层插件/MCP/Skill，不写入底层引擎。
-- 自动高风险写操作：没有人审、审计、回滚之前不做。
+- 数据库观测平台和 Web dashboard。
+- 中心化多 Agent/Gateway/多租户平台。
+- 内置垂类业务包；应由插件、MCP、Skill 或 workflow 承担。
+- 无人工审批、审计和回滚的高风险自动写操作。
+- 无独立验证的生产自动修复；Ops Loop 在达到稳定 benchmark 前只用于 fixture/测试环境。
+- 自动修改业务代码、Git Worktree、自动提 CR 和发布 Pipeline；这些属于代码维护 Loop，不纳入当前 Ops Loop 主线。
+- 只能节省少量毫秒、但没有 benchmark 证明价值的微优化。
 
----
+## 验证记录
 
-## 最近测试记录
-
-最近文档记录（2026-07-05 前记录）：295/295 通过（tools 66 + provider 14 + context 45 + memory 32 + engine 69 + im 23 + cli 46）。
-
-本记录用于路线参考。每次实际合入前仍需重新跑相关测试。
+- 2026-07-11：O2 完成 — 4 PR / 37 evaluation 测试全部通过（22 PR1 + 7 PR2 + 2 PR3 + 6 PR4）。16 个固定 benchmark case，ScriptedProvider 严格校验，CapturingRecorder + FileRunRecorder 写入真实 O1 链路，6 个机械 Scorer，逐 case 回归对比。
+- 2026-07-11：O1 完成 — 4 PR / 186 测试全部通过（observability 71 + engine 69 + cli 46）。两文件契约（events.jsonl + summary.json）落地，metrics 改为 events 投影，不再持久化 metrics.jsonl。
+- 2026-07-11：文档记录的 Maven 汇总为 295 个测试通过；本记录仅作为基线，实际合入前必须重新运行相关测试。
+- 2026-07-11：TODO/CLAUDE/DESIGN 按”纲领 / 稳定设计 / 执行路线”重新分工；当前完成状态已按代码事实降级或重排。
+- 2026-07-11：补充远程运维 Ops Loop 路线，按本地 fixtures、只读 SSH、审批修复、独立验证和持续调度分阶段实施；代码修复 Loop 明确不在当前范围。

@@ -1,7 +1,6 @@
 package com.clawkit.observability;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import java.time.Instant;
 
 /**
  * 空操作 RunRecorder，默认实现，不产生 IO 开销。
@@ -9,10 +8,9 @@ import org.slf4j.LoggerFactory;
  */
 public final class NoopRunRecorder implements RunRecorder {
 
-    private static final Logger log = LoggerFactory.getLogger(NoopRunRecorder.class);
-
     @Override
-    public void accept(RunEvent event) {
+    public void record(RunEventPayload payload, String runId, String parentRunId,
+                        Integer turnNumber, Instant occurredAt) {
         // no-op: 观测功能未启用
     }
 }

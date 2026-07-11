@@ -1,372 +1,308 @@
 # clawkit 设计规范
 
-本文档记录 clawkit 的工程设计规范。它不是任务清单，也不是给模型看的长提示词，而是项目在重构和新增能力时应遵守的稳定设计约束。
+本文档记录长期稳定的工程设计约束，回答“代码应该如何组织和演进”。项目定位看 [CLAUDE.md](CLAUDE.md)，当前实施任务看 [TODO.md](TODO.md)。
 
-## 文档分工
+## 设计原则
 
-当前项目不建议只保留 `CLAUDE.md` 和 `TODO.md` 两个文档。两者够启动项目，但不够支撑长期重构。
+1. 底层保持通用，垂类能力通过 MCP、Skill、工具包、插件或 workflow 接入。
+2. 解耦用于隔离变化，不以增加接口、类和模块数量作为目标。
+3. 编排层只决定流程，具体执行、解析、持久化和展示由独立组件负责。
+4. 权限先于能力；任何副作用先定义风险、审批、审计和失败行为。
+5. 运行时上下文是缓存，磁盘上的 session、计划、记忆、审计和指标才是可追踪事实。
+6. 已知失败必须结构化、可解释、可恢复；未知失败保留 cause。
+7. 没有指标和回归测试的性能或可靠性优化不能宣称有效。
 
-建议的最小文档集：
+## 模块与依赖
 
-| 文档 | 责任 | 更新时机 |
+| 模块 | 公共职责 | 禁止承担 |
 | --- | --- | --- |
-| `README.md` | 面向用户的项目介绍、安装、运行、示例 | 用户使用方式变化时 |
-| `CLAUDE.md` | 面向 AI 协作者的项目定位、边界、开发约束 | 协作规则、架构边界变化时 |
-| `TODO.md` | 路线图、优先级、未完成任务、验收标准 | 新增/完成/调整任务时 |
-| `DESIGN.md` | 工程设计规范、接口原则、测试和审查标准 | 设计原则、公共契约、重构方向变化时 |
+| `clawkit-tools` | Tool 契约、结构化执行结果、内置工具、MCP adapter、安全拦截 | Agent loop、CLI、Provider 协议 |
+| `clawkit-provider` | 模型请求、响应解析、流式协议、重试、熔断、降级 | 工具执行、上下文压缩、业务决策 |
+| `clawkit-context` | Prompt 组装、预算、压缩、消息裁剪、Skill 上下文 | 会话持久化、工具副作用 |
+| `clawkit-memory` | 记忆存储、检索、去重、冲突和衰减 | Agent 流程 |
+| `clawkit-observability` | RunEvent、指标投影、记录器、reader | Agent 决策和 UI |
+| `clawkit-engine` | AgentRuntime、PlanRuntime、工具编排、会话协调 | 终端 UI、具体 Provider JSON、具体工具实现 |
+| `clawkit-im` | 消息通道 adapter | Agent 状态机和业务规则 |
+| `clawkit-cli` | composition root、REPL、slash command、展示、审批 UI | 核心执行规则 |
 
-后续如果设计决策变多，可以再增加 `docs/adr/`，用 ADR 记录重大取舍；现在先不需要过度拆分。
+依赖约束：
 
-文档瘦身原则：
+- 依赖必须单向、显式、无循环。
+- `tools`、`memory` 不依赖 `engine`、`cli`、`im`。
+- `provider` 和 `context` 可以依赖稳定的 tools schema，但不能依赖 engine。
+- `observability` 只依赖生成指标所需的稳定数据契约，不反向控制 engine。
+- `engine` 是运行时组装点，只消费抽象契约。
+- `cli`/`im` 只适配输入输出。composition root 可以实例化具体实现，但依赖必须在 POM 中显式声明。
+- 跨模块数据使用 record、enum、sealed interface 或窄接口；禁止以 `Map<String, Object>` 作为长期公共协议。
 
-- `README.md` 只写外部读者需要知道的项目介绍、运行方式和入口链接，不写内部重构细节。
-- `CLAUDE.md` 只写 AI 协作入口、项目边界和必须遵守的强约束，不复制本文件的详细规范。
-- `TODO.md` 只写路线、任务、前置条件和验收标准，不展开长篇方案。
-- `DESIGN.md` 只写稳定设计约束，不记录临时想法和一次性任务。
-- 当某一节超过 80 行且仍在增长时，优先考虑拆到 `docs/` 专题文档，而不是继续加长根目录文件。
+## 运行时边界
 
-## 总体原则
+目标执行结构：
 
-clawkit 是本地运行的编程 Agent 基座，核心质量来自可控、可测、可靠、可观测、可扩展。
+```text
+Input adapter
+  -> AgentRuntime
+      -> ContextPipeline
+      -> LLMProvider
+      -> ModelResponse
+      -> ToolCallExecutor
+          -> PermissionPolicy
+          -> ToolRegistry / InternalToolRouter
+          -> ToolExecutionResult
+      -> MemoryHooks / SessionService
+      -> RunEvent sink
+  -> Output adapter
+```
 
-设计时优先遵守：
+### AgentRuntime
 
-1. 底层保持通用，上层通过工具、MCP、Skill、Workflow 或插件接入垂类能力。
-2. 确定性流程优先于自由 ReAct。能用结构化 workflow 解决的问题，不依赖模型自由发挥。
-3. 运行时上下文只是缓存，磁盘上的 session、日志、指标和审计记录才是可追踪事实。
-4. 权限先于能力。任何新工具、新通道、新写操作都必须先定义风险等级和审计方式。
-5. 失败必须可解释、可恢复、可复盘，不允许只返回模糊异常。
-6. 先建立观测，再谈优化。没有指标的优化不应作为核心改动合入。
+Agent runtime 管理一次任务的生命周期，只负责：
 
-## 模块边界
+- run/turn 状态推进和最大轮次。
+- 调用 ContextPipeline、Provider 和 ToolCallExecutor。
+- 根据结构化结果决定继续、完成、失败或中断。
+- 发出带 run/turn 作用域的事件。
 
-模块依赖应保持单向、窄接口、无循环依赖。
+它不应直接：
 
-| 模块 | 职责 | 不应承担 |
+- 解析 Provider JSON/SSE。
+- 按工具名推断风险或拼装工具错误文本。
+- 读写终端、用户 HOME 或具体日志文件。
+- 组装 memory/skill/runtime system message。
+- 执行具体工具或维护多套并行/串行工具逻辑。
+
+一次 run 的可变状态应集中在显式 `RunContext`/`AgentRuntime` 实例中。跨 run 共享的配置和服务尽量不可变；`currentRunId`、turn、临时消息等不得成为可被并发 run 覆盖的全局状态。
+
+### 执行模式
+
+| 模式 | 用途 | 必须共用的底层链路 |
 | --- | --- | --- |
-| `clawkit-tools` | 工具契约、内置工具、MCP adapter、安全拦截 | Agent loop、CLI 交互、Provider 细节 |
-| `clawkit-provider` | LLM API 适配、流式解析、重试、熔断、降级 | 工具执行、上下文压缩、业务决策 |
-| `clawkit-context` | Prompt 组装、压缩、消息裁剪、Skill 加载 | 会话持久化、工具副作用 |
-| `clawkit-memory` | 本地记忆存储、检索、去重、衰减 | Agent 执行流程 |
-| `clawkit-engine` | Agent runtime、执行模式、工具调用编排、审批 | 终端 UI、具体 Provider JSON、具体 IM 协议 |
-| `clawkit-cli` | 命令行入口、REPL、slash 命令、输出展示 | 核心业务规则 |
-| `clawkit-im` | 飞书、微信等消息通道适配 | Agent 内部状态机 |
+| ReAct | 开放式探索和代码任务 | ContextPipeline、Provider、ToolCallExecutor、RunEvent |
+| TWO_STAGE | 先规划再执行 | 两阶段均使用 Provider 观测；第二阶段共用工具链 |
+| Plan-and-Execute | 结构化多步任务 | PlanRuntime 调用同一 ToolCallExecutor 和权限策略 |
+| SubAgent | 独立或并行子任务 | 独立 run scope、同一工具/观测契约、禁止递归派发 |
 
-硬性约束：
+执行模式可以改变编排，不能创建权限、审计和工具执行旁路。
 
-- `tools` 是底层模块，不能依赖 `engine`、`cli` 或 `im`。
-- `engine` 只依赖抽象的 `LLMProvider` 和 `Tool` 契约，不直接绑定 OpenAI DTO 或具体工具实现。
-- `cli` 和 `im` 只做入口适配，不拥有 Agent 核心状态机。
-- 新功能放到能表达其职责的最窄模块，避免把所有逻辑塞进 `AgentEngine` 或 `ClawkitApp`。
+## 工具执行契约
 
-## 编程规范
+唯一执行入口是 `ToolCallExecutor`。普通工具、MCP、Plan、SubAgent 和 engine-internal tools 必须进入同一链路。
 
-命名：
+### ToolMetadata
 
-- 包名使用全小写：`com.clawkit.tools`。
-- 类、接口、枚举使用 PascalCase：`AgentRuntime`、`ToolCallExecutor`。
-- 方法、变量使用 camelCase：`executeToolCall`。
-- 常量使用 UPPER_SNAKE_CASE：`DEFAULT_TIMEOUT_SECONDS`。
-- 测试类使用被测类名加 `Test`：`BashToolTest`。
+每个工具至少声明：
 
-编码风格：
+- `name`、`description`、窄化的 `inputSchema`。
+- `readOnly`、`riskLevel`、`destructive`、`requiresApproval`。
+- 副作用集合、timeout 策略和输出限制。
 
-- 默认使用 Java 21 能力，优先使用 `record` 表达不可变数据。
-- 可枚举的状态优先使用 `enum` 或 `sealed interface`，避免裸字符串散落。
-- 公共方法参数必须校验，错误信息要包含可定位上下文。
-- 不在业务代码里吞异常。已知错误走结构化错误，未知错误保留原始 cause。
-- 不在核心逻辑里直接 `System.out.println`，统一走日志或上层输出接口。
-- 配置项必须有默认值、来源说明和边界校验。
-- 文件路径必须经过 workspace/root 边界校验，禁止直接信任模型生成路径。
-- 时间、随机数、系统环境、当前目录等外部状态应通过可注入接口隔离，方便测试。
+未知工具使用保守默认值：非只读、高风险、可能破坏、需要审批。不得由 UI 或 engine 按名称维护第二套风险表。
 
-复杂度约束：
+### ToolExecutionRequest / Result
 
-- 单个类超过 300 行时，应检查职责是否过多。
-- 单个类超过 500 行时，除非是纯数据映射或生成代码，否则应拆分。
-- 单个方法超过 60 行时，应检查是否混合了校验、编排、执行、格式化。
-- 出现超过 3 层嵌套时，应优先抽取小方法或使用早返回。
+请求应包含 toolCallId、工具名、结构化参数，以及需要的执行作用域。结果至少表达：
 
-## 类设计规范
+- 成功或失败。
+- errorCode、message 和原始 cause/详情。
+- duration、outputBytes、truncated、exitCode。
+- metadata、审批决策和审计关联信息。
 
-类应该表达明确角色，不要把多种角色混在一起。
+旧的 `execute(String) -> Result<String>` 只允许作为迁移适配层。适配层不得吞异常、丢失错误码或把坏参数替换成空对象继续执行。
 
-常见角色：
+### 执行顺序
 
-| 类型 | 职责 | 设计要求 |
-| --- | --- | --- |
-| Value Object | 表达不可变值，如 `ToolCall`、`ErrorInfo` | 使用 `record`，不包含 IO |
-| Entity | 有身份和生命周期的对象，如 session | 明确 id、版本、持久化边界 |
-| Service | 执行无状态或轻状态业务逻辑 | 构造器注入依赖，便于测试 |
-| Runtime | 管理一次任务运行过程 | 生命周期清晰，不应长期持久化内部临时状态 |
-| Adapter | 适配外部协议或三方 API | 不泄露外部 DTO 到核心模块 |
-| Repository/Store | 读写本地状态 | 负责序列化、迁移、错误恢复 |
-| Formatter | 输出格式化 | 不改变业务状态 |
+- 多个只读、相互独立的工具可以并行。
+- 写工具、高风险工具、internal tools 默认串行。
+- 并行任务必须有取消、超时和异常归并；任一线程失败不能让 latch 永久等待。
+- 结果按原 tool call 顺序回注，事件携带实际完成时间。
 
-禁止型设计：
+### Bash 与进程
 
-- 上帝类：同一个类同时负责状态机、工具执行、上下文拼装、日志、持久化和 UI。
-- 隐式单例：核心服务通过静态全局状态共享可变数据。
-- 贫血但混乱的数据包：大量 `Map<String, Object>` 在模块间传递。
-- 神秘副作用：方法名像查询，实际会写文件、发消息或修改 session。
+- stdout/stderr 必须并发 drain，避免缓冲区阻塞。
+- timeout 后先正常终止，再强制终止进程树；返回明确 timeout 状态。
+- 结果保留 exitCode；非零退出码不得伪装成成功。
+- 截断保留 head/tail、总字节数和 truncated 标记。
+- 工作目录固定在 workspace，环境变量使用白名单或显式传入。
 
-推荐做法：
+## 权限与安全
 
-- 编排类只做流程分发，具体能力下沉到小服务。
-- 数据类保持不可变，状态变更通过显式命令或结果对象表达。
-- 对外暴露的构造器保持少而清晰，测试中可以注入 fake 实现。
-- 重构大类时先抽接口和测试，再移动逻辑，避免一次性改动行为。
-
-## 接口设计规范
-
-接口应该小、稳定、可测试。
-
-公共接口要求：
-
-- 名称表达能力边界，而不是实现方式。
-- 输入输出使用明确类型，避免裸 `String` 或 `Map` 贯穿核心路径。
-- 返回值能表达成功、失败、部分成功、需要审批、可重试等状态。
-- 错误对象至少包含 `code`、`message`、`details`、`cause` 或等价信息。
-- 外部协议变化不能直接污染核心接口，应通过 adapter 层转换。
-
-工具接口要求：
-
-- 每个工具必须声明 `name`、`description`、`inputSchema`、`readOnly`、`riskLevel`。
-- 写工具必须声明副作用范围、审批策略和审计字段。
-- 工具输出优先结构化；如果只能返回文本，也要稳定包含状态、摘要和错误信息。
-- MCP 工具的风险不能默认低风险。缺少元数据时，应按保守策略处理。
-
-Provider 接口要求：
-
-- Provider 层只表达模型调用能力，不理解业务任务。
-- API 错误必须分类：鉴权、限流、超时、上下文过长、schema 错误、服务端错误、内容协议错误。
-- 重试和降级策略必须可观测，写入 metrics。
-- 流式输出解析失败时应能中止、重试或降级，不能继续把坏协议送到工具层。
-
-## 解耦设计规范
-
-解耦不是为了多写接口，而是为了隔离变化。
-
-必须解耦的变化点：
-
-- 模型 Provider：OpenAI-compatible、Anthropic、DeepSeek 等不能污染 engine。
-- 工具来源：内置工具、MCP 工具、未来插件工具必须走统一 Tool 契约。
-- 入口通道：CLI、IM、未来 GUI 只应差异在输入输出适配。
-- 上下文策略：压缩、记忆召回、Skill 注入应能独立演进。
-- 权限策略：PLAN、ASK、AUTO 和更细粒度策略应从工具执行中抽离。
-- 审计指标：日志和 metrics 不应散落在业务分支里，应通过统一 recorder 写入。
-
-重点重构方向：
-
-- `AgentEngine` 应逐步拆成 `AgentRuntime`、`ToolCallExecutor`、`ContextPipeline`、`MemoryHooks`、`SkillRuntime`、`PlanRuntime`。
-- `sessionHistory` 只保存真实对话事实，runtime system message 应进入 ephemeral context。
-- `ToolCallExecutor` 负责审批、并行/串行执行、结果回注和审计，不由 Agent 主循环直接拼细节。
-- `ContextPipeline` 负责 system prompt、history、memory、skill、compact 的组合和预算。
-- `ClawkitApp` 应只保留 CLI 交互和命令路由，业务行为下沉。
-
-## 上下文与会话规范
-
-Agent 的上下文问题必须显式建模。
-
-会话历史：
-
-- 只保存用户输入、助手回复、工具调用和工具结果等真实对话事实。
-- 不保存临时提醒、进度注入、相关历史 session 提示、working memory 展示文本。
-- 持久化格式应支持版本号，便于迁移。
-
-运行时上下文：
-
-- 使用 ephemeral context 表达当轮临时注入内容。
-- 每个注入片段应标明来源、生命周期、优先级和是否允许 compact。
-- compact 结果必须能解释来源，避免把过期信息压缩成“事实”。
-
-记忆：
-
-- 记忆召回应标明来源和时间，不应伪装成当前事实。
-- 自动写记忆必须去重、可关闭、可审计。
-- 冲突记忆不能静默覆盖，应保留冲突标记或降低置信度。
-
-## 工具与权限规范
-
-工具是 Agent 的手脚，必须比普通函数更严格。
-
-工具设计要求：
-
-- 单个工具只做一类动作，不做复合业务编排。
-- 工具参数必须使用 JSON Schema 描述，schema 要尽量窄。
-- 工具执行必须有 timeout、输出截断、错误分类和审计。
-- 文件写入、命令执行、远程调用、消息发送都属于高关注副作用。
-- Bash 类工具必须并发 drain stdout/stderr，避免长输出阻塞。
-- 写文件默认不能静默覆盖非空文件，除非显式传入 overwrite 或经过审批。
-
-权限策略：
-
-| 模式 | 允许行为 |
+| 模式 | 行为 |
 | --- | --- |
-| `PLAN` | 只允许只读工具和计划生成 |
-| `ASK` | 写操作和高风险操作需要人工审批 |
-| `AUTO` | 可以自动执行低风险动作，但仍受安全拦截和审计约束 |
+| `PLAN` | 只暴露和执行只读工具 |
+| `ASK` | 写操作、高风险或要求审批的工具执行前请求人工决定 |
+| `AUTO` | 可自动执行允许的操作，仍受 SafetyInterceptor、workspace 和审计限制 |
 
-审计要求：
+规则：
 
-- 审计日志必须是合法 JSONL，不手拼 JSON。
-- 每条记录至少包含时间、工具名、参数摘要、风险等级、审批结果、执行结果、耗时、输出大小。
-- 参数摘要必须做长度限制和敏感字段脱敏。
+- 权限判断读取 ToolMetadata，不读取提示词或工具名硬编码。
+- 未知 MCP 工具默认高风险，不能因缺失元数据降为只读。
+- 写文件默认不能静默覆盖非空文件，除非显式 overwrite 或审批结果允许。
+- 文件路径必须 normalize 并验证位于允许 root 内；额外只读 root 不能变成写 root。
+- 审批结果必须区分 approve、approve-same-type、reject、modify，并进入结果与 RunEvent。
+- SafetyInterceptor 是最后防线，AUTO 也不能绕过。
+
+## Provider 契约
+
+Provider 层只负责通信和协议，不理解任务业务。
+
+### ModelResponse
+
+engine 消费统一 `ModelResponse`，不直接消费 OpenAI/Anthropic DTO。它至少表达：
+
+- assistant content、reasoning、tool calls。
+- finish reason、模型、token usage。
+- 协议错误或部分流式结果。
+
+工具参数 JSON 解析失败属于协议错误，不能静默变成 `{}` 并触发工具。
+
+### 失败分类
+
+至少区分：鉴权、限流、timeout、上下文过长、schema/protocol、服务端错误、网络错误、取消。重试只用于明确可重试的类别，并遵守最大次数和退避策略。
+
+每次 Provider 调用必须携带 request-scoped 的 runId、turn、phase、streaming、duration、retryCount、token usage 和最终错误。慢思考、compact、记忆抽取和 Plan 不能成为观测盲区。
+
+## 上下文、会话与记忆
+
+### ContextPipeline
+
+唯一模型上下文组装入口接收：
+
+- 稳定 system prompt 与 workspace rules。
+- 持久 `SessionHistory`。
+- `WorkspaceContext`、`RuntimeContext`、`MemoryContext`、`SkillContext`。
+- Tool definitions/results 和预算策略。
+
+输出 `ModelContext` 以及可解释的预算报告。每个片段需标明 source、lifecycle、priority、token count、是否允许 compact 和是否允许持久化。
+
+### 持久化边界
+
+Session 只保存真实对话事实：用户输入、助手响应、工具调用和工具结果。以下内容默认 ephemeral：
+
+- `[Runtime]` 提醒和循环警告。
+- Working memory 展示文本。
+- Related sessions 注入。
+- Workspace 快照和临时 Skill 提示。
+- TWO_STAGE 的中间推理消息。
+
+自动保存前仍需执行持久化过滤，防止上游误用污染历史。Session schema 应有版本号。
+
+### Compact
+
+- 触发阈值来自明确的模型窗口和预算策略。
+- compact 前后都记录分区 token、保留约束和丢弃内容摘要。
+- 必须保留用户约束、文件路径、错误证据、未完成 todo 和审批边界。
+- compact 后重新预算；超过硬限制时结构化失败，不继续盲目调用模型。
+
+### Memory
+
+- 记忆标明来源、时间和置信度，不伪装成当前事实。
+- 自动写入可关闭、可审计、可去重。
+- 冲突记忆保留冲突或降权，不静默覆盖。
+- MemoryHooks 负责 run 前召回和 run 后提取，Agent loop 不直接操作具体 store。
+
+## 观测设计
+
+RunEvent 是运行时与持久化的边界。业务代码只发事件，不直接写 JSONL。
+
+### 事件作用域
+
+- 每个事件包含 runId；turn/provider/tool 事件还包含 turnNumber。
+- 每个 RunStarted 恰有一个 RunCompleted。
+- 并发 run 按 runId 管理独立 recorder 状态和 writer。
+- SubAgent 使用独立 runId，并通过 parentRunId 或显式父子事件关联。
+
+### 本地文件契约
+
+```text
+.clawkit/runs/<run-id>/
+  events.jsonl
+  summary.json
+```
+
+- `events.jsonl` 是唯一事实来源，每行一个 `RunEventEnvelope`，包含 `RunEventPayload` 的 13 种类型化子类型。
+- `summary.json` 由 `RunAccumulator` 从事件聚合生成，原子写入，是 events 的快照索引。
+- `/metrics` 从 events 动态投影指标（`RunMetricsProjector` + `RunAccumulator`），不持久化第二份 JSONL。
+- 原始 prompt、工具参数、工具输出和敏感凭据不落盘；只写有长度限制的脱敏摘要。
+- Reader 流式逐行容错：单行损坏跳过并报告 warning，不让整份记录不可用。
+- 并发 run 按 `ConcurrentHashMap<String, RunState>` 管理独立 writer、lock、sequence 和 accumulator。
+
+## CLI 与 IM
+
+- `ApplicationBootstrap` 是唯一 composition root；同一种服务只能装配一次。
+- `ClawkitApp` 只负责进程入口和启动，不维护业务状态。
+- `ReplLoop` 管输入循环和中断；`SlashCommandRouter` 管命令分发；`ApprovalConsole` 管人工审批；`ConsoleRenderer` 只格式化输出。
+- Slash command 不应为了查询状态调用 LLM。
+- CLI 和 IM 共用同一应用服务，不复制 Agent 执行逻辑。
+- IM 的并发消息必须遵守 engine 的 busy/queue/cancel 约束，通道关闭必须释放线程和连接。
+
+## 错误与生命周期
+
+结构化错误至少包含 code、message、details、retryable 和 cause（适用时）。
+
+- 查询方法不得产生隐藏写入。
+- catch 后不能只返回 `"failed"` 或空字符串。
+- InterruptedException 必须恢复中断标志并停止相关工作。
+- 资源使用 try-with-resources 或明确 close；run 失败也必须关闭 writer/process/transport。
+- 时间、用户目录、环境变量、网络 transport 和文件 store 应可注入，便于测试。
+
+## 代码约束
+
+- Java 21；不可变数据优先 record，有限状态优先 enum/sealed interface。
+- 构造器注入依赖，避免静态全局可变状态。
+- 单类超过 300 行检查职责，超过 500 行原则上必须拆分。
+- 单方法超过 60 行或嵌套超过 3 层时检查是否混合校验、编排、执行和格式化。
+- 核心逻辑不直接 `System.out`，由日志或输出 adapter 处理。
+- 配置必须有默认值、来源、优先级和边界校验。
 
 ## 测试规范
 
-测试要覆盖真实风险，而不是只追求数量。
-
-测试分层：
-
-| 层级 | 目标 | 示例 |
-| --- | --- | --- |
-| Unit Test | 验证纯逻辑和边界条件 | schema 清洗、路径校验、错误分类 |
-| Component Test | 验证模块内部协作 | tool executor、context pipeline |
-| Integration Test | 验证跨模块行为 | read/edit/bash 与 engine 的组合 |
-| Manual Demo | 验证真实外部服务 | 真实模型、真实网络、真实 IM |
-| Benchmark/Eval | 验证 Agent 完成质量 | 20 个编程任务基准 |
+| 层级 | 目标 |
+| --- | --- |
+| Unit | 纯逻辑、schema、风险映射、错误分类 |
+| Component | ToolCallExecutor、ContextPipeline、RunRecorder、parser |
+| Integration | 各执行模式跨模块链路、权限和持久化 |
+| Manual | 真实模型、网络、IM 和外部 MCP |
+| Benchmark | 固定任务完成率、轮次、耗时、工具失败率 |
 
 硬性要求：
 
-- 每个 bug fix 必须补回归测试，除非不可自动化，并在说明中解释。
-- 单元测试不得依赖真实 API key、真实网络、用户 HOME 目录中的真实配置。
-- 文件系统测试必须使用临时目录，并覆盖 Windows 路径和相对路径边界。
-- Provider 测试优先使用 fake HTTP 或 mock transport。
-- MCP 测试必须覆盖只读工具、高风险工具、未知风险工具和异常 transport。
-- BashTool 测试必须覆盖长输出、stderr、超时、非零退出码和无输出命令。
-- Context 测试必须覆盖 token 预算、压缩前后关键约束保留、runtime context 不落盘。
-- 审批测试必须覆盖 PLAN 拦截、ASK 审批、AUTO 安全拦截。
+- bug fix 必须有回归测试，除非无法自动化并说明原因。
+- 测试不得依赖真实 API key、真实网络或真实用户 HOME。
+- 文件测试使用临时目录；覆盖 Windows 路径与 workspace 逃逸。
+- Provider 使用 fake transport；MCP 覆盖只读、高风险、未知风险和异常 transport。
+- Bash 覆盖 stdout/stderr、长输出、无输出、timeout、非零退出码和取消。
+- Engine 覆盖普通 ReAct、TWO_STAGE、Plan、SubAgent、internal tools 的成功与失败。
+- Observability 覆盖合法 JSONL、脱敏、失败收尾、并发 run 隔离和 reader 容错。
+- 测试名表达行为，例如 `shouldRejectUnknownMcpToolInPlanMode`。
 
-测试命名：
+## 代码审查
 
-- 正常路径：`shouldExecuteReadOnlyToolInPlanMode`
-- 边界路径：`shouldRejectPathOutsideWorkspace`
-- 回归测试：`shouldNotPersistRuntimeMemoryIntoSessionHistory`
+审查顺序：
 
-测试目录治理：
+1. 阻断问题：权限绕过、workspace 逃逸、上下文污染、密钥、数据损坏。
+2. 行为回归：执行模式、错误、取消、持久化、兼容性。
+3. 模块边界：旁路、循环依赖、传递依赖、外部 DTO 泄漏。
+4. 测试缺口：成功、失败、边界和并发。
+5. 设计与维护性：命名、重复、职责和复杂度。
 
-- `src/test/java` 只放稳定、可自动化、CI 可运行的测试。
-- 需要真实 API Key、真实网络、真实 IM、人工观察的代码归为 Manual Demo，不放入核心测试路径。
-- Manual Demo 可移到 `examples/`、`src/manual/java` 或独立 Maven profile。
-- Benchmark/Eval 单独管理输入、期望结果和报告，不和普通单元测试混在一起。
-- 大测试类超过 300 行时，优先抽公共 fixture、fake provider、fake registry 或按行为拆分，不通过删除断言瘦身。
+出现以下情况不得合入：
 
-## 代码审查规范
+- 写文件、执行命令、远程调用或发消息没有权限判断和审计。
+- PLAN 可执行写工具，ASK 可绕过审批，AUTO 可绕过 SafetyInterceptor。
+- runtime/memory/related-session 临时文本被持久化到 session。
+- Provider 坏工具参数仍进入真实工具。
+- 新执行路径绕过 ToolCallExecutor 或 RunEvent。
+- 核心边界改动没有回归测试。
+- 提交包含密钥、Token、Webhook 或私有配置。
 
-代码审查先看风险，再看风格。审查目标不是挑语法问题，而是防止模块边界、权限、安全、上下文和测试体系继续劣化。
+## 渐进式重构
 
-### 审查输出格式
+1. 用行为测试固定旧路径。
+2. 创建新组件和结构化契约，保留最薄适配层。
+3. 迁移一条实际运行路径。
+4. 验证成功、失败、权限和观测。
+5. 迁移剩余路径。
+6. 删除旧代码和重复状态。
+7. 更新 TODO 状态和文档。
 
-代码审查应按以下顺序输出：
-
-1. **阻断问题**：必须修复后才能合入。
-2. **高风险问题**：不一定阻断，但需要明确取舍和后续任务。
-3. **测试缺口**：哪些关键路径没有验证。
-4. **设计建议**：命名、职责、接口、重复代码等改进建议。
-5. **结论**：可合入 / 修复后合入 / 不建议合入。
-
-如果没有发现问题，也要说明仍然存在的测试盲区或残余风险。
-
-### 阻断项
-
-出现以下情况时，不应合入：
-
-- 写文件、执行命令、远程调用、发消息等副作用没有权限判断或审计。
-- `PLAN` 模式可以执行写工具或高风险工具。
-- `ASK` 模式绕过人工审批。
-- runtime context、working memory、related sessions 等临时内容被持久化进 session 或 memory。
-- 工具路径可以逃逸 workspace/root。
-- 新增工具没有 JSON Schema、风险等级、超时、错误分类或测试。
-- Provider 鉴权失败、限流、上下文过长等已知错误被当作普通异常吞掉。
-- 重构改动没有护栏测试，且触碰 `AgentEngine`、`ToolRegistry`、`ContextPipeline`、`ClawkitApp` 等核心边界。
-- 提交中包含密钥、Token、Webhook、真实私有路径或本地配置。
-
-### 通用审查清单
-
-- 需求范围：改动是否只覆盖本次目标，是否夹带无关重构。
-- 模块边界：逻辑是否放在正确模块，是否引入循环依赖。
-- 接口契约：输入输出、错误、权限、生命周期是否清楚。
-- 安全权限：写文件、执行命令、远程调用是否可审批、可审计、可回滚。
-- 上下文污染：runtime 注入是否错误进入 session 或 memory。
-- 失败路径：timeout、异常、部分成功、重试失败是否有明确行为。
-- 可观测性：关键工具调用、Provider 降级、compact、审批是否写 metrics 或审计。
-- 测试覆盖：是否覆盖成功、失败、边界、回归。
-- 兼容性：是否破坏已有 session、配置、CLI 参数、工具 schema。
-- 文档更新：公共契约或设计原则变化是否更新 `DESIGN.md` / `CLAUDE.md` / `TODO.md`。
-
-### 分类型审查重点
-
-| 改动类型 | 审查重点 |
-| --- | --- |
-| Engine / Agent loop | 状态机是否清楚；最大轮次、中断、失败恢复、工具回注是否仍然正确 |
-| Tool / MCP | schema 是否足够窄；风险等级是否保守；输出是否可截断、可审计、可测试 |
-| Context / Memory | 是否区分持久事实和运行时注入；compact 是否保留用户约束、路径、错误和 todo |
-| Provider | 错误是否分类；重试和熔断是否可观测；流式协议错误是否会进入工具层 |
-| CLI / IM | 是否只做入口适配；是否把业务状态写进 UI 层；中断和并发消息是否安全 |
-| Docs / Config | 文档是否描述当前真实能力；示例是否含密钥；配置优先级是否一致 |
-
-### AI 生成代码审查重点
-
-对 AI 生成或大规模辅助生成的代码，额外检查：
-
-- 是否引入看似合理但项目中不存在的类、方法、配置项或命令。
-- 是否复制了旧接口风格，绕过新的设计约束。
-- 是否用宽泛 catch、裸字符串、`Map<String, Object>` 掩盖契约不清。
-- 是否只覆盖 happy path，没有失败、边界和回归测试。
-- 是否出现“为了测试通过”而降低断言、跳过错误路径或删除安全检查。
-- 是否把提示词里的临时概念写成永久架构。
-
-高风险信号：
-
-- 大量新增 `Map<String, Object>`。
-- 新增静态全局可变状态。
-- 直接在 engine 中解析具体 Provider JSON。
-- 写操作没有审批或审计。
-- catch 异常后只返回 `"failed"`。
-- 为通过测试修改测试断言而非修复行为。
-- 一个 PR 同时改架构、功能、格式化和文档，难以回滚。
-
-## 重构规范
-
-底层重构应使用渐进式迁移。
-
-推荐流程：
-
-1. 先补当前行为测试，固定可观察行为。
-2. 抽出新接口或新组件，但保留旧入口。
-3. 迁移一条最小路径，让新组件跑通。
-4. 扩展覆盖其他路径。
-5. 删除旧逻辑和重复代码。
-6. 更新文档和 TODO。
-
-重构验收：
-
-- 现有测试继续通过。
-- 新组件有独立测试。
-- 行为变化有明确说明。
-- 失败路径没有变得更模糊。
-- 指标、审计、日志不倒退。
-
-## 完成定义
-
-一个底层改动只有同时满足以下条件，才算完成：
-
-- 功能行为符合需求。
-- 关键失败路径有测试。
-- 权限、审计、metrics 没有绕开。
-- 模块边界没有变差。
-- 文档和 TODO 已同步。
-- 本地相关测试已运行，无法运行时必须说明原因。
-
-## 当前文档策略结论
-
-`CLAUDE.md` + `TODO.md` 不够。
-
-更合理的是：
-
-- `CLAUDE.md` 保持为项目纲领和 AI 协作规则。
-- `TODO.md` 保持为可执行路线图。
-- `DESIGN.md` 承接工程设计规范和代码审查标准。
-
-暂时不需要拆出很多小文档。等某一块规范明显变长，再拆成 `docs/tool-contract.md`、`docs/context-engineering.md`、`docs/testing.md`。
+只有运行路径已经切换、旧逻辑已删除、测试和观测均通过，重构任务才能标记完成。

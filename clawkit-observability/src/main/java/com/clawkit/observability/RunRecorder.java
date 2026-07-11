@@ -1,18 +1,25 @@
 package com.clawkit.observability;
 
-import java.util.function.Consumer;
+import java.time.Instant;
 
 /**
  * 运行观测记录器接口。
- * 消费 RunEvent 并写入本地存储。
+ * 接收 RunEventPayload 及上下文元数据，由 FileRunRecorder 写入本地存储。
  *
- * <p>AgentEngine 通过 {@link Consumer<RunEvent>} 调用此接口，
- * FileRunRecorder 将事件写入 .clawkit/runs/&lt;run-id&gt;/ 目录。
- * 默认使用 NoopRunRecorder（空操作，不产生 IO 开销）。
+ * <p>AgentEngine 通过此接口发送事件，
+ * FileRunRecorder 负责分配 sequence、编码 envelope、写入 events.jsonl 并聚合 summary。
  */
-public interface RunRecorder extends Consumer<RunEvent> {
+public interface RunRecorder {
 
-    /** 接收并记录运行时事件 */
-    @Override
-    void accept(RunEvent event);
+    /**
+     * 记录一个运行时事件。
+     *
+     * @param payload      事件数据
+     * @param runId        所属 run
+     * @param parentRunId  父 run（SubAgent 场景），无则为 null
+     * @param turnNumber   当前 turn，无则为 null
+     * @param occurredAt   事件发生时间
+     */
+    void record(RunEventPayload payload, String runId, String parentRunId,
+                Integer turnNumber, Instant occurredAt);
 }
