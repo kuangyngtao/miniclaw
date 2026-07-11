@@ -210,9 +210,11 @@
   
   🔶 2026-07-11 — PR-2: ToolCallExecutor + InternalToolRouter 拆分完成；PR-3: EphemeralContext 容器提取；ContextPipeline/MemoryHooks/SkillRuntime/PlanRuntime 推迟。
 
-- **[ ] 拆分 CLI 命令和交互层**（cli）  
+- **[~] 拆分 CLI 命令和交互层**（cli）  
   拆出 `ReplLoop`、`SlashCommandRouter`、命令组、`ApprovalConsole`、`ConsoleRenderer`。  
   验收：`ClawkitApp` 只负责装配依赖和启动；slash command 可独立单测；IM 开关不影响普通 CLI 流程。
+  
+  🔶 2026-07-11 — PR-5: ApplicationBootstrap + ApplicationContext（装配提取）、ConsoleRenderer（展示集中）、dispatchCommand()（路由分派提取）、OpenAIResponseParser（Provider 解析分离）。ReplLoop 和 ApprovalConsole 推迟（IM 通道耦合+审批UI依赖reader）。
 
 - **[x] 分离运行时上下文和持久会话**（engine / context）  
   runtime context 不写入 session history，所有注入内容标记来源和生命周期。  
@@ -246,9 +248,11 @@
   并发 drain stdout/stderr，超时销毁进程，输出截断保留 head/tail 和退出码。  
   验收：长输出命令、无输出命令、超时命令、非零退出码都有测试。
 
-- **[ ] 收敛 Provider 输出协议**（provider / engine）  
+- **[~] 收敛 Provider 输出协议**（provider / engine）  
   明确 `ModelResponse`，把工具调用解析移到独立 parser，流式输出先解析和安全检查再执行。  
   验收：provider 层只负责模型通信；engine 层只消费结构化响应；协议错误不会继续进入工具执行。
+  
+  🔶 2026-07-11 — PR-5: OpenAIResponseParser 提取完成（非流式解析独立可测）；OpenAIProvider.toMessage() 改为委托。SSE 流式 parser 和 ModelResponse 推迟。
 
 推荐顺序：护栏测试 -> `ToolCallExecutor` -> `ContextPipeline` -> MCP 风险和审计 -> BashTool -> CLI -> Provider 协议。
 
