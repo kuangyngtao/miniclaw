@@ -40,6 +40,7 @@ public class OpenAIProvider implements LLMProvider {
     private final LLMConfig config;
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
+    private final OpenAIResponseParser responseParser;
 
     // 熔断器状态（CLOSED → OPEN → HALF_OPEN）
     private int consecutiveFailures;
@@ -49,6 +50,7 @@ public class OpenAIProvider implements LLMProvider {
         this.config = config;
         this.objectMapper = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        this.responseParser = new OpenAIResponseParser(objectMapper);
         this.httpClient = HttpClient.newBuilder()
             .connectTimeout(config.connectTimeout())
             .build();
@@ -380,31 +382,7 @@ public class OpenAIProvider implements LLMProvider {
     // === 响应转换：OpenAI JSON → 内部 Message ===
 
     private Message toMessage(OpenAIResponse response) {
-        if (response.choices() == null || response.choices().isEmpty()) {
-            throw new LLMException("API 返回了空的 Choices");
-        }
-        OpenAIChoice choice = response.choices().get(0);
-        OpenAIMessage msg = choice.message();
-
-        // 工具调用
-        if (msg.toolCalls() != null && !msg.toolCalls().isEmpty()) {
-            List<ToolCall> toolCalls = new ArrayList<>();
-            for (OpenAIToolCall otc : msg.toolCalls()) {
-                JsonNode argsNode;
-                try {
-                    argsNode = objectMapper.readTree(otc.function().arguments());
-                } catch (IOException e) {
-                    throw new LLMException("解析工具参数 JSON 失败: " + otc.function().name(), e);
-                }
-                toolCalls.add(new ToolCall(otc.id(), otc.function().name(), argsNode));
-            }
-            return msg.content() != null
-                ? new Message(com.clawkit.tools.schema.Role.ASSISTANT, msg.content(), toolCalls, null)
-                : Message.assistantWithTools(toolCalls);
-        }
-
-        // 纯文本回复
-        return Message.assistant(msg.content() != null ? msg.content() : "");
+        return responseParser.toMessage(response);
     }
 
     // === 重试逻辑 ===
