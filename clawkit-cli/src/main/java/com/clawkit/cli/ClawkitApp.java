@@ -101,6 +101,7 @@ public class ClawkitApp implements Runnable {
     private LLMConfig.Protocol protocolEnum;
     private LineReader reader;
     private com.clawkit.observability.RunReader runReader;
+    private final ConsoleRenderer renderer = new ConsoleRenderer();
 
     @Override
     public void run() {
@@ -154,7 +155,7 @@ public class ClawkitApp implements Runnable {
                         servers.put(entry.getKey(),
                             new McpServerConfig(sc.name(), sc.command(), sc.args(),
                                 sc.url(), sc.env(), true));
-                        System.out.println(GRAY + "    " + sc.name() + " disabled." + RESET);
+                        System.out.println(ConsoleRenderer.GRAY + "    " + sc.name() + " disabled." + ConsoleRenderer.RESET);
                     }
                 }
                 System.out.println();
@@ -218,38 +219,15 @@ public class ClawkitApp implements Runnable {
 
         engine.setApprovalHandler(this::handleApproval);
 
-        // SubAgent 回调 — 用户可见的派发/完成信息
-        engine.onSubAgentSpawn(event -> {
-            String inst = event.instruction();
-            if (inst.length() > 100) inst = inst.substring(0, 100) + "...";
-            System.out.println(GRAY + "  [SubAgent] dispatching: \"" + inst + "\" ("
-                + event.type() + ", max " + event.maxTurns() + " turns)" + RESET);
-        });
-        engine.onSubAgentComplete(event -> {
-            String summary = event.summary();
-            if (summary.length() > 100) summary = summary.substring(0, 100) + "...";
-            String line = summary.replace("\n", " ");
-            System.out.println(GRAY + "  [SubAgent] done (" + event.turnsUsed()
-                + " turns, ~" + event.tokens() + " tk, " + event.durationMs() + "ms) → "
-                + line + RESET);
-        });
+        // SubAgent 回调 — 委托给 ConsoleRenderer
+        engine.onSubAgentSpawn(event -> renderer.onSubAgentSpawn(
+            event.instruction(), event.type(), event.maxTurns()));
+        engine.onSubAgentComplete(event -> renderer.onSubAgentComplete(
+            event.summary(), event.turnsUsed(), event.tokens(), event.durationMs()));
 
-        engine.onToolStart(event -> {
-            String args = event.argSummary().isEmpty() ? "" : "  " + GRAY + event.argSummary() + RESET;
-            System.out.println("  [..] " + event.name() + args);
-        });
-
-        engine.onToolEnd(event -> {
-            String icon = event.success() ? "OK" : "ER";
-            String detail = event.success() ? event.detail() : GRAY + event.detail() + RESET;
-            System.out.println("  [" + icon + "] " + event.name() + "  " + detail);
-        });
-
-        engine.onStateChange(event -> {
-            if (event.state() == AgentState.EXECUTING) {
-                // 工具执行由 onToolStart/onToolEnd 显示，此处不再重复
-            }
-        });
+        engine.onToolStart(event -> renderer.onToolStart(event.name(), event.argSummary()));
+        engine.onToolEnd(event -> renderer.onToolEnd(event.name(), event.success(), event.detail()));
+        engine.onStateChange(event -> { /* 工具执行由 onToolStart/onToolEnd 显示 */ });
 
         log.info("clawkit started — model={}, thinking={}", model, mode);
 
@@ -311,7 +289,7 @@ public class ClawkitApp implements Runnable {
                     case "/plan-exec" -> togglePlanExec(engine);
                     case "/c", "/clear" -> {
                         engine.clearSession();
-                        System.out.println(GRAY + "  session cleared." + RESET + "\n");
+                        System.out.println(ConsoleRenderer.GRAY + "  session cleared." + ConsoleRenderer.RESET + "\n");
                         log.info("Session cleared");
                     }
                     case "/feishu-on" -> startImChannel("feishu", reader);
@@ -319,7 +297,7 @@ public class ClawkitApp implements Runnable {
                     case "/im-on" -> {
                         String[] parts = input.split("\\s+", 3);
                         if (parts.length >= 2) startImChannel(parts[1], reader);
-                        else System.out.println(GRAY + "  Usage: /im-on feishu|weixin" + RESET + "\n");
+                        else System.out.println(ConsoleRenderer.GRAY + "  Usage: /im-on feishu|weixin" + ConsoleRenderer.RESET + "\n");
                     }
                     case "/im-off" -> {
                         String[] parts = input.split("\\s+", 3);
@@ -329,7 +307,7 @@ public class ClawkitApp implements Runnable {
                     case "/im-status" -> printImStatus();
                     case "/compact" -> {
                         String stats = engine.compactSession();
-                        System.out.println(GRAY + "  " + stats + RESET + "\n");
+                        System.out.println(ConsoleRenderer.GRAY + "  " + stats + ConsoleRenderer.RESET + "\n");
                         log.info("Manual compaction: {}", stats);
                     }
                     case "/context" -> {
@@ -344,7 +322,7 @@ public class ClawkitApp implements Runnable {
             }
 
             if (!engine.tryAcquire()) {
-                System.out.println(GRAY + "  Engine busy (IM is processing)...\n" + RESET);
+                System.out.println(ConsoleRenderer.GRAY + "  Engine busy (IM is processing)...\n" + ConsoleRenderer.RESET);
                 continue;
             }
             try {
@@ -385,26 +363,26 @@ public class ClawkitApp implements Runnable {
         printApprovalBox(req);
 
         for (int attempt = 0; attempt < 5; attempt++) {
-            System.out.print(GRAY + "  [y]批准 [a]同类型全放行 [n]拒绝 [m]修改参数 > " + RESET);
+            System.out.print(ConsoleRenderer.GRAY + "  [y]批准 [a]同类型全放行 [n]拒绝 [m]修改参数 > " + ConsoleRenderer.RESET);
             String input = reader.readLine("").trim().toLowerCase();
 
             return switch (input) {
                 case "", "y" -> new ApprovalResult.Approve();
                 case "a" -> new ApprovalResult.ApproveAllSameType(req.toolName());
                 case "n" -> {
-                    System.out.print(GRAY + "  拒绝原因（可选，回车跳过）> " + RESET);
+                    System.out.print(ConsoleRenderer.GRAY + "  拒绝原因（可选，回车跳过）> " + ConsoleRenderer.RESET);
                     String reason = reader.readLine("").trim();
                     yield new ApprovalResult.Reject(
                         reason.isEmpty() ? "User denied " + req.toolName() : reason);
                 }
                 case "m" -> {
-                    System.out.print(GRAY + "  修改建议 > " + RESET);
+                    System.out.print(ConsoleRenderer.GRAY + "  修改建议 > " + ConsoleRenderer.RESET);
                     String guidance = reader.readLine("").trim();
                     yield new ApprovalResult.ModifyParams(
                         guidance.isEmpty() ? "Please use different parameters." : guidance);
                 }
                 default -> {
-                    System.out.println(GRAY + "  ?? 请输入 y/a/n/m" + RESET);
+                    System.out.println(ConsoleRenderer.GRAY + "  ?? 请输入 y/a/n/m" + ConsoleRenderer.RESET);
                     yield null;
                 }
             };
@@ -455,36 +433,36 @@ public class ClawkitApp implements Runnable {
 
         int msgCount = engine.getMessageCount();
         System.out.println();
-        System.out.println(GRAY + "  context  [" + bar + "] " + pct + "%  ~" + tokens
-            + " / " + maxTokens + " tokens  (" + msgCount + " msgs)" + RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  context  [" + bar + "] " + pct + "%  ~" + tokens
+            + " / " + maxTokens + " tokens  (" + msgCount + " msgs)" + ConsoleRenderer.RESET);
 
         // Phase 1: 预算报告（分区显示）
         var report = engine.getContextBudgetReport();
         if (report != null) {
             String statusIcon = switch (report.status()) {
-                case OK -> GREEN + "OK" + RESET;
-                case WARN -> YELLOW + "WARN" + RESET;
-                case COMPACT_REQUIRED -> RED + "COMPACT" + RESET;
-                case HARD_LIMIT -> RED + "HARD" + RESET;
+                case OK -> GREEN + "OK" + ConsoleRenderer.RESET;
+                case WARN -> YELLOW + "WARN" + ConsoleRenderer.RESET;
+                case COMPACT_REQUIRED -> RED + "COMPACT" + ConsoleRenderer.RESET;
+                case HARD_LIMIT -> RED + "HARD" + ConsoleRenderer.RESET;
             };
-            System.out.println(GRAY + "  budget   " + statusIcon + GRAY
+            System.out.println(ConsoleRenderer.GRAY + "  budget   " + statusIcon + GRAY
                 + "  SYSTEM:" + report.sections().getOrDefault(com.clawkit.context.ContextSection.SYSTEM, 0)
                 + "  TOOLS:" + report.sections().getOrDefault(com.clawkit.context.ContextSection.TOOLS, 0)
                 + "  HISTORY:" + report.sections().getOrDefault(com.clawkit.context.ContextSection.HISTORY, 0)
                 + "  MEMORY:" + report.sections().getOrDefault(com.clawkit.context.ContextSection.MEMORY, 0)
                 + "  TOOL_RESULT:" + report.sections().getOrDefault(com.clawkit.context.ContextSection.TOOL_RESULT, 0)
-                + RESET);
+                + ConsoleRenderer.RESET);
             if (report.suggestedAction() != null && !report.suggestedAction().isBlank()) {
-                System.out.println(GRAY + "           " + report.suggestedAction() + RESET);
+                System.out.println(ConsoleRenderer.GRAY + "           " + report.suggestedAction() + ConsoleRenderer.RESET);
             }
         } else {
             // Fallback to old breakdown
             var bd = engine.getTokenBreakdown();
             if (!bd.isEmpty()) {
-                System.out.println(GRAY + "  tokens   system:" + bd.getOrDefault("system", 0)
+                System.out.println(ConsoleRenderer.GRAY + "  tokens   system:" + bd.getOrDefault("system", 0)
                     + "  user:" + bd.getOrDefault("user", 0)
                     + "  assistant:" + bd.getOrDefault("assistant", 0)
-                    + "  tool:" + bd.getOrDefault("tool", 0) + RESET);
+                    + "  tool:" + bd.getOrDefault("tool", 0) + ConsoleRenderer.RESET);
             }
         }
 
@@ -492,21 +470,21 @@ public class ClawkitApp implements Runnable {
         if (mask != null) {
             int evicted = mask.evictedTurnGroups() != null
                 ? mask.evictedTurnGroups().size() : 0;
-            System.out.println(GRAY + "  mask     T0:" + mask.tier0Count()
+            System.out.println(ConsoleRenderer.GRAY + "  mask     T0:" + mask.tier0Count()
                 + "  T1:" + mask.tier1Count()
                 + "  T2:" + mask.tier2Count()
                 + "  T3:" + mask.tier3Count()
-                + (evicted > 0 ? "  (evicted:" + evicted + " groups)" : "") + RESET);
+                + (evicted > 0 ? "  (evicted:" + evicted + " groups)" : "") + ConsoleRenderer.RESET);
         }
 
         // 压缩状态
         String compStatus = engine.getCompactionStatus();
         if (compStatus != null && !compStatus.isEmpty()) {
-            System.out.println(GRAY + "  compact  " + compStatus + RESET);
+            System.out.println(ConsoleRenderer.GRAY + "  compact  " + compStatus + ConsoleRenderer.RESET);
         }
 
-        System.out.println(GRAY + "  mode     " + engine.thinkingMode() + " / " + engine.permissionMode() + RESET);
-        System.out.println(GRAY + "  workdir  " + engine.workDir() + RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  mode     " + engine.thinkingMode() + " / " + engine.permissionMode() + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  workdir  " + engine.workDir() + ConsoleRenderer.RESET);
         System.out.println();
     }
 
@@ -517,12 +495,12 @@ public class ClawkitApp implements Runnable {
         try {
             var runs = runReader.listRecent(10);
             if (runs.isEmpty()) {
-                System.out.println(GRAY + "  暂无运行记录。执行一次任务后 run 记录会自动生成。" + RESET);
+                System.out.println(ConsoleRenderer.GRAY + "  暂无运行记录。执行一次任务后 run 记录会自动生成。" + ConsoleRenderer.RESET);
                 System.out.println();
                 return;
             }
-            System.out.println(GRAY + "  run                                     status      turns  tools  fails  compact  time     mode" + RESET);
-            System.out.println(GRAY + "  ──────────────────────────────────────── ─────────── ───── ────── ────── ──────── ──────── ──────" + RESET);
+            System.out.println(ConsoleRenderer.GRAY + "  run                                     status      turns  tools  fails  compact  time     mode" + ConsoleRenderer.RESET);
+            System.out.println(ConsoleRenderer.GRAY + "  ──────────────────────────────────────── ─────────── ───── ────── ────── ──────── ──────── ──────" + ConsoleRenderer.RESET);
             for (var r : runs) {
                 String time = r.startTime().length() > 16 ? r.startTime().substring(11, 16) : r.startTime();
                 String duration = formatDuration(r.durationMs());
@@ -532,7 +510,7 @@ public class ClawkitApp implements Runnable {
             }
             System.out.println();
         } catch (Exception e) {
-            System.out.println(GRAY + "  读取 run 记录失败: " + e.getMessage() + RESET);
+            System.out.println(ConsoleRenderer.GRAY + "  读取 run 记录失败: " + e.getMessage() + ConsoleRenderer.RESET);
         }
     }
 
@@ -546,14 +524,14 @@ public class ClawkitApp implements Runnable {
             } else {
                 var runs = runReader.listRecent(1);
                 if (runs.isEmpty()) {
-                    System.out.println(GRAY + "  暂无运行记录" + RESET);
+                    System.out.println(ConsoleRenderer.GRAY + "  暂无运行记录" + ConsoleRenderer.RESET);
                     System.out.println();
                     return;
                 }
                 m = runReader.readMetrics(runs.get(0).runId());
             }
             if (m == null) {
-                System.out.println(GRAY + "  run 记录不存在: " + runId + RESET);
+                System.out.println(ConsoleRenderer.GRAY + "  run 记录不存在: " + runId + ConsoleRenderer.RESET);
                 System.out.println();
                 return;
             }
@@ -569,7 +547,7 @@ public class ClawkitApp implements Runnable {
             }
             System.out.println();
         } catch (Exception e) {
-            System.out.println(GRAY + "  读取 metrics 失败: " + e.getMessage() + RESET);
+            System.out.println(ConsoleRenderer.GRAY + "  读取 metrics 失败: " + e.getMessage() + ConsoleRenderer.RESET);
         }
     }
 
@@ -580,7 +558,7 @@ public class ClawkitApp implements Runnable {
             if (runId == null) {
                 var runs = runReader.listRecent(1);
                 if (runs.isEmpty()) {
-                    System.out.println(GRAY + "  暂无运行记录" + RESET);
+                    System.out.println(ConsoleRenderer.GRAY + "  暂无运行记录" + ConsoleRenderer.RESET);
                     System.out.println();
                     return;
                 }
@@ -588,28 +566,28 @@ public class ClawkitApp implements Runnable {
             }
             var lines = runReader.readTrace(runId);
             if (lines.isEmpty()) {
-                System.out.println(GRAY + "  trace 为空: " + runId + RESET);
+                System.out.println(ConsoleRenderer.GRAY + "  trace 为空: " + runId + ConsoleRenderer.RESET);
                 System.out.println();
                 return;
             }
-            System.out.println(GRAY + "  trace: " + runId + " (" + lines.size() + " events)" + RESET);
+            System.out.println(ConsoleRenderer.GRAY + "  trace: " + runId + " (" + lines.size() + " events)" + ConsoleRenderer.RESET);
             // 只显示关键事件摘要，不打印完整 JSON
             int shown = 0;
             for (String line : lines) {
                 if (line.contains("RunStarted") || line.contains("RunCompleted")
                     || line.contains("ToolCompleted") || line.contains("CompactCompleted")) {
                     String shortLine = line.length() > 120 ? line.substring(0, 117) + "..." : line;
-                    System.out.println(GRAY + "  " + shortLine + RESET);
+                    System.out.println(ConsoleRenderer.GRAY + "  " + shortLine + ConsoleRenderer.RESET);
                     shown++;
                 }
                 if (shown >= 20) {
-                    System.out.println(GRAY + "  ... (" + (lines.size() - shown) + " more events)" + RESET);
+                    System.out.println(ConsoleRenderer.GRAY + "  ... (" + (lines.size() - shown) + " more events)" + ConsoleRenderer.RESET);
                     break;
                 }
             }
             System.out.println();
         } catch (Exception e) {
-            System.out.println(GRAY + "  读取 trace 失败: " + e.getMessage() + RESET);
+            System.out.println(ConsoleRenderer.GRAY + "  读取 trace 失败: " + e.getMessage() + ConsoleRenderer.RESET);
         }
     }
 
@@ -682,15 +660,15 @@ public class ClawkitApp implements Runnable {
 
         // 无内容 → 提示输入
         if (rawContent.isEmpty()) {
-            rawContent = reader.readLine(GRAY + "  What should I remember? " + RESET);
+            rawContent = reader.readLine(ConsoleRenderer.GRAY + "  What should I remember? " + ConsoleRenderer.RESET);
             if (rawContent == null || rawContent.isBlank()) {
-                System.out.println(GRAY + "  Cancelled." + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  Cancelled." + ConsoleRenderer.RESET + "\n");
                 return;
             }
         }
 
         // 调用 LLM 提取元数据
-        System.out.print(GRAY + "  extracting metadata..." + RESET);
+        System.out.print(ConsoleRenderer.GRAY + "  extracting metadata..." + ConsoleRenderer.RESET);
         String json;
         try {
             Message msg = provider.generate(
@@ -699,7 +677,7 @@ public class ClawkitApp implements Runnable {
             json = msg.content() != null ? msg.content().trim() : "";
         } catch (Exception e) {
             log.warn("Memory metadata extraction failed: {}", e.getMessage());
-            System.out.println(GRAY + " failed, using defaults." + RESET);
+            System.out.println(ConsoleRenderer.GRAY + " failed, using defaults." + ConsoleRenderer.RESET);
             json = "";
         }
 
@@ -736,8 +714,8 @@ public class ClawkitApp implements Runnable {
         MemoryEntry entry = new MemoryEntry(name, description, type, Instant.now(), rawContent);
         service.save(entry);
         engine.setMemoryIndex(service.loadIndex());
-        System.out.println(GRAY + "\r  saved " + entry.filename()
-            + " [" + type.name().toLowerCase() + "] " + description + RESET + "\n");
+        System.out.println(ConsoleRenderer.GRAY + "\r  saved " + entry.filename()
+            + " [" + type.name().toLowerCase() + "] " + description + ConsoleRenderer.RESET + "\n");
     }
 
     private void handleMemory(String input, DiskMemoryService service,
@@ -746,23 +724,23 @@ public class ClawkitApp implements Runnable {
         if (sub.equals("list") || sub.isEmpty()) {
             var entries = service.listIndex();
             if (entries.isEmpty()) {
-                System.out.println(GRAY + "  No memory entries." + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  No memory entries." + ConsoleRenderer.RESET + "\n");
                 return;
             }
             System.out.println();
             for (var entry : entries) {
-                System.out.println(GRAY + "  - [" + entry.name() + "]("
-                    + entry.filename() + ") — " + entry.description() + RESET);
+                System.out.println(ConsoleRenderer.GRAY + "  - [" + entry.name() + "]("
+                    + entry.filename() + ") — " + entry.description() + ConsoleRenderer.RESET);
             }
             System.out.println();
         } else if (sub.equals("regen")) {
             service.regenerateIndex();
             engine.setMemoryIndex(service.loadIndex());
-            System.out.println(GRAY + "  Index regenerated from files." + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  Index regenerated from files." + ConsoleRenderer.RESET + "\n");
         } else if (sub.startsWith("add ")) {
             handleMemoryAdd(sub.substring("add ".length()).trim(), service, engine);
         } else {
-            System.out.println(GRAY + "  Usage: /memory list | /memory add <type> <name> <content> | /memory regen" + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  Usage: /memory list | /memory add <type> <name> <content> | /memory regen" + ConsoleRenderer.RESET + "\n");
         }
     }
 
@@ -771,16 +749,16 @@ public class ClawkitApp implements Runnable {
         // 解析: <type> <name> <content>
         String[] parts = args.split("\\s+", 3);
         if (parts.length < 3) {
-            System.out.println(GRAY + "  Usage: /memory add <type> <name> <content>" + RESET);
-            System.out.println(GRAY + "  Types: user, feedback, project, reference" + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  Usage: /memory add <type> <name> <content>" + ConsoleRenderer.RESET);
+            System.out.println(ConsoleRenderer.GRAY + "  Types: user, feedback, project, reference" + ConsoleRenderer.RESET + "\n");
             return;
         }
         MemoryType type;
         try {
             type = MemoryType.valueOf(parts[0].toUpperCase());
         } catch (IllegalArgumentException e) {
-            System.out.println(GRAY + "  Invalid type: " + parts[0]
-                + ". Use: user, feedback, project, reference" + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  Invalid type: " + parts[0]
+                + ". Use: user, feedback, project, reference" + ConsoleRenderer.RESET + "\n");
             return;
         }
         String name = parts[1].replaceAll("[^a-zA-Z0-9_-]", "_");
@@ -791,8 +769,8 @@ public class ClawkitApp implements Runnable {
         MemoryEntry entry = new MemoryEntry(name, description, type, Instant.now(), content);
         service.save(entry);
         engine.setMemoryIndex(service.loadIndex());
-        System.out.println(GRAY + "  saved " + entry.filename()
-            + " [" + type.name().toLowerCase() + "]" + RESET + "\n");
+        System.out.println(ConsoleRenderer.GRAY + "  saved " + entry.filename()
+            + " [" + type.name().toLowerCase() + "]" + ConsoleRenderer.RESET + "\n");
     }
 
     /** Load hierarchical CLAUDE.md: ~/.clawkit/CLAUDE.md + ./CLAUDE.md (fallback AGENTS.md). */
@@ -865,19 +843,19 @@ public class ClawkitApp implements Runnable {
                 name = "session-" + Instant.now().toString().replace(":", "-").substring(0, 19);
             }
             String result = engine.saveSession(name);
-            System.out.println(GRAY + "  " + result + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  " + result + ConsoleRenderer.RESET + "\n");
         } else if (args.startsWith("load ")) {
             String id = args.substring("load ".length()).trim();
             try {
                 engine.loadSession(id);
-                System.out.println(GRAY + "  Session loaded: " + id + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  Session loaded: " + id + ConsoleRenderer.RESET + "\n");
             } catch (Exception e) {
-                System.out.println(GRAY + "  [H-003] " + e.getMessage() + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  [H-003] " + e.getMessage() + ConsoleRenderer.RESET + "\n");
             }
         } else if (args.equals("list")) {
             List<SessionMeta> sessions = engine.listSessions();
             if (sessions.isEmpty()) {
-                System.out.println(GRAY + "  No saved sessions." + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  No saved sessions." + ConsoleRenderer.RESET + "\n");
                 return;
             }
             System.out.println();
@@ -885,10 +863,10 @@ public class ClawkitApp implements Runnable {
                 String updated = s.updatedAt().toString().replace("T", " ").substring(0, 16);
                 String first = s.firstUserMessage() != null ? s.firstUserMessage() : "";
                 if (first.length() > 60) first = first.substring(0, 60) + "...";
-                System.out.println(GRAY + "  [" + s.id() + "] " + s.name()
-                    + "  (" + s.messageCount() + " msgs, " + updated + ")" + RESET);
+                System.out.println(ConsoleRenderer.GRAY + "  [" + s.id() + "] " + s.name()
+                    + "  (" + s.messageCount() + " msgs, " + updated + ")" + ConsoleRenderer.RESET);
                 if (!first.isEmpty()) {
-                    System.out.println(GRAY + "      " + first + RESET);
+                    System.out.println(ConsoleRenderer.GRAY + "      " + first + ConsoleRenderer.RESET);
                 }
             }
             System.out.println();
@@ -896,57 +874,57 @@ public class ClawkitApp implements Runnable {
             String id = args.substring("delete ".length()).trim();
             try {
                 engine.deleteSession(id);
-                System.out.println(GRAY + "  Session deleted: " + id + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  Session deleted: " + id + ConsoleRenderer.RESET + "\n");
             } catch (Exception e) {
-                System.out.println(GRAY + "  [H-003] " + e.getMessage() + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  [H-003] " + e.getMessage() + ConsoleRenderer.RESET + "\n");
             }
         } else if (args.startsWith("search ")) {
             String query = args.substring("search ".length()).trim();
             if (sessionService == null) {
-                System.out.println(GRAY + "  Session service not available." + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  Session service not available." + ConsoleRenderer.RESET + "\n");
                 return;
             }
             List<SessionMeta> matches = sessionService.search(query);
             if (matches.isEmpty()) {
-                System.out.println(GRAY + "  No sessions matching \"" + query + "\"." + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  No sessions matching \"" + query + "\"." + ConsoleRenderer.RESET + "\n");
                 return;
             }
             System.out.println();
             for (SessionMeta s : matches) {
                 String updated = s.updatedAt().toString().replace("T", " ").substring(0, 16);
-                System.out.println(GRAY + "  [" + s.id() + "] " + s.name()
-                    + "  (" + s.messageCount() + " msgs, " + updated + ")" + RESET);
+                System.out.println(ConsoleRenderer.GRAY + "  [" + s.id() + "] " + s.name()
+                    + "  (" + s.messageCount() + " msgs, " + updated + ")" + ConsoleRenderer.RESET);
                 if (s.summary() != null && !s.summary().isBlank()) {
-                    System.out.println(GRAY + "      " + s.summary() + RESET);
+                    System.out.println(ConsoleRenderer.GRAY + "      " + s.summary() + ConsoleRenderer.RESET);
                 }
             }
             System.out.println();
         } else if (args.equals("stats")) {
             if (sessionService == null) {
-                System.out.println(GRAY + "  Session service not available." + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  Session service not available." + ConsoleRenderer.RESET + "\n");
                 return;
             }
             List<SessionService.AgeBucket> buckets = sessionService.stats();
             if (buckets.isEmpty()) {
-                System.out.println(GRAY + "  No saved sessions." + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  No saved sessions." + ConsoleRenderer.RESET + "\n");
                 return;
             }
             long totalBytes = 0;
             int totalCount = 0;
             System.out.println();
-            System.out.println(GRAY + "  Session storage breakdown:" + RESET);
+            System.out.println(ConsoleRenderer.GRAY + "  Session storage breakdown:" + ConsoleRenderer.RESET);
             for (SessionService.AgeBucket b : buckets) {
-                System.out.println(GRAY + "    " + padRight(b.label(), 16)
+                System.out.println(ConsoleRenderer.GRAY + "    " + padRight(b.label(), 16)
                     + String.format("%3d sessions", b.count())
-                    + String.format("%8s", formatSize(b.bytes())) + RESET);
+                    + String.format("%8s", formatSize(b.bytes())) + ConsoleRenderer.RESET);
                 totalBytes += b.bytes();
                 totalCount += b.count();
             }
-            System.out.println(GRAY + "    " + padRight("───", 16)
-                + "───────────" + "  ────────" + RESET);
-            System.out.println(GRAY + "    " + padRight("Total", 16)
+            System.out.println(ConsoleRenderer.GRAY + "    " + padRight("───", 16)
+                + "───────────" + "  ────────" + ConsoleRenderer.RESET);
+            System.out.println(ConsoleRenderer.GRAY + "    " + padRight("Total", 16)
                 + String.format("%3d sessions", totalCount)
-                + String.format("%8s", formatSize(totalBytes)) + RESET);
+                + String.format("%8s", formatSize(totalBytes)) + ConsoleRenderer.RESET);
             System.out.println();
         } else if (args.startsWith("prune")) {
             String rest = args.substring("prune".length()).trim();
@@ -954,26 +932,26 @@ public class ClawkitApp implements Runnable {
             try {
                 days = Integer.parseInt(rest);
                 if (days <= 0) {
-                    System.out.println(GRAY + "  Usage: /session prune <days>  (days must be > 0)" + RESET + "\n");
+                    System.out.println(ConsoleRenderer.GRAY + "  Usage: /session prune <days>  (days must be > 0)" + ConsoleRenderer.RESET + "\n");
                     return;
                 }
             } catch (NumberFormatException e) {
-                System.out.println(GRAY + "  Usage: /session prune <days>  (e.g. /session prune 30)" + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  Usage: /session prune <days>  (e.g. /session prune 30)" + ConsoleRenderer.RESET + "\n");
                 return;
             }
             if (sessionService == null) {
-                System.out.println(GRAY + "  Session service not available." + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  Session service not available." + ConsoleRenderer.RESET + "\n");
                 return;
             }
             int count = sessionService.prune(days);
             if (count == 0) {
-                System.out.println(GRAY + "  No sessions older than " + days + " days." + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  No sessions older than " + days + " days." + ConsoleRenderer.RESET + "\n");
             } else {
-                System.out.println(GRAY + "  Pruned " + count + " session(s) older than " + days + " days." + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  Pruned " + count + " session(s) older than " + days + " days." + ConsoleRenderer.RESET + "\n");
             }
         } else if (args.equals("new")) {
             String result = engine.newSession();
-            System.out.println(GRAY + "  " + result + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  " + result + ConsoleRenderer.RESET + "\n");
         } else {
             printSessionUsage();
         }
@@ -981,14 +959,14 @@ public class ClawkitApp implements Runnable {
 
     private void printSessionUsage() {
         System.out.println();
-        System.out.println(GRAY + "  /session save [name]     save current session" + RESET);
-        System.out.println(GRAY + "  /session load <id>       load a saved session" + RESET);
-        System.out.println(GRAY + "  /session list            list all saved sessions" + RESET);
-        System.out.println(GRAY + "  /session search <query>  search past sessions" + RESET);
-        System.out.println(GRAY + "  /session stats           show storage breakdown by age" + RESET);
-        System.out.println(GRAY + "  /session prune <days>    delete sessions older than N days" + RESET);
-        System.out.println(GRAY + "  /session delete <id>     delete a specific session" + RESET);
-        System.out.println(GRAY + "  /session new             clear and start new session" + RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /session save [name]     save current session" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /session load <id>       load a saved session" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /session list            list all saved sessions" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /session search <query>  search past sessions" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /session stats           show storage breakdown by age" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /session prune <days>    delete sessions older than N days" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /session delete <id>     delete a specific session" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /session new             clear and start new session" + ConsoleRenderer.RESET);
         System.out.println();
     }
 
@@ -996,23 +974,23 @@ public class ClawkitApp implements Runnable {
 
     private void handleMcpCommand(String args) {
         if (mcpManager == null) {
-            System.out.println(GRAY + "  MCP manager not initialized." + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  MCP manager not initialized." + ConsoleRenderer.RESET + "\n");
             return;
         }
 
         if (args.isEmpty()) {
             var statuses = mcpManager.status();
             if (statuses.isEmpty()) {
-                System.out.println(GRAY + "  No MCP servers configured." + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  No MCP servers configured." + ConsoleRenderer.RESET + "\n");
                 return;
             }
             System.out.println();
-            System.out.println(GRAY + "  MCP Servers:" + RESET);
+            System.out.println(ConsoleRenderer.GRAY + "  MCP Servers:" + ConsoleRenderer.RESET);
             for (var s : statuses) {
                 String icon = "RUNNING".equals(s.state()) ? "●" : "○";
                 String tools = s.toolCount() > 0 ? s.toolCount() + " tools" : "—";
-                System.out.println(GRAY + "    " + icon + " " + padRight(s.name(), 20)
-                    + padRight(s.transport(), 8) + padRight(s.state(), 10) + tools + RESET);
+                System.out.println(ConsoleRenderer.GRAY + "    " + icon + " " + padRight(s.name(), 20)
+                    + padRight(s.transport(), 8) + padRight(s.state(), 10) + tools + ConsoleRenderer.RESET);
             }
             System.out.println();
             return;
@@ -1022,8 +1000,8 @@ public class ClawkitApp implements Runnable {
             String name = args.substring("restart ".length()).trim();
             List<Tool> tools = mcpManager.restart(name);
             for (Tool t : tools) registry.register(t);
-            System.out.println(GRAY + "  MCP server '" + name + "' restarted with "
-                + tools.size() + " tools." + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  MCP server '" + name + "' restarted with "
+                + tools.size() + " tools." + ConsoleRenderer.RESET + "\n");
             return;
         }
 
@@ -1031,12 +1009,12 @@ public class ClawkitApp implements Runnable {
             String name = args.substring("logs ".length()).trim();
             List<String> logs = mcpManager.logs(name);
             if (logs.isEmpty()) {
-                System.out.println(GRAY + "  No logs for: " + name + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  No logs for: " + name + ConsoleRenderer.RESET + "\n");
                 return;
             }
             System.out.println();
             for (String line : logs) {
-                System.out.println(GRAY + "  " + line + RESET);
+                System.out.println(ConsoleRenderer.GRAY + "  " + line + ConsoleRenderer.RESET);
             }
             System.out.println();
             return;
@@ -1045,7 +1023,7 @@ public class ClawkitApp implements Runnable {
         if (args.startsWith("disable ")) {
             String name = args.substring("disable ".length()).trim();
             mcpManager.disable(name);
-            System.out.println(GRAY + "  MCP server '" + name + "' disabled." + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  MCP server '" + name + "' disabled." + ConsoleRenderer.RESET + "\n");
             return;
         }
 
@@ -1053,8 +1031,8 @@ public class ClawkitApp implements Runnable {
             String name = args.substring("enable ".length()).trim();
             List<Tool> tools = mcpManager.restart(name);
             for (Tool t : tools) registry.register(t);
-            System.out.println(GRAY + "  MCP server '" + name + "' enabled with "
-                + tools.size() + " tools." + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  MCP server '" + name + "' enabled with "
+                + tools.size() + " tools." + ConsoleRenderer.RESET + "\n");
             return;
         }
 
@@ -1063,11 +1041,11 @@ public class ClawkitApp implements Runnable {
 
     private void printMcpUsage() {
         System.out.println();
-        System.out.println(GRAY + "  /mcp                    list all MCP servers" + RESET);
-        System.out.println(GRAY + "  /mcp restart <name>     restart a server" + RESET);
-        System.out.println(GRAY + "  /mcp logs <name>        show server stderr logs" + RESET);
-        System.out.println(GRAY + "  /mcp disable <name>     stop and disable a server" + RESET);
-        System.out.println(GRAY + "  /mcp enable <name>      re-enable a disabled server" + RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /mcp                    list all MCP servers" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /mcp restart <name>     restart a server" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /mcp logs <name>        show server stderr logs" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /mcp disable <name>     stop and disable a server" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /mcp enable <name>      re-enable a disabled server" + ConsoleRenderer.RESET);
         System.out.println();
     }
 
@@ -1081,37 +1059,37 @@ public class ClawkitApp implements Runnable {
         if (args.equals("list")) {
             var skills = skillLoader.listAll();
             if (skills.isEmpty()) {
-                System.out.println(GRAY + "  No skills found." + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  No skills found." + ConsoleRenderer.RESET + "\n");
                 return;
             }
             System.out.println();
             for (var s : skills) {
                 String status = engine.hasSkillLoaded(s.name()) ? " (*loaded)" : "";
-                System.out.println(GRAY + "  - " + s.name() + status + RESET);
-                System.out.println(GRAY + "    " + s.description() + RESET);
+                System.out.println(ConsoleRenderer.GRAY + "  - " + s.name() + status + ConsoleRenderer.RESET);
+                System.out.println(ConsoleRenderer.GRAY + "    " + s.description() + ConsoleRenderer.RESET);
             }
             System.out.println();
         } else if (args.startsWith("load ")) {
             String name = args.substring("load ".length()).trim();
             if (name.isEmpty()) {
-                System.out.println(GRAY + "  Usage: /skill load <name>" + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  Usage: /skill load <name>" + ConsoleRenderer.RESET + "\n");
                 return;
             }
             String prompt = skillLoader.loadPrompt(name);
             if (prompt == null) {
-                System.out.println(GRAY + "  [S-001] Skill not found: " + name + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  [S-001] Skill not found: " + name + ConsoleRenderer.RESET + "\n");
                 return;
             }
             engine.loadSkill(name, prompt);
-            System.out.println(GRAY + "  Skill loaded: " + name + " (" + prompt.length() + " chars)" + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  Skill loaded: " + name + " (" + prompt.length() + " chars)" + ConsoleRenderer.RESET + "\n");
         } else if (args.startsWith("unload ")) {
             String name = args.substring("unload ".length()).trim();
             if (name.isEmpty()) {
-                System.out.println(GRAY + "  Usage: /skill unload <name>" + RESET + "\n");
+                System.out.println(ConsoleRenderer.GRAY + "  Usage: /skill unload <name>" + ConsoleRenderer.RESET + "\n");
                 return;
             }
             engine.unloadSkill(name);
-            System.out.println(GRAY + "  Skill unloaded: " + name + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  Skill unloaded: " + name + ConsoleRenderer.RESET + "\n");
         } else {
             printSkillUsage();
         }
@@ -1119,9 +1097,9 @@ public class ClawkitApp implements Runnable {
 
     private void printSkillUsage() {
         System.out.println();
-        System.out.println(GRAY + "  /skill list             list available skills" + RESET);
-        System.out.println(GRAY + "  /skill load <name>      load a skill into current session" + RESET);
-        System.out.println(GRAY + "  /skill unload <name>    unload a skill" + RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /skill list             list available skills" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /skill load <name>      load a skill into current session" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /skill unload <name>    unload a skill" + ConsoleRenderer.RESET);
         System.out.println();
     }
 
@@ -1150,16 +1128,16 @@ public class ClawkitApp implements Runnable {
 
     private void printMenu(ThinkingMode thinking, PermissionMode perm) {
         System.out.println();
-        System.out.println(GRAY + "  /thinking   toggle thinking     /plan-exec plan+execute" + RESET);
-        System.out.println(GRAY + "  /plan       read-only mode      (current: " + perm + ")" + RESET);
-        System.out.println(GRAY + "  /ask        confirm writes      /auto   full-auto" + RESET);
-        System.out.println(GRAY + "  /clear      reset session       /compact compress" + RESET);
-        System.out.println(GRAY + "  /context    token usage         /remember add memory" + RESET);
-        System.out.println(GRAY + "  /runs       recent runs         /metrics run summary" + RESET);
-        System.out.println(GRAY + "  /trace      run event trace     /memory  list memories" + RESET);
-        System.out.println(GRAY + "  /session    manage sessions     /skill load/unload" + RESET);
-        System.out.println(GRAY + "  /mcp        MCP servers         /im-on /im-off /im-status" + RESET);
-        System.out.println(GRAY + "  /help       show all commands   /exit  quit" + RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /thinking   toggle thinking     /plan-exec plan+execute" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /plan       read-only mode      (current: " + perm + ")" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /ask        confirm writes      /auto   full-auto" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /clear      reset session       /compact compress" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /context    token usage         /remember add memory" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /runs       recent runs         /metrics run summary" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /trace      run event trace     /memory  list memories" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /session    manage sessions     /skill load/unload" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /mcp        MCP servers         /im-on /im-off /im-status" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /help       show all commands   /exit  quit" + ConsoleRenderer.RESET);
         System.out.println();
     }
 
@@ -1214,14 +1192,14 @@ public class ClawkitApp implements Runnable {
             ? this::onThinkingToken : null);
         engine.onReasoning(next == ThinkingMode.TWO_STAGE
             ? this::onReasoning : null);
-        System.out.println(GRAY + "  thinking: " + current + " -> " + next + RESET + "\n");
+        System.out.println(ConsoleRenderer.GRAY + "  thinking: " + current + " -> " + next + ConsoleRenderer.RESET + "\n");
         log.info("Thinking mode toggled: {} -> {}", current, next);
     }
 
     private void setPermissionMode(AgentEngine engine, PermissionMode mode) {
         PermissionMode old = engine.permissionMode();
         engine.setPermissionMode(mode);
-        System.out.println(GRAY + "  permission: " + old + " -> " + mode + RESET + "\n");
+        System.out.println(ConsoleRenderer.GRAY + "  permission: " + old + " -> " + mode + ConsoleRenderer.RESET + "\n");
         log.info("Permission mode switched: {} -> {}", old, mode);
     }
 
@@ -1229,26 +1207,26 @@ public class ClawkitApp implements Runnable {
         boolean isPlanExec = engine.executionMode() == ExecutionMode.PLAN_EXECUTE;
         if (isPlanExec) {
             engine.setExecutionMode(ExecutionMode.REACT);
-            System.out.println(GRAY + "  execution mode: PLAN_EXECUTE -> REACT" + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  execution mode: PLAN_EXECUTE -> REACT" + ConsoleRenderer.RESET + "\n");
         } else {
             engine.setExecutionMode(ExecutionMode.PLAN_EXECUTE);
             engine.setOnPlanReady(this::confirmPlan);
-            System.out.println(GRAY + "  execution mode: REACT -> PLAN_EXECUTE" + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  execution mode: REACT -> PLAN_EXECUTE" + ConsoleRenderer.RESET + "\n");
         }
     }
 
     private boolean confirmPlan(ExecutionPlan plan) {
         System.out.println();
-        System.out.println(GRAY + "  ╔══════════════════════════════════════╗" + RESET);
-        System.out.println(GRAY + "  ║        Execution Plan                ║" + RESET);
-        System.out.println(GRAY + "  ╚══════════════════════════════════════╝" + RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  ╔══════════════════════════════════════╗" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  ║        Execution Plan                ║" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  ╚══════════════════════════════════════╝" + ConsoleRenderer.RESET);
         System.out.println("  Goal: " + plan.getGoal());
         System.out.println();
 
         List<List<String>> levels = PlanParser.computeLevels(plan.getTasks());
 
         for (int i = 0; i < levels.size(); i++) {
-            System.out.println(GRAY + "  Level " + i + RESET);
+            System.out.println(ConsoleRenderer.GRAY + "  Level " + i + ConsoleRenderer.RESET);
             for (String taskId : levels.get(i)) {
                 Task task = plan.getTask(taskId);
                 if (task == null) continue;
@@ -1260,13 +1238,13 @@ public class ClawkitApp implements Runnable {
                 System.out.println("    " + emoji + " " + taskId + " [" + task.getTaskType() + "]");
                 System.out.println("      " + task.getDescription());
                 if (!task.getDependencies().isEmpty()) {
-                    System.out.println(GRAY + "      depends on: " + String.join(", ", task.getDependencies()) + RESET);
+                    System.out.println(ConsoleRenderer.GRAY + "      depends on: " + String.join(", ", task.getDependencies()) + ConsoleRenderer.RESET);
                 }
             }
             System.out.println();
         }
 
-        System.out.print(GRAY + "  Execute this plan? [Y/n] " + RESET);
+        System.out.print(ConsoleRenderer.GRAY + "  Execute this plan? [Y/n] " + ConsoleRenderer.RESET);
         try {
             String input = System.console().readLine().trim().toLowerCase();
             return input.isEmpty() || "y".equals(input) || "yes".equals(input);
@@ -1277,17 +1255,17 @@ public class ClawkitApp implements Runnable {
 
     // === 回调 ===
 
-    private static final String GRAY = "\033[90m";
-    private static final String GREEN = "\033[32m";
-    private static final String YELLOW = "\033[33m";
-    private static final String RED = "\033[31m";
-    private static final String RESET = "\033[0m";
+    static final String GRAY = "\033[90m";
+    static final String GREEN = "\033[32m";
+    static final String YELLOW = "\033[33m";
+    static final String RED = "\033[31m";
+    static final String RESET = "\033[0m";
 
     private static final String THINKING_BAR = "─".repeat(54);
 
     private void onThinkingBegin() {
         System.out.print("\n");
-        System.out.println(GRAY + "┌─ thinking " + THINKING_BAR);
+        System.out.println(ConsoleRenderer.GRAY + "┌─ thinking " + THINKING_BAR);
         System.out.print("│ ");
     }
 
@@ -1300,7 +1278,7 @@ public class ClawkitApp implements Runnable {
     }
 
     private void onReasoning(String text) {
-        System.out.print("\n" + GRAY + "└" + THINKING_BAR + RESET + "\n");
+        System.out.print("\n" + ConsoleRenderer.GRAY + "└" + THINKING_BAR + ConsoleRenderer.RESET + "\n");
     }
 
     private void printBanner(String model, int toolCount, String workDir) {
@@ -1448,7 +1426,7 @@ public class ClawkitApp implements Runnable {
             .filter(c -> c.id().equals(name) && c.isRunning())
             .findFirst().orElse(null);
         if (existing != null) {
-            System.out.println(GRAY + "  " + existing.name() + " is already running." + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  " + existing.name() + " is already running." + ConsoleRenderer.RESET + "\n");
             return;
         }
 
@@ -1457,7 +1435,7 @@ public class ClawkitApp implements Runnable {
                 case "feishu" -> {
                     var fc = new FeishuChannel(FeishuConfig.fromEnv());
                     fc.setOnImInput(text -> {
-                        System.out.print("\r\033[K" + GRAY + "  [飞书] " + text + RESET + "\n> ");
+                        System.out.print("\r\033[K" + ConsoleRenderer.GRAY + "  [飞书] " + text + ConsoleRenderer.RESET + "\n> ");
                         System.out.flush();
                     });
                     yield fc;
@@ -1465,7 +1443,7 @@ public class ClawkitApp implements Runnable {
                 case "weixin" -> {
                     var wc = new WeixinChannel(WeixinConfig.fromEnv());
                     wc.setOnImInput(text -> {
-                        System.out.print("\r\033[K" + GRAY + "  [微信] " + text + RESET + "\n> ");
+                        System.out.print("\r\033[K" + ConsoleRenderer.GRAY + "  [微信] " + text + ConsoleRenderer.RESET + "\n> ");
                         System.out.flush();
                     });
                     yield wc;
@@ -1475,10 +1453,10 @@ public class ClawkitApp implements Runnable {
             channel.setEngine(engine);
             channel.start();
             imChannels.add(channel);
-            System.out.println(GRAY + "  " + channel.name() + " channel started." + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  " + channel.name() + " channel started." + ConsoleRenderer.RESET + "\n");
         } catch (Exception e) {
             log.error("Failed to start {} channel: {}", name, e.getMessage(), e);
-            System.out.println(GRAY + "  [C-003] Failed: " + e.getMessage() + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  [C-003] Failed: " + e.getMessage() + ConsoleRenderer.RESET + "\n");
         }
     }
 
@@ -1487,29 +1465,29 @@ public class ClawkitApp implements Runnable {
             .filter(c -> c.id().equals(name) && c.isRunning())
             .findFirst().orElse(null);
         if (channel == null) {
-            System.out.println(GRAY + "  " + name + " is not running." + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  " + name + " is not running." + ConsoleRenderer.RESET + "\n");
             return;
         }
         channel.stop();
         imChannels.remove(channel);
-        System.out.println(GRAY + "  " + channel.name() + " channel stopped." + RESET + "\n");
+        System.out.println(ConsoleRenderer.GRAY + "  " + channel.name() + " channel stopped." + ConsoleRenderer.RESET + "\n");
     }
 
     private void stopAllImChannels() {
         if (imChannels.isEmpty()) {
-            System.out.println(GRAY + "  No IM channels active." + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  No IM channels active." + ConsoleRenderer.RESET + "\n");
             return;
         }
         for (var ch : imChannels) {
             if (ch.isRunning()) ch.stop();
         }
         imChannels.clear();
-        System.out.println(GRAY + "  All IM channels stopped." + RESET + "\n");
+        System.out.println(ConsoleRenderer.GRAY + "  All IM channels stopped." + ConsoleRenderer.RESET + "\n");
     }
 
     private void printImStatus() {
         if (imChannels.isEmpty()) {
-            System.out.println(GRAY + "  No IM channels active." + RESET + "\n");
+            System.out.println(ConsoleRenderer.GRAY + "  No IM channels active." + ConsoleRenderer.RESET + "\n");
             return;
         }
         System.out.println();
@@ -1517,8 +1495,8 @@ public class ClawkitApp implements Runnable {
             var s = ch.status();
             String icon = s.running() ? "*" : " ";
             String user = s.linkedUser() != null ? s.linkedUser() : "—";
-            System.out.println(GRAY + "  [" + icon + "] " + padRight(s.name(), 8)
-                + "  user: " + user + "  " + s.stateInfo() + RESET);
+            System.out.println(ConsoleRenderer.GRAY + "  [" + icon + "] " + padRight(s.name(), 8)
+                + "  user: " + user + "  " + s.stateInfo() + ConsoleRenderer.RESET);
         }
         System.out.println();
     }
