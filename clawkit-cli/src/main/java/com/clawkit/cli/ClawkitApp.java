@@ -102,6 +102,8 @@ public class ClawkitApp implements Runnable {
     private LineReader reader;
     private com.clawkit.observability.RunReader runReader;
     private final ConsoleRenderer renderer = new ConsoleRenderer();
+    private LLMProvider provider;
+    private DiskMemoryService memoryService;
 
     @Override
     public void run() {
@@ -134,7 +136,7 @@ public class ClawkitApp implements Runnable {
             .protocol(protocolEnum)
             .build();
 
-        LLMProvider provider = ProviderFactory.create(config);
+        this.provider = ProviderFactory.create(config);
 
         Path userSkillsDir = Path.of(System.getProperty("user.home"), ".agents", "skills");
         registry = createToolRegistry(resolvedWorkDir, userSkillsDir);
@@ -168,7 +170,7 @@ public class ClawkitApp implements Runnable {
 
         ThinkingMode mode = thinking ? ThinkingMode.TWO_STAGE : ThinkingMode.OFF;
         Path memoryDir = Path.of(System.getProperty("user.home"), ".clawkit", "memory");
-        DiskMemoryService memoryService = new DiskMemoryService(memoryDir);
+        this.memoryService = new DiskMemoryService(memoryDir);
         String memoryIndex = memoryService.loadIndex();
 
         // 读取分级 CLAUDE.md（~/.clawkit/CLAUDE.md + ./CLAUDE.md）
@@ -246,78 +248,9 @@ public class ClawkitApp implements Runnable {
             input = input.strip();
             if (input.isBlank()) continue;
 
-            // === 记忆命令 ===
-            if (input.equals("/remember") || input.startsWith("/remember ")) {
-                handleRemember(reader, memoryService, provider, engine, input);
-                continue;
-            }
-            if (input.startsWith("/memory")) {
-                handleMemory(input, memoryService, engine);
-                continue;
-            }
-
-            // === 斜杠命令 ===
-            if (input.equals("/session")) {
-                printSessionUsage();
-                continue;
-            }
-            if (input.startsWith("/session ")) {
-                handleSessionCommand(input.substring("/session ".length()).trim());
-                continue;
-            }
-            if (input.startsWith("/mcp")) {
-                handleMcpCommand(input.substring("/mcp".length()).trim());
-                continue;
-            }
-            if (input.startsWith("/skill")) {
-                handleSkillCommand(input.substring("/skill".length()).trim());
-                continue;
-            }
+            // 斜杠命令分派 → 提取为独立方法（可独立测试）
             if (input.startsWith("/")) {
-                switch (input) {
-                    case "/" -> printMenu(engine.thinkingMode(), engine.permissionMode());
-                    case "/h", "/help" -> printHelp(engine.thinkingMode(), engine.permissionMode());
-                    case "/q", "/exit" -> {
-                        if (mcpManager != null) mcpManager.shutdown();
-                        System.out.println("Goodbye.");
-                        return;
-                    }
-                    case "/t", "/thinking" -> toggleThinking(engine);
-                    case "/p", "/plan" -> setPermissionMode(engine, PermissionMode.PLAN);
-                    case "/a", "/ask" -> setPermissionMode(engine, PermissionMode.ASK);
-                    case "/auto" -> setPermissionMode(engine, PermissionMode.AUTO);
-                    case "/plan-exec" -> togglePlanExec(engine);
-                    case "/c", "/clear" -> {
-                        engine.clearSession();
-                        System.out.println(ConsoleRenderer.GRAY + "  session cleared." + ConsoleRenderer.RESET + "\n");
-                        log.info("Session cleared");
-                    }
-                    case "/feishu-on" -> startImChannel("feishu", reader);
-                    case "/feishu-off" -> stopImChannel("feishu");
-                    case "/im-on" -> {
-                        String[] parts = input.split("\\s+", 3);
-                        if (parts.length >= 2) startImChannel(parts[1], reader);
-                        else System.out.println(ConsoleRenderer.GRAY + "  Usage: /im-on feishu|weixin" + ConsoleRenderer.RESET + "\n");
-                    }
-                    case "/im-off" -> {
-                        String[] parts = input.split("\\s+", 3);
-                        if (parts.length >= 2) stopImChannel(parts[1]);
-                        else stopAllImChannels();
-                    }
-                    case "/im-status" -> printImStatus();
-                    case "/compact" -> {
-                        String stats = engine.compactSession();
-                        System.out.println(ConsoleRenderer.GRAY + "  " + stats + ConsoleRenderer.RESET + "\n");
-                        log.info("Manual compaction: {}", stats);
-                    }
-                    case "/context" -> {
-                        printContext(engine);
-                    }
-                    case "/runs" -> printRuns();
-                    case "/metrics" -> printMetrics(input);
-                    case "/trace" -> printTrace(input);
-                    default -> System.out.println("未知命令，输入 / 查看菜单。\n");
-                }
+                if (dispatchCommand(input)) return;
                 continue;
             }
 
@@ -652,6 +585,85 @@ public class ClawkitApp implements Runnable {
         + "  project = facts about ongoing work, goals, deadlines\n"
         + "  reference = pointers to external resources\n\n"
         + "Memory content:\n";
+
+    /**
+     * 斜杠命令路由分派。从 REPL 主循环提取为独立方法。
+     * @return true 表示退出应用，false 继续循环
+     */
+    private boolean dispatchCommand(String input) {
+        // 记忆命令
+        if (input.equals("/remember") || input.startsWith("/remember ")) {
+            handleRemember(reader, memoryService, provider, engine, input);
+            return false;
+        }
+        if (input.startsWith("/memory")) {
+            handleMemory(input, memoryService, engine);
+            return false;
+        }
+
+        // 参数化命令
+        if (input.equals("/session")) {
+            printSessionUsage();
+            return false;
+        }
+        if (input.startsWith("/session ")) {
+            handleSessionCommand(input.substring("/session ".length()).trim());
+            return false;
+        }
+        if (input.startsWith("/mcp")) {
+            handleMcpCommand(input.substring("/mcp".length()).trim());
+            return false;
+        }
+        if (input.startsWith("/skill")) {
+            handleSkillCommand(input.substring("/skill".length()).trim());
+            return false;
+        }
+
+        // 简单斜杠命令
+        switch (input) {
+            case "/" -> printMenu(engine.thinkingMode(), engine.permissionMode());
+            case "/h", "/help" -> printHelp(engine.thinkingMode(), engine.permissionMode());
+            case "/q", "/exit" -> {
+                if (mcpManager != null) mcpManager.shutdown();
+                System.out.println("Goodbye.");
+                return true;
+            }
+            case "/t", "/thinking" -> toggleThinking(engine);
+            case "/p", "/plan" -> setPermissionMode(engine, PermissionMode.PLAN);
+            case "/a", "/ask" -> setPermissionMode(engine, PermissionMode.ASK);
+            case "/auto" -> setPermissionMode(engine, PermissionMode.AUTO);
+            case "/plan-exec" -> togglePlanExec(engine);
+            case "/c", "/clear" -> {
+                engine.clearSession();
+                System.out.println(ConsoleRenderer.GRAY + "  session cleared." + ConsoleRenderer.RESET + "\n");
+                log.info("Session cleared");
+            }
+            case "/feishu-on" -> startImChannel("feishu", reader);
+            case "/feishu-off" -> stopImChannel("feishu");
+            case "/im-on" -> {
+                String[] parts = input.split("\\s+", 3);
+                if (parts.length >= 2) startImChannel(parts[1], reader);
+                else System.out.println(ConsoleRenderer.GRAY + "  Usage: /im-on feishu|weixin" + ConsoleRenderer.RESET + "\n");
+            }
+            case "/im-off" -> {
+                String[] parts = input.split("\\s+", 3);
+                if (parts.length >= 2) stopImChannel(parts[1]);
+                else stopAllImChannels();
+            }
+            case "/im-status" -> printImStatus();
+            case "/compact" -> {
+                String stats = engine.compactSession();
+                System.out.println(ConsoleRenderer.GRAY + "  " + stats + ConsoleRenderer.RESET + "\n");
+                log.info("Manual compaction: {}", stats);
+            }
+            case "/context" -> printContext(engine);
+            case "/runs" -> printRuns();
+            case "/metrics" -> printMetrics(input);
+            case "/trace" -> printTrace(input);
+            default -> System.out.println("未知命令，输入 / 查看菜单。\n");
+        }
+        return false;
+    }
 
     private void handleRemember(LineReader reader, DiskMemoryService service,
                                 LLMProvider provider, AgentEngine engine,
