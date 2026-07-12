@@ -1,53 +1,88 @@
 package com.clawkit.tools;
 
+import com.clawkit.tools.schema.ToolDefinition;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.time.Duration;
+import java.time.Instant;
+
 /**
- * 工具接口契约 — clawkit 中所有工具的抽象父类型。
- * 新增工具只需: 实现本接口 → 注册到 ToolRegistry → 编写测试。
+ * 统一工具契约。
+ * 新工具优先实现 {@link #execute(ToolExecutionRequest)} 和 {@link #metadata()}。
+ * {@link #execute(String)} 仅保留为迁移适配层。
  */
 public interface Tool {
+    ObjectMapper MAPPER = new ObjectMapper();
 
-    /** 工具名，kebab-case，如 "read", "write", "edit", "bash", "glob", "grep" */
+    /** 工具名称（kebab-case） */
     String name();
 
-    /** 给 LLM 看的描述，说明何时使用、接收什么参数 */
+    /** 工具描述（给 LLM 阅读） */
     String description();
 
-    /** 输入参数的 JSON Schema，供 LLM 理解参数结构 */
+    /** JSON Schema 字符串 */
     String inputSchema();
 
-    /** 执行工具，参数为 JSON 字符串，返回统一 Result */
+    /**
+     * 执行工具（旧接口）。
+     * @deprecated 使用 {@link #execute(ToolExecutionRequest)} 替代。
+     *             仅允许通过 LegacyToolAdapter 调用。
+     */
+    @Deprecated
     Result<String> execute(String arguments);
 
-    /** 是否为只读工具。读工具可并行执行，写工具需串行。默认 false（写工具）。 */
-    default boolean isReadOnly() { return false; }
+    /** 是否只读。默认 false（写工具）。读工具可被并行化 */
+    default boolean isReadOnly() {
+        return false;
+    }
 
-    /** 工具元数据（风险等级、副作用等）。默认从 isReadOnly() 推导。 */
+    /** 工具元数据（V2：包含行为、执行策略和来源） */
     default ToolMetadata metadata() {
         return ToolMetadata.from(this);
     }
 
+    /** V2：工具行为定义 */
+    default ToolBehavior behavior() {
+        return metadata().behavior();
+    }
+
+    /** V2：工具执行策略 */
+    default ToolExecutionPolicy executionPolicy() {
+        return metadata().executionPolicy();
+    }
+
     /**
-     * 结构化执行入口（新接口）。默认适配旧 execute(String) 接口。
-     * 工具实现可 override 以获得结构化结果。
+     * 执行工具（V2 结构化接口）。
+     * 默认实现适配旧 {@link #execute(String)}。
      */
     default ToolExecutionResult execute(ToolExecutionRequest req) {
-        long start = System.currentTimeMillis();
+        Instant start = Instant.now();
         try {
-            String args = req.arguments() != null ? req.arguments().toString() : "{}";
-            Result<String> result = execute(args);
-            long duration = System.currentTimeMillis() - start;
+            String argsJson = req.arguments() != null ? req.arguments().toString() : "{}";
+            Result<String> result = execute(argsJson);
+            long durationMs = Duration.between(start, Instant.now()).toMillis();
             return switch (result) {
                 case Result.Ok<String> ok -> ToolExecutionResult.success(
-                    req.toolCallId(), req.toolName(), ok.data(), duration, metadata());
+                    req.toolCallId(), req.toolName(), ok.data(), durationMs, metadata());
                 case Result.Err<String> err -> ToolExecutionResult.error(
                     req.toolCallId(), req.toolName(),
-                    err.error().errorCode(), err.error().message(), duration, metadata());
+                    err.error().errorCode(), err.error().message(), durationMs, metadata());
             };
         } catch (Exception e) {
-            long duration = System.currentTimeMillis() - start;
-            return ToolExecutionResult.error(
-                req.toolCallId(), req.toolName(), "INTERNAL_ERROR",
-                e.getMessage(), duration, metadata());
+            long durationMs = Duration.between(start, Instant.now()).toMillis();
+            return ToolExecutionResult.internalError(
+                req.toolCallId(), req.toolName(), e.getMessage(), durationMs, metadata());
         }
+    }
+
+    /** 转换为 LLM 可见的 ToolDefinition */
+    default ToolDefinition toDefinition() {
+        JsonNode schema = null;
+        try {
+            schema = MAPPER.readTree(inputSchema());
+        } catch (Exception ignored) {
+            // fallback: 传 null schema
+        }
+        return new ToolDefinition(name(), description(), schema);
     }
 }

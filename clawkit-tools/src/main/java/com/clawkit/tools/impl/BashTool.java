@@ -3,11 +3,25 @@ package com.clawkit.tools.impl;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.clawkit.tools.ProcessRunner;
 import com.clawkit.tools.Result;
 import com.clawkit.tools.Tool;
+import com.clawkit.tools.ToolBehavior;
+import com.clawkit.tools.ToolExecutionPolicy;
+import com.clawkit.tools.ToolMetadata;
+import com.clawkit.tools.ToolMetadataProvenance;
+import com.clawkit.tools.ToolRiskLevel;
+import com.clawkit.tools.ToolSideEffect;
+import com.clawkit.tools.ToolError;
+import com.clawkit.tools.ToolExecutionRequest;
+import com.clawkit.tools.ToolExecutionResult;
+import com.clawkit.tools.ToolExecutionStatus;
+import com.clawkit.tools.ToolOutputStats;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,6 +53,7 @@ public class BashTool implements Tool {
     private final Path workDir;
     private final String shell;
     private final String shellFlag;
+    private final ProcessRunner processRunner;
 
     /** 静态检测：Windows 上优先用 Git Bash 完整路径（避开 WSL shim），不存在则回退 cmd */
     private static final String[] DETECTED_SHELL = detectShell();
@@ -85,9 +100,14 @@ public class BashTool implements Tool {
     }
 
     public BashTool(Path workDir) {
+        this(workDir, new DefaultProcessRunner());
+    }
+
+    public BashTool(Path workDir, ProcessRunner processRunner) {
         this.workDir = workDir.toAbsolutePath().normalize();
         this.shell = DETECTED_SHELL[0];
         this.shellFlag = DETECTED_SHELL[1];
+        this.processRunner = processRunner;
     }
 
     @Override
@@ -106,6 +126,81 @@ public class BashTool implements Tool {
     }
 
     @Override
+    public ToolMetadata metadata() {
+        return new ToolMetadata(
+            name(), description(), null, null,
+            new ToolBehavior(false, ToolRiskLevel.HIGH, true, false, true, false,
+                Set.of(ToolSideEffect.SHELL_EXEC)),
+            new ToolExecutionPolicy(Duration.ofSeconds(TIMEOUT_SECONDS), MAX_OUTPUT_BYTES,
+                ToolExecutionPolicy.OutputTruncation.HEAD_TAIL, ToolExecutionPolicy.ToolConcurrency.SERIAL),
+            ToolMetadataProvenance.builtin(name())
+        );
+    }
+
+    @Override
+    public ToolExecutionResult execute(ToolExecutionRequest req) {
+        long start = System.currentTimeMillis();
+        try {
+            JsonNode argsNode = req.arguments();
+            if (argsNode == null) {
+                return ToolExecutionResult.invalidArguments(
+                    req.toolCallId(), name(), "参数 JSON 解析失败", 0, metadata());
+            }
+
+            JsonNode cmdNode = argsNode.get("command");
+            if (cmdNode == null || cmdNode.asText().isEmpty()) {
+                return ToolExecutionResult.invalidArguments(
+                    req.toolCallId(), name(), "缺少必需参数 'command'", 0, metadata());
+            }
+
+            String command = cmdNode.asText();
+            String useShell = shell;
+            String useFlag = shellFlag;
+            if (isWindows() && needsCmdExe(command) && !"cmd".equals(shell)) {
+                useShell = "cmd";
+                useFlag = "/c";
+            }
+
+            ProcessRunner.ProcessExecutionRequest pr = new ProcessRunner.ProcessExecutionRequest(
+                workDir, command, useShell, useFlag,
+                Duration.ofSeconds(TIMEOUT_SECONDS), MAX_OUTPUT_BYTES, null);
+            ProcessRunner.ProcessExecutionResult presult = processRunner.execute(pr);
+            long duration = System.currentTimeMillis() - start;
+
+            String output = formatOutput(presult);
+            ToolOutputStats stats = new ToolOutputStats(
+                presult.totalOutputBytes(), presult.totalOutputBytes(), presult.truncated());
+
+            if (presult.timedOut()) {
+                output = output + "\n[警告: 命令执行超时(" + TIMEOUT_SECONDS + "s)，已被系统强制终止。]";
+                return ToolExecutionResult.timedOut(
+                    req.toolCallId(), name(), truncate(output), duration, stats, metadata());
+            }
+
+            if (presult.exitCode() != 0) {
+                return ToolExecutionResult.of(
+                    req.toolCallId(), name(),
+                    "[exit=" + presult.exitCode() + "]\n" + truncate(output),
+                    ToolExecutionStatus.NON_ZERO_EXIT,
+                    ToolError.fatal("NON_ZERO_EXIT", "Process exited with code " + presult.exitCode()),
+                    duration, stats, presult.exitCode(), metadata(), null);
+            }
+
+            if (output.isEmpty()) {
+                output = "命令执行成功，无终端输出。";
+            }
+            return ToolExecutionResult.success(
+                req.toolCallId(), name(), truncate(output), duration, stats, metadata());
+
+        } catch (Exception e) {
+            long duration = System.currentTimeMillis() - start;
+            return ToolExecutionResult.internalError(
+                req.toolCallId(), name(), e.getMessage(), duration, metadata());
+        }
+    }
+
+    @Override
+    @Deprecated
     public Result<String> execute(String arguments) {
         // 1. 解析参数
         JsonNode argsNode;
@@ -120,61 +215,59 @@ public class BashTool implements Tool {
             return new Result.Err<>(new Result.ErrorInfo("T-002", "缺少必需参数 'command'"));
         }
 
-        // 2. 构建进程：绑定 workDir + shell 包装
         String command = cmdNode.asText();
         String useShell = shell;
         String useFlag = shellFlag;
 
-        // Windows: .cmd/.bat 文件直接走 cmd.exe /c，避免 bash 嵌套引号卡死
+        // Windows: .cmd/.bat 文件直接走 cmd.exe /c
         if (isWindows() && needsCmdExe(command) && !"cmd".equals(shell)) {
             useShell = "cmd";
             useFlag = "/c";
         }
 
-        ProcessBuilder pb = new ProcessBuilder(useShell, useFlag, command);
-        pb.directory(workDir.toFile());
-        pb.redirectErrorStream(true);
+        // 2. 通过 ProcessRunner 执行
+        ProcessRunner.ProcessExecutionRequest req = new ProcessRunner.ProcessExecutionRequest(
+            workDir, command, useShell, useFlag,
+            Duration.ofSeconds(TIMEOUT_SECONDS), MAX_OUTPUT_BYTES, null);
 
-        // 3. 执行 + 超时控制
-        Process process;
-        try {
-            process = pb.start();
-        } catch (IOException e) {
-            return new Result.Err<>(new Result.ErrorInfo("T-005", "启动进程失败: " + e.getMessage()));
+        ProcessRunner.ProcessExecutionResult pr = processRunner.execute(req);
+
+        // 3. 映射结果
+        if (pr.timedOut()) {
+            String output = formatOutput(pr);
+            output = output + "\n[警告: 命令执行超时(" + TIMEOUT_SECONDS + "s)，已被系统强制终止。]";
+            log.warn("[Bash] {} → TIMEOUT ({}s)", shellCmd(command), TIMEOUT_SECONDS);
+            return new Result.Err<>(new Result.ErrorInfo("TIMEOUT",
+                truncate(output)));
         }
 
-        String output;
-        boolean timedOut = false;
-        try {
-            boolean finished = process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            if (!finished) {
-                process.destroyForcibly();
-                timedOut = true;
-            }
-            output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            process.destroyForcibly();
-            return new Result.Err<>(new Result.ErrorInfo("T-004", "命令执行被中断"));
-        } catch (IOException e) {
-            return new Result.Err<>(new Result.ErrorInfo("T-005", "读取命令输出失败: " + e.getMessage()));
+        if (pr.exitCode() != 0) {
+            String output = formatOutput(pr);
+            log.warn("[Bash] {} → exit={}", shellCmd(command), pr.exitCode());
+            return new Result.Err<>(new Result.ErrorInfo("NON_ZERO_EXIT",
+                "[exit=" + pr.exitCode() + "]\n" + truncate(output)));
         }
 
-        // 超时警告
-        if (timedOut) {
-            output = output + "\n[警告: 命令执行超时(" + TIMEOUT_SECONDS + "s)，已被系统强制终止。如果是启动常驻服务，请尝试将其转入后台。]";
-            log.warn("[Bash] {} → TIMEOUT ({}s)", shellCmd(cmdNode.asText()), TIMEOUT_SECONDS);
-            return new Result.Ok<>(truncate(output));
-        }
-
-        // 空输出
+        String output = formatOutput(pr);
         if (output.isEmpty()) {
-            log.info("[Bash] {} → 0 bytes (empty)", shellCmd(cmdNode.asText()));
+            log.info("[Bash] {} → 0 bytes (empty)", shellCmd(command));
             return new Result.Ok<>("命令执行成功，无终端输出。");
         }
 
-        log.info("[Bash] {} → {} bytes", shellCmd(cmdNode.asText()), output.length());
+        log.info("[Bash] {} → {} bytes", shellCmd(command), output.length());
         return new Result.Ok<>(truncate(output));
+    }
+
+    private String formatOutput(ProcessRunner.ProcessExecutionResult pr) {
+        StringBuilder sb = new StringBuilder();
+        if (!pr.stdout().isEmpty()) {
+            sb.append("[stdout]\n").append(pr.stdout());
+        }
+        if (!pr.stderr().isEmpty()) {
+            if (!sb.isEmpty()) sb.append('\n');
+            sb.append("[stderr]\n").append(pr.stderr());
+        }
+        return sb.toString();
     }
 
     private static String shellCmd(String cmd) {

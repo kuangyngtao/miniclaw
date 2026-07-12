@@ -72,13 +72,17 @@ public class McpClient {
             if (desc.isEmpty()) {
                 desc = t.path("title").asText("");
             }
-            result.add(new McpToolDef(name, desc, schema));
+            JsonNode annotations = t.path("annotations");
+            JsonNode outputSchema = t.path("outputSchema");
+            result.add(new McpToolDef(name, desc, schema,
+                annotations.isMissingNode() ? null : annotations,
+                outputSchema.isMissingNode() ? null : outputSchema));
         }
         return result;
     }
 
-    /** 调用工具，返回 content 数组中 text 类型的拼接 */
-    public String callTool(String toolName, JsonNode arguments) throws IOException {
+    /** 调用工具，返回结构化 McpCallResult（V2：保留 isError + content items） */
+    public McpCallResult callTool(String toolName, JsonNode arguments) throws IOException {
         ObjectNode params = MAPPER.createObjectNode();
         params.put("name", toolName);
         params.set("arguments", arguments != null ? arguments : MAPPER.createObjectNode());
@@ -92,13 +96,20 @@ public class McpClient {
                 + (error != null ? error.toPrettyString() : root.toString()));
         }
 
+        // 检查 isError
+        boolean isError = result.path("isError").asBoolean(false);
+
         JsonNode content = result.path("content");
         if (!content.isArray()) {
-            return content.asText();
+            String text = content.asText();
+            return isError ? McpCallResult.error(text, List.of()) : McpCallResult.success(text, List.of());
         }
 
+        // 收集所有 content items
+        List<JsonNode> contentItems = new ArrayList<>();
         StringBuilder sb = new StringBuilder();
         for (JsonNode item : content) {
+            contentItems.add(item);
             String type = item.path("type").asText("text");
             if ("text".equals(type)) {
                 sb.append(item.path("text").asText());
@@ -106,7 +117,8 @@ public class McpClient {
                 sb.append("[mcp: non-text content type=").append(type).append("]");
             }
         }
-        return sb.toString();
+        return isError ? McpCallResult.error(sb.toString(), contentItems)
+                       : McpCallResult.success(sb.toString(), contentItems);
     }
 
     private String sendRequest(String method, ObjectNode params) throws IOException {

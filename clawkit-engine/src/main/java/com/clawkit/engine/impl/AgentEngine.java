@@ -24,6 +24,9 @@ import com.clawkit.engine.ApprovalRequest;
 import com.clawkit.engine.ApprovalResult;
 import com.clawkit.engine.PermissionMode;
 import com.clawkit.engine.SessionMeta;
+import com.clawkit.tools.ApprovalGrantCache;
+import com.clawkit.tools.DefaultApprovalGrantCache;
+import com.clawkit.tools.ToolRiskLevel;
 import com.clawkit.engine.SessionService;
 import com.clawkit.engine.ExecutionMode;
 import com.clawkit.engine.ThinkingMode;
@@ -424,7 +427,7 @@ public class AgentEngine implements AgentLoop {
     private final List<Consumer<String>> onReasoningListeners = new CopyOnWriteArrayList<>();
     private final List<Consumer<String>> onThinkingTokenListeners = new CopyOnWriteArrayList<>();
     private volatile ApprovalHandler approvalHandler;
-    private final Set<String> autoApprovedTools = ConcurrentHashMap.newKeySet();
+    private final ApprovalGrantCache approvalCache = new DefaultApprovalGrantCache();
     private volatile boolean interrupted;
     volatile int lastRunTurns;
     volatile boolean enableSubAgents = true;
@@ -526,7 +529,7 @@ public class AgentEngine implements AgentLoop {
                 req.toolCallId(), req.toolName(), req.arguments()));
             return com.clawkit.tools.ToolExecutionResult.success(
                 req.toolCallId(), req.toolName(), output, 0,
-                new com.clawkit.tools.ToolMetadata(SESSION_CONTEXT_TOOL_NAME, "", null,
+                com.clawkit.tools.ToolMetadata.of(SESSION_CONTEXT_TOOL_NAME, "", null,
                     true, com.clawkit.tools.ToolRiskLevel.LOW, false, false, java.util.Set.of()));
         });
         internalToolRouter.register(SKILL_LOAD_TOOL_NAME, (req, ctx) -> {
@@ -534,7 +537,7 @@ public class AgentEngine implements AgentLoop {
                 req.toolCallId(), req.toolName(), req.arguments()));
             return com.clawkit.tools.ToolExecutionResult.success(
                 req.toolCallId(), req.toolName(), output, 0,
-                new com.clawkit.tools.ToolMetadata(SKILL_LOAD_TOOL_NAME, "", null,
+                com.clawkit.tools.ToolMetadata.of(SKILL_LOAD_TOOL_NAME, "", null,
                     true, com.clawkit.tools.ToolRiskLevel.LOW, false, false, java.util.Set.of()));
         });
         internalToolRouter.register(SKILL_UNLOAD_TOOL_NAME, (req, ctx) -> {
@@ -542,7 +545,7 @@ public class AgentEngine implements AgentLoop {
                 req.toolCallId(), req.toolName(), req.arguments()));
             return com.clawkit.tools.ToolExecutionResult.success(
                 req.toolCallId(), req.toolName(), output, 0,
-                new com.clawkit.tools.ToolMetadata(SKILL_UNLOAD_TOOL_NAME, "", null,
+                com.clawkit.tools.ToolMetadata.of(SKILL_UNLOAD_TOOL_NAME, "", null,
                     true, com.clawkit.tools.ToolRiskLevel.LOW, false, false, java.util.Set.of()));
         });
         internalToolRouter.register(MEMORY_SAVE_TOOL_NAME, (req, ctx) -> {
@@ -550,7 +553,7 @@ public class AgentEngine implements AgentLoop {
                 req.toolCallId(), req.toolName(), req.arguments()));
             return com.clawkit.tools.ToolExecutionResult.success(
                 req.toolCallId(), req.toolName(), output, 0,
-                new com.clawkit.tools.ToolMetadata(MEMORY_SAVE_TOOL_NAME, "", null,
+                com.clawkit.tools.ToolMetadata.of(MEMORY_SAVE_TOOL_NAME, "", null,
                     false, com.clawkit.tools.ToolRiskLevel.MEDIUM, true, true, java.util.Set.of()));
         });
         internalToolRouter.register(REMEMBER_TOOL_NAME, (req, ctx) -> {
@@ -558,7 +561,7 @@ public class AgentEngine implements AgentLoop {
                 req.toolCallId(), req.toolName(), req.arguments()));
             return com.clawkit.tools.ToolExecutionResult.success(
                 req.toolCallId(), req.toolName(), output, 0,
-                new com.clawkit.tools.ToolMetadata(REMEMBER_TOOL_NAME, "", null,
+                com.clawkit.tools.ToolMetadata.of(REMEMBER_TOOL_NAME, "", null,
                     false, com.clawkit.tools.ToolRiskLevel.LOW, false, false, java.util.Set.of()));
         });
     }
@@ -925,32 +928,26 @@ public class AgentEngine implements AgentLoop {
             log.info("[Engine] 模型请求调用 {} 个工具, {} 模式...",
                 calls.size(), allReadOnly(calls) ? "并行" : "串行");
 
-            // 通过 ToolCallExecutor 统一执行（替代旧的 executeParallel/executeSequential）
-            if (calls.stream().allMatch(c -> TASK_TOOL_NAME.equals(c.name()))) {
-                log.info("[Engine] SubAgent 并行: {} 个子任务", calls.size());
-                totalToolCalls += calls.size();
-                executeSubAgentsParallel(calls, contextHistory);
-            } else {
-                totalToolCalls += calls.size();
-                var execCtx = new ToolExecutionContext(
-                    currentRunId, turnCount, permissionMode, approvalHandler,
-                    (p, rid, prid, tn, t) -> {
-                        for (var r : recorders) {
-                            try { r.record(p, rid, prid, tn, t); }
-                            catch (Exception ignored) {}
-                        }
-                    },
-                    internalToolRouter, autoApprovedTools);
-                var batchResult = toolCallExecutor.executeBatch(calls, execCtx);
-                for (Message msg : batchResult.toolResultMessages()) {
-                    contextHistory.add(msg);
-                    if ("todo_write".equals(
-                        calls.stream().filter(c -> c.id().equals(msg.toolCallId()))
-                            .findFirst().map(ToolCall::name).orElse(""))) {
-                        syncTodoToWorkspace(
-                            calls.stream().filter(c -> c.id().equals(msg.toolCallId()))
-                                .findFirst().map(ToolCall::arguments).orElse(null));
+            // 通过 ToolCallExecutor 统一执行（包括 SubAgent task）
+            totalToolCalls += calls.size();
+            var execCtx = new ToolExecutionContext(
+                currentRunId, turnCount, permissionMode.toToolsMode(), approvalHandler,
+                (p, rid, prid, tn, t) -> {
+                    for (var r : recorders) {
+                        try { r.record(p, rid, prid, tn, t); }
+                        catch (Exception ignored) {}
                     }
+                },
+                internalToolRouter, approvalCache);
+            var batchResult = toolCallExecutor.executeBatch(calls, execCtx);
+            for (Message msg : batchResult.toolResultMessages()) {
+                contextHistory.add(msg);
+                if ("todo_write".equals(
+                    calls.stream().filter(c -> c.id().equals(msg.toolCallId()))
+                        .findFirst().map(ToolCall::name).orElse(""))) {
+                    syncTodoToWorkspace(
+                        calls.stream().filter(c -> c.id().equals(msg.toolCallId()))
+                            .findFirst().map(ToolCall::arguments).orElse(null));
                 }
             }
 
@@ -1100,13 +1097,13 @@ public class AgentEngine implements AgentLoop {
                     continue;
                 }
                 if (permissionMode == PermissionMode.ASK && approvalHandler != null) {
-                    if (!autoApprovedTools.contains(call.name())) {
+                    if (!approvalCache.isGranted(call.name(), ToolRiskLevel.MEDIUM, call.arguments(), java.util.Set.of())) {
                         ApprovalRequest req = ApprovalRequest.from(call, lastAssistantMessage(contextHistory));
                         ApprovalResult decision = approvalHandler.handle(req);
                         switch (decision) {
                             case ApprovalResult.Approve __ -> { /* 执行 */ }
                             case ApprovalResult.ApproveAllSameType a -> {
-                                autoApprovedTools.add(a.toolName());
+                                approvalCache.grant(a.toolName(), ToolRiskLevel.LOW, null, java.util.Set.of());
                             }
                             case ApprovalResult.Reject r -> {
                                 fireEvent(new ApprovalDecidedPayload(call.name(), call.name(), com.clawkit.tools.ToolRiskLevel.HIGH, "REJECT", "USER", r.reason()), currentTurnNumber);
@@ -1318,7 +1315,7 @@ public class AgentEngine implements AgentLoop {
         // Phase 3b: 清空 ephemeral 容器
         ephemeralContext.clear();
         recentCallSignatures.clear();
-        autoApprovedTools.clear();
+        approvalCache.clear();
         workingMemory.clear();
         previousTodoContents = List.of();
         turnsWithoutTodoProgress = 0;
@@ -1812,7 +1809,7 @@ public class AgentEngine implements AgentLoop {
     public void setExecutionMode(ExecutionMode mode) {
         this.executionMode = mode;
         if (mode == ExecutionMode.PLAN_EXECUTE && planExecutor == null) {
-            this.planExecutor = new PlanExecutor(provider, registry, workDir);
+            this.planExecutor = new PlanExecutor(provider, registry, workDir, toolCallExecutor);
         }
         rebuildSystemPrompt();
         log.info("[Engine] 执行模式切换为: {}", mode);
@@ -1904,7 +1901,7 @@ public class AgentEngine implements AgentLoop {
         log.info("[PlanExecute] 执行阶段: {} tasks", plan.taskCount());
 
         if (planExecutor == null) {
-            planExecutor = new PlanExecutor(provider, registry, workDir);
+            planExecutor = new PlanExecutor(provider, registry, workDir, toolCallExecutor);
         }
         ExecutionPlan completedPlan = planExecutor.execute(plan);
 

@@ -138,6 +138,7 @@ public class ApplicationBootstrap {
         registry.register(new TodoWriteTool());
         registry.register(new WebFetchTool());
         registry.register(new BashTool(workDir));
+        registry.register(new GitReadTool(workDir));
         registry.register(new EditTool(workDir));
         registry.register(new GlobTool(workDir));
         registry.register(new GrepTool(workDir));

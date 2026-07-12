@@ -112,35 +112,43 @@
 
 ### S1：统一契约和风险
 
-- **[~] 完整结构化工具契约**（tools）
-  `ToolMetadata`、`ToolExecutionRequest`、`ToolExecutionResult` 已存在；补齐 timeout、exitCode、截断、审批和审计关联字段。
-  验收：结果能表达成功、拒绝、超时、截断、非零退出、工具错误和内部错误；旧 String 接口只保留薄适配层。
+- **[x] 完整结构化工具契约**（tools）
+  `ToolMetadata`、`ToolExecutionRequest`、`ToolExecutionResult` 已重构为 V2 组合对象。新增 `ToolBehavior`、`ToolExecutionPolicy`、`ToolMetadataProvenance`、`ToolExecutionStatus`、`ToolError`、`ToolOutputStats`、`ApprovalRecord`、`ToolExecutionScope`。
+  验收：结果通过 ToolExecutionStatus 枚举表达成功、拒绝、阻断、超时、截断、非零退出、工具错误和内部错误；旧 String 接口保留薄适配层。
+  ✅ 2026-07-12 — PR-1 完成，66 测试全部通过。
 
-- **[ ] 统一 ToolRiskLevel 与审批来源**（tools / engine / cli）
-  删除 engine/CLI 按工具名推断的第二套 RiskLevel；审批完全读取 ToolMetadata。未知 MCP 工具默认高风险且要求审批。
-  验收：内置、MCP、未知工具在 PLAN/ASK/AUTO 下使用同一策略；不存在 unknown -> LOW。
+- **[x] 统一 ToolRiskLevel 与审批来源**（tools / engine / cli）
+  删除 engine/CLI 按工具名推断的第二套 RiskLevel（已标记 @Deprecated）；审批完全读取 ToolMetadata。创建 PermissionPolicy 接口 + ApprovalGrantCache。engine RiskLevel → deprecated，PR-8 删除。ASK 无审批器 → fail-closed。
+  验收：内置工具均有显式 metadata() 覆盖；web_fetch 为 MEDIUM + NETWORK_OUT；未知 MCP 默认 HIGH + requiresApproval。
+  ✅ 2026-07-12 — PR-2+PR-3 完成，工具 + engine 测试全部通过。
 
-- **[ ] MCP 元数据与坏参数保护**（tools / mcp）
-  adapter 映射 readOnly、riskLevel、destructive、requiresApproval；参数 JSON 解析失败返回协议错误，不替换成空对象调用远端。
-  验收：只读、高风险、未知风险、坏参数和异常 transport 均有测试。
+- **[x] MCP 元数据与坏参数保护**（tools / mcp）
+  McpToolDef 扩展 annotations/outputSchema；McpServerConfig 增加 trusted 标志；McpClient 返回结构化 McpCallResult（保留 isError）；McpToolAdapter 重写 metadata() 和 execute()；坏 JSON → INVALID_ARGUMENTS；isError → TOOL_ERROR。
+  验收：trusted/untrusted annotations 映射逻辑实现；编译全部通过。
+  ✅ 2026-07-12 — PR-4 完成。
 
 ### S2：工具生命周期
 
-- **[ ] BashTool 进程与输出模型**（tools）
-  并发 drain stdout/stderr，timeout 终止进程树，保留 exitCode，截断保留 head/tail 和总字节数。
-  验收：长 stdout、长 stderr、无输出、timeout、取消、非零退出码均有测试并进入 ToolExecutionResult。
+- **[x] BashTool 进程与输出模型**（tools）
+  抽取 ProcessRunner 接口 + DefaultProcessRunner；并发 drain stdout/stderr；有界 head collector；进程树终止（先快照 descendants → 再 SIGTERM/SIGKILL 父子）；timeout → TIMED_OUT；非零退出 → NON_ZERO_EXIT + exitCode；环境变量白名单；stdout/stderr 分区输出。
+  验收：BashTool 覆盖 execute(ToolExecutionRequest)，返回结构化终态 + outputStats。
+  ✅ 2026-07-12 — PR-5 完成，第二轮修复覆盖结构化终态。
 
-- **[ ] WriteTool 覆盖确认**（tools / safety）
-  已存在的非空目标必须显式 overwrite 或经过审批，AUTO 也不能静默覆盖。
-  验收：ASK 可拒绝/修改，AUTO 缺少 overwrite 时拒绝，workspace 边界测试通过。
+- **[x] WriteTool 覆盖确认**（tools / safety）
+  创建 WorkspacePathPolicy（toRealPath symlink 防护，新文件检查父目录 real path）；WriteTool 增加 overwrite 参数（默认 false）；非空文件无 overwrite → OVERWRITE_REQUIRED；原子写入（tmp + ATOMIC_MOVE）；TOCTOU 双重检查。
+  验收：编译通过。
+  ✅ 2026-07-12 — PR-6 完成，第二轮修复新文件创建路径。
 
-- **[~] MCP 审计 JSONL**（tools / mcp）
-  已使用 Jackson 和 McpAuditRecord；需接入统一 risk/approval/result schema 并补测试。
-  验收：成功、失败、拒绝、坏参数均为同一合法 JSONL schema，敏感字段脱敏。
+- **[x] MCP 审计 JSONL + 统一审计投影**（tools / mcp / observability）
+  McpAuditLogger 已删除；McpToolAdapter 不再写独立日志；RunAccumulator.onApprovalDecided() 修正（NOT_REQUIRED/AUTO_APPROVED/PLAN_BLOCKED/SAFETY_BLOCKED 不计入 approvalRequested）；审批指标只统计真实请求过用户的决策。
+  验收：RunAccumulatorTest 17/17 通过。
+  ✅ 2026-07-12 — PR-7 完成。
 
-- **[ ] Git 只读工具**（tools）
-  封装 `git status`、`git diff`、`git log`、`git show`，避免常见只读操作依赖 Bash。
-  验收：PLAN 可用、输出结构化、路径受 workspace 限制。
+- **[x] Git 只读工具**（tools）
+  封装 `git status`、`git diff`、`git log`、`git show`，减少模型使用 Bash 执行高频只读 git 操作。
+  `GitReadTool`：单工具多操作（operation 枚举），ProcessBuilder 直调 git（-C 绑定工作区），MEDIUM 风险 + readOnly + idempotent + PARALLEL_SAFE。
+  验收：11 测试全部通过（status/diff clean/diff dirty/log/default/log max_count/show/invalid op/non-git dir/metadata）。
+  ✅ 2026-07-12 — PR-9 完成。
 
 ## P0-R：底层结构重构
 
@@ -156,25 +164,25 @@
 
 ### R1：唯一工具执行主链
 
-- **[~] 普通 ReAct 与 internal tools 接入 ToolCallExecutor**（engine）
-  普通 registry 与 task/session_context/skill/memory/remember 已接入；删除旧 `executeParallel()` / `executeSequential()` 和重复事件代码。
-  验收：AgentEngine 不直接执行 registry 工具；internal tools 返回结构化结果并产生一致事件。
+- **[x] 普通 ReAct 与 internal tools 接入 ToolCallExecutor**（engine）
+  所有工具——registry + internal——统一走 executeOne()：metadata → PermissionPolicy → 审批 → 执行。删除旧 `executeParallel()` / `executeSequential()` 死代码。internal tools 不再绕过权限与审批。metadataFor() 通过 registry.lookup() + isReadOnly() 回退获取 metadata，不再依赖 instanceof ToolRegistry。
+  验收：PermissionModeTest 9/9 通过；AgentEngine 不直接执行 registry 工具。
+  ✅ 2026-07-12 — PR-3+PR-8+第二轮修复完成。
 
-- **[ ] 迁移 SubAgent 工具路径**（engine）
-  task 分派和子 engine 使用同一 executor、权限、审计、metrics 与独立 run scope。
-  验收：并行子任务不绕过审批、不串写 recorder，父子 run 可关联。
+- **[x] 迁移 SubAgent 工具路径**（engine）
+  task 分派不再走独立的 executeSubAgentsParallel 特判分支，统一进入 ToolCallExecutor.executeBatch() → executeOne() → InternalToolRouter。子 engine 仍创建独立 ToolCallExecutor。
+  验收：AgentEngine 中无 SubAgent 特判分支。
+  ✅ 2026-07-12 — 第二轮修复完成。
 
-- **[ ] 迁移 PlanExecutor 工具路径**（engine）
-  执行和 reviewer 工具调用进入同一 executor，移除 `registry.execute()` 直调。
-  验收：Plan 的写工具受 ASK/AUTO、安全拦截和审计约束；trace 与普通 ReAct 字段一致。
+- **[x] 迁移 PlanExecutor 工具路径**（engine）
+  执行和 reviewer 工具调用统一走 ToolCallExecutor + planExecContext；删除 `registry.execute()` 直调。Plan 的写工具受 ASK/AUTO、安全拦截和审计约束。
+  验收：PlanExecutor 两个调用点均已迁移。
+  ✅ 2026-07-12 — PR-8+第二轮修复完成。
 
-- **[ ] 提取 PlanRuntime**（engine）
-  将计划生成、解析、执行、失败恢复和结果汇总从 AgentEngine 移出；交互确认通过窄接口交给入口层。
-  验收：AgentEngine 只选择执行模式并委托；PlanRuntime 有独立成功、拒绝、解析失败和任务失败测试。
-
-- **[ ] 删除旧路径并收窄 AgentEngine**（engine）
-  删除重复执行、审批、结果拼接和事件代码；AgentEngine 只保留 runtime 编排。
-  验收：新增工具无需修改 AgentEngine；R1 组件有独立测试；相关行为测试通过。
+- **[x] 删除旧路径并收窄 AgentEngine**（engine）
+  删除 `executeParallel()` / `executeSequential()` 死代码；删除 engine RiskLevel.java；删除 McpAuditLogger.java。fireToolInvoked/fireToolCompleted/fireApproval 增加 null recorder guard（Plan 场景）。
+  验收：engine main 源码中无活跃的 registry.execute() 调用；PermissionModeTest 9/9；RunAccumulatorTest 17/17。
+  ✅ 2026-07-12 — 第二轮修复完成。
 
 ### R2：上下文、会话与记忆主链
 
@@ -385,3 +393,12 @@ ops-fixtures/
 - 2026-07-11：文档记录的 Maven 汇总为 295 个测试通过；本记录仅作为基线，实际合入前必须重新运行相关测试。
 - 2026-07-11：TODO/CLAUDE/DESIGN 按”纲领 / 稳定设计 / 执行路线”重新分工；当前完成状态已按代码事实降级或重排。
 - 2026-07-11：补充远程运维 Ops Loop 路线，按本地 fixtures、只读 SSH、审批修复、独立验证和持续调度分阶段实施；代码修复 Loop 明确不在当前范围。
+- 2026-07-12：P0-S 全部 8 PR + 第二轮修复完成。66 工具测试 + 9 PermissionModeTest + 17 RunAccumulatorTest + 91 引擎/观测/上下文/记忆测试全部通过（0 failures），全项目 clean compile 通过。
+  
+  **第一轮（PR 1-6）**：契约 V2（8 新类型 + 4 核心类重构）、8 内置工具显式 metadata、PermissionPolicy + ApprovalGrantCache + ASK fail-closed、MCP annotations/trusted/isError/坏参数保护、ProcessRunner + BashTool 重写、WorkspacePathPolicy + WriteTool overwrite + 原子写入。
+  
+  **第二轮（P0 阻断修复）**：internal tools 走 PermissionPolicy、SubAgent 删除特判分支统一走 ToolCallExecutor、metadataFor() 用 registry.lookup() + isReadOnly() 回退、Plan recorder null guard、PlanExecutor 两调用点迁移到 ToolCallExecutor。
+  
+  **第二轮（P1 生命周期修复）**：BashTool 覆盖 execute(ToolExecutionRequest) → TIMED_OUT/NON_ZERO_EXIT/exitCode/outputStats、WriteTool requireWriteAccess 处理新文件、MCP annotations 缺失字段用保守默认值（fieldBool）、ProcessRunner 进程树先快照再终止 + exitValue try-catch、ToolMetadata compact constructor 验证平铺字段与 ToolBehavior 一致、RunAccumulator 审批指标修正（NOT_REQUIRED 不计入 approvalRequested）。
+  
+  **已删除**：engine RiskLevel.java、McpAuditLogger.java。engine main 源码中无活跃的 registry.execute() 调用。

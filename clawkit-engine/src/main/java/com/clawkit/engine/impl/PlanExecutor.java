@@ -1,6 +1,9 @@
 package com.clawkit.engine.impl;
 
 import com.clawkit.provider.LLMProvider;
+import com.clawkit.tools.ApprovalGrantCache;
+import com.clawkit.tools.DefaultApprovalGrantCache;
+import com.clawkit.tools.PermissionMode;
 import com.clawkit.tools.Registry;
 import com.clawkit.tools.schema.*;
 import java.time.Instant;
@@ -28,10 +31,23 @@ public class PlanExecutor {
 
     private final LLMProvider provider;
     private final Registry registry;
+    private final ToolCallExecutor toolCallExecutor;
+    private final ToolExecutionContext planExecContext;
 
     public PlanExecutor(LLMProvider provider, Registry registry, String workDir) {
+        this(provider, registry, workDir, null);
+    }
+
+    public PlanExecutor(LLMProvider provider, Registry registry, String workDir,
+                         ToolCallExecutor toolCallExecutor) {
         this.provider = provider;
         this.registry = registry;
+        this.toolCallExecutor = toolCallExecutor;
+        this.planExecContext = new ToolExecutionContext(
+            "plan-" + workDir, 0, com.clawkit.tools.PermissionMode.AUTO,
+            (com.clawkit.engine.ApprovalHandler) null,
+            (com.clawkit.observability.RunRecorder) null,
+            new InternalToolRouter(), new DefaultApprovalGrantCache());
     }
 
     /**
@@ -205,8 +221,15 @@ public class PlanExecutor {
 
             for (ToolCall call : response.toolCalls()) {
                 log.debug("  [{}] tool: {}", task.getId(), call.name());
-                ToolResult result = registry.execute(call);
-                messages.add(Message.toolResult(call.id(), result.output()));
+                String output;
+                if (toolCallExecutor != null) {
+                    var batchResult = toolCallExecutor.executeBatch(List.of(call), planExecContext);
+                    output = batchResult.results().isEmpty() ? "" : batchResult.results().get(0).output();
+                } else {
+                    ToolResult result = registry.execute(call);
+                    output = result.output();
+                }
+                messages.add(Message.toolResult(call.id(), output));
             }
         }
 

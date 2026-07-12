@@ -1,42 +1,67 @@
 package com.clawkit.engine;
 
+import com.clawkit.tools.ToolMetadata;
+import com.clawkit.tools.ToolRiskLevel;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.clawkit.tools.schema.Message;
 import com.clawkit.tools.schema.ToolCall;
 
+/**
+ * 审批请求（V2：直接携带 ToolMetadata，不再按工具名推断风险）。
+ *
+ * <p>旧 {@link #riskOf(String)} 和 {@link #riskDescriptionOf(String)} 已删除。
+ * 风险等级从 metadata.riskLevel() 读取，副作用描述从 metadata.sideEffects() 生成。
+ */
 public record ApprovalRequest(
     String toolName,
-    RiskLevel riskLevel,
+    ToolRiskLevel riskLevel,
     String riskDescription,
     String parameters,
-    String llmIntent
+    String llmIntent,
+    // ── V2 字段 ──────────────────────────────────────────────────
+    ToolMetadata metadata
 ) {
-    public static ApprovalRequest from(ToolCall call, Message lastAssistantMsg) {
+    /** 从 ToolMetadata 和 ToolCall 构造（V2） */
+    public static ApprovalRequest from(ToolMetadata metadata, ToolCall call, Message lastAssistantMsg) {
         String toolName = call.name();
-        RiskLevel risk = riskOf(toolName);
-        String riskDesc = riskDescriptionOf(toolName);
+        ToolRiskLevel risk = metadata.riskLevel();
+        String riskDesc = describeRisk(metadata);
         String params = formatParams(call.arguments());
         String intent = extractIntent(lastAssistantMsg);
-        return new ApprovalRequest(toolName, risk, riskDesc, params, intent);
+        return new ApprovalRequest(toolName, risk, riskDesc, params, intent, metadata);
     }
 
-    private static RiskLevel riskOf(String toolName) {
-        return switch (toolName) {
-            case "bash" -> RiskLevel.HIGH;
-            case "write", "edit" -> RiskLevel.MEDIUM;
-            default -> RiskLevel.LOW;
-        };
+    /**
+     * 旧工厂方法（保留兼容）。
+     * @deprecated 使用 {@link #from(ToolMetadata, ToolCall, Message)}
+     */
+    @Deprecated
+    public static ApprovalRequest from(ToolCall call, Message lastAssistantMsg) {
+        var meta = com.clawkit.tools.ToolMetadata.conservative(call.name());
+        return from(meta, call, lastAssistantMsg);
     }
 
-    private static String riskDescriptionOf(String toolName) {
-        return switch (toolName) {
-            case "bash" -> "执行系统命令，可能修改文件系统、网络或进程";
-            case "write" -> "将写入或覆盖文件内容";
-            case "edit" -> "将修改文件中的指定内容";
-            case "todo_write" -> "更新任务列表";
-            default -> "执行写操作";
-        };
+    // ── 风险描述（从 metadata 生成，不再硬编码 toolName） ────────
+
+    private static String describeRisk(ToolMetadata meta) {
+        if (!meta.sideEffects().isEmpty()) {
+            String effects = meta.sideEffects().stream()
+                .map(se -> switch (se) {
+                    case FILE_WRITE -> "文件写入";
+                    case FILE_DELETE -> "文件删除";
+                    case SHELL_EXEC -> "命令执行";
+                    case NETWORK_OUT -> "网络访问";
+                    case MESSAGE_SEND -> "消息发送";
+                })
+                .reduce((a, b) -> a + "、" + b).orElse("");
+            return "副作用: " + effects;
+        }
+        if (meta.isDestructive()) return "可能具有破坏性";
+        if (meta.isReadOnly()) return "只读操作";
+        return "工具调用";
     }
+
+    // ── 参数格式化（保留原有逻辑） ────────────────────────────────
 
     private static String formatParams(JsonNode args) {
         StringBuilder sb = new StringBuilder();

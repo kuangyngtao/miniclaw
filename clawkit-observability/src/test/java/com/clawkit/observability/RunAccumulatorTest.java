@@ -171,7 +171,7 @@ class RunAccumulatorTest {
             7, T0.plusSeconds(6)));
 
         var summary = acc.snapshot();
-        assertThat(summary.approvalRequested()).isEqualTo(5);
+        assertThat(summary.approvalRequested()).isEqualTo(4); // NOT_REQUIRED 不计入
         assertThat(summary.approvalApproved()).isEqualTo(2); // APPROVE + APPROVE_SAME_TYPE
         assertThat(summary.approvalRejected()).isEqualTo(1);
         assertThat(summary.approvalModified()).isEqualTo(1);

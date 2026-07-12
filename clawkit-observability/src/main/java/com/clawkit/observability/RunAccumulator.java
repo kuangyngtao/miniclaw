@@ -147,12 +147,21 @@ public class RunAccumulator {
     }
 
     private void onApprovalDecided(ApprovalDecidedPayload p) {
-        this.approvalRequested++;
         switch (p.decision()) {
-            case "APPROVE", "APPROVE_SAME_TYPE", "AUTO_APPROVED" -> this.approvalApproved++;
-            case "REJECT", "SAFETY_BLOCKED", "PLAN_BLOCKED" -> this.approvalRejected++;
-            case "MODIFY" -> this.approvalModified++;
-            // NOT_REQUIRED: counted in requested but not in approved/rejected/modified
+            case "APPROVE", "APPROVE_SAME_TYPE" -> {
+                this.approvalRequested++;
+                this.approvalApproved++;
+            }
+            case "REJECT" -> {
+                this.approvalRequested++;
+                this.approvalRejected++;
+            }
+            case "MODIFY" -> {
+                this.approvalRequested++;
+                this.approvalModified++;
+            }
+            // NOT_REQUIRED / AUTO_APPROVED / PLAN_BLOCKED / SAFETY_BLOCKED:
+            // 不是面向用户的审批请求，不计入 approvalRequested
             default -> { /* no-op */ }
         }
     }

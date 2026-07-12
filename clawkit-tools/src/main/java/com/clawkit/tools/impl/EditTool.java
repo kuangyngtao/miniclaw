@@ -5,13 +5,21 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.clawkit.tools.Result;
 import com.clawkit.tools.Tool;
+import com.clawkit.tools.ToolBehavior;
+import com.clawkit.tools.ToolExecutionPolicy;
+import com.clawkit.tools.ToolMetadata;
+import com.clawkit.tools.ToolMetadataProvenance;
+import com.clawkit.tools.ToolRiskLevel;
+import com.clawkit.tools.ToolSideEffect;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -63,6 +71,18 @@ public class EditTool implements Tool {
     @Override
     public String inputSchema() {
         return SCHEMA;
+    }
+
+    @Override
+    public ToolMetadata metadata() {
+        return new ToolMetadata(
+            name(), description(), null, null,
+            new ToolBehavior(false, ToolRiskLevel.HIGH, true, false, false, false,
+                Set.of(ToolSideEffect.FILE_WRITE)),
+            new ToolExecutionPolicy(Duration.ofSeconds(10), 200,
+                ToolExecutionPolicy.OutputTruncation.HEAD, ToolExecutionPolicy.ToolConcurrency.SERIAL),
+            ToolMetadataProvenance.builtin(name())
+        );
     }
 
     @Override

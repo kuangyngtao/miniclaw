@@ -5,7 +5,14 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.clawkit.tools.Result;
 import com.clawkit.tools.Tool;
+import com.clawkit.tools.ToolBehavior;
+import com.clawkit.tools.ToolExecutionPolicy;
+import com.clawkit.tools.ToolMetadata;
+import com.clawkit.tools.ToolMetadataProvenance;
+import com.clawkit.tools.ToolRiskLevel;
 import java.io.IOException;
+import java.time.Duration;
+import java.util.Set;
 import java.nio.charset.MalformedInputException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystems;
@@ -77,6 +84,17 @@ public class GrepTool implements Tool {
 
     @Override
     public boolean isReadOnly() { return true; }
+
+    @Override
+    public ToolMetadata metadata() {
+        return new ToolMetadata(
+            name(), description(), null, null,
+            new ToolBehavior(true, ToolRiskLevel.LOW, false, true, false, false, Set.of()),
+            new ToolExecutionPolicy(Duration.ofSeconds(10), 8000,
+                ToolExecutionPolicy.OutputTruncation.HEAD_TAIL, ToolExecutionPolicy.ToolConcurrency.PARALLEL_SAFE),
+            ToolMetadataProvenance.builtin(name())
+        );
+    }
 
     @Override
     public Result<String> execute(String arguments) {

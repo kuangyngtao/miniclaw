@@ -10,11 +10,18 @@ public record McpServerConfig(
     List<String> args,
     String url,
     Map<String, String> env,
-    boolean disabled
+    boolean disabled,
+    // ── V2 字段 ──────────────────────────────────────────────────
+    boolean trusted
 ) {
     public McpServerConfig(String name, String command, List<String> args,
                            String url, Map<String, String> env) {
-        this(name, command, args, url, env, false);
+        this(name, command, args, url, env, false, false);
+    }
+
+    public McpServerConfig(String name, String command, List<String> args,
+                           String url, Map<String, String> env, boolean disabled) {
+        this(name, command, args, url, env, disabled, false);
     }
 
     public enum Transport { STDIO, HTTP }

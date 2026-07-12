@@ -90,7 +90,7 @@ public class McpManager {
             List<Tool> adapters = new ArrayList<>();
             for (McpToolDef def : defs) {
                 String schema = McpSchemaSanitizer.sanitize(def.inputSchema());
-                adapters.add(new McpToolAdapter(sc.name(), def, client, schema));
+                adapters.add(new McpToolAdapter(sc.name(), def, client, schema, sc.trusted()));
             }
 
             clients.put(sc.name(), new McpClientState(client, transport, adapters));

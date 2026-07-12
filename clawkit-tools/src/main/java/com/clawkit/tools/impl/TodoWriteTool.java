@@ -5,6 +5,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.clawkit.tools.Result;
 import com.clawkit.tools.Tool;
+import com.clawkit.tools.ToolBehavior;
+import com.clawkit.tools.ToolExecutionPolicy;
+import com.clawkit.tools.ToolMetadata;
+import com.clawkit.tools.ToolMetadataProvenance;
+import com.clawkit.tools.ToolRiskLevel;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -73,6 +79,17 @@ public class TodoWriteTool implements Tool {
     @Override
     public String inputSchema() {
         return SCHEMA;
+    }
+
+    @Override
+    public ToolMetadata metadata() {
+        return new ToolMetadata(
+            name(), description(), null, null,
+            new ToolBehavior(false, ToolRiskLevel.MEDIUM, false, false, false, true, Set.of()),
+            new ToolExecutionPolicy(Duration.ofSeconds(5), 2000,
+                ToolExecutionPolicy.OutputTruncation.HEAD, ToolExecutionPolicy.ToolConcurrency.SERIAL),
+            ToolMetadataProvenance.builtin(name())
+        );
     }
 
     @Override
