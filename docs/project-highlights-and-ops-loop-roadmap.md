@@ -104,7 +104,7 @@ Metadata
 
 | 项目 | 状态 | 当前证据 | 剩余门禁 |
 | --- | --- | --- | --- |
-| Windows Java 21 CI | 部分完成 | 首次 GitHub 运行已暴露 whitespace 与 Dockerfile 问题；修复后本地全量验证通过 | 推送收口提交并取得 CI 成功记录 |
+| Windows Java 21 CI | 完成 | 收口提交 `bf2466e` 的 [CI](https://github.com/kuangyngtao/miniclaw/actions/runs/29626581075) 和 [CodeQL](https://github.com/kuangyngtao/miniclaw/actions/runs/29626581072) 成功 | 无 |
 | Docker 分发 | 部分完成 | 镜像构建、帮助/版本、只读工作区、可写 `.clawkit`、非 root 和无 TTY `C-007` 已通过 | Windows Terminal 手工执行一次 `docker run --rm -it` |
 | 示例与演示 | 完成 | 非敏感配置、disabled MCP 和独立 Java/Maven demo | 无 |
 | 配置体验 | 完成 | CLI > env > 用户 YAML > 默认值；脱敏 `/config` | 无 |
@@ -134,7 +134,6 @@ Metadata
 
 ### 5.1 外部发布门禁
 
-- P0-D 收口修改尚未提交和推送，因此修复后的 GitHub Actions 还没有运行记录。
 - `v0.1.0` tag 和 Release 尚未创建。
 - 仓库已经跟踪两份 `.codex_docx_review/*.docx` 历史产物；忽略规则已补上，是否从后续提交删除不影响运行功能，但影响仓库整洁度。
 
@@ -225,7 +224,7 @@ App Down 只作为工程冒烟；公开演示固定为：
 
 必须带限定：
 
-- CI/Release workflow 在真实 GitHub 运行前只称“已实现并本地验证”。
+- Release workflow 在真实 tag 运行前只称“已实现并本地验证”；CI 已有成功运行记录。
 - Docker 在成功镜像 smoke 前不称“容器分发完成”。
 - Ops Loop 当前只称“目标架构和实施路线”。
 

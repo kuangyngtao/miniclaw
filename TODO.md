@@ -27,7 +27,7 @@
 - SessionStore、MemoryHooks、SkillRuntime、SlashCommandRouter、ApprovalConsole 已进入生产路径，不再只是类型占位。
 - Session 错误、Memory 生命周期和 CLI handler 下沉均已完成：SessionStoreException 携带稳定错误码，DefaultMemoryHooks 接管 recall/extract/save，命令业务已从 ClawkitApp 下沉到 CliCommandHandlers。
 - Engine 职责拆分已进入真实路径：WorkspaceStateStore、EngineEventHub、ConversationSession、EngineContextCoordinator、InternalToolSuite、SubAgentRunner、PlanRunCoordinator 分别接管工作区、事件、会话、上下文、内部工具、子 Agent 和 Plan runtime；AgentEngine 保留 ReAct 主循环与公共门面。
-- P0-D 的配置、凭据边界、用户可读错误、Windows 启动、示例和分层文档已完成；Docker 镜像和自动 smoke 已通过，版本已收敛为 `0.1.0`，仍等待收口提交、修复后的真实 CI、Windows `-it` 人工 smoke 和 `v0.1.0` Release。
+- P0-D 的配置、凭据边界、用户可读错误、Windows 启动、示例和分层文档已完成；收口提交、真实 CI、Docker 自动 smoke 和 CodeQL 已通过，版本已收敛为 `0.1.0`，仅余 Windows `-it` 人工 smoke 和 `v0.1.0` Release。
 - 真实 DeepSeek 文本和工具调用通过；Map 型工具 Schema 丢失结构的问题已修复并加入回归测试。产品仍仅读取 `CLAWKIT_API_KEY`，凭据不进入文件、日志或 diff。
 
 ## 当前执行顺序
@@ -229,9 +229,9 @@
 
 ## P0-D：工程交付闭环
 
-- **[~] CI 测试流水线**（ci）
+- **[x] CI 测试流水线**（ci）
   push/PR 运行 Java 21 全量测试、提交范围 whitespace、构建后 tracked diff 和 Docker smoke。
-  2026-07-18 首次 GitHub 运行暴露了已提交 whitespace 与 Dockerfile 漏模块问题；均已修复，构建后检查改为 `git diff --exit-code`，本地 YAML、450 项全量测试和 Docker smoke 通过。待推送后取得真实 CI 成功记录。
+  ✅ 2026-07-18 — 首次 GitHub 运行暴露的 whitespace 与 Dockerfile 漏模块问题均已修复；构建后检查改为 `git diff --exit-code`。收口提交 `bf2466e` 的 [CI](https://github.com/kuangyngtao/miniclaw/actions/runs/29626581075) 在真实 GitHub 环境成功，Windows Java 21 全量验证和 Docker smoke 均通过；[CodeQL](https://github.com/kuangyngtao/miniclaw/actions/runs/29626581072) 同步成功。
 
 - **[~] Dockerfile 与 `.dockerignore`**（distribution）
   构建并运行 shaded jar，明确配置和工作区挂载。
@@ -259,13 +259,14 @@
 
 ### D0：P0-D 外部证据收口
 
-- **[~] 整理可审查提交**（release）
+- **[x] 整理可审查提交**（release）
   将当前 P0-R/P0-D 变更与无关工作区文件分离，确保每个提交的目的和验证证据可解释。
   验收：从干净 clone 可重复执行 README 用户路径；`git status` 不包含无关产物。
+  ✅ 2026-07-18 — P0-D 收口提交为 `bf2466e`，已推送到 `origin/master`；本地 HEAD 与远端一致，工作区干净。
 
-- **[~] 真实 CI 首跑**（ci）
+- **[x] 真实 CI 首跑**（ci）
   在 push/PR 上运行 Windows Java 21 全量测试和 Docker smoke。
-  首次运行已失败并定位修复；验收仍要求收口提交推送后的 GitHub Actions 成功，不能以本地结果替代。
+  ✅ 2026-07-18 — 收口提交的 CI run `29626581075` 成功，包含 Windows `test` 和 Linux `docker-smoke`；CodeQL run `29626581072` 成功。
 
 - **[~] Docker 交互 smoke**（distribution）
   自动 smoke 已覆盖镜像、帮助/版本、工作区、`.clawkit`、非 root 和无 TTY；在 Windows Terminal 执行一次 `docker run --rm -it` 并正常 `/exit` 后完成。
@@ -462,7 +463,7 @@ ops-fixtures/
 
 ## 验证记录
 
-- 2026-07-18：P0-D 本地交付收口 — 修复首次 GitHub CI 暴露的 whitespace 和 Dockerfile 漏模块问题；版本收敛为 `0.1.0`；Windows 启动器支持源码与发布包稳定文件名；Release 增加 Windows ZIP 与统一 SHA-256；Docker 去除不必要的 apt 联网层并补齐挂载、权限、非 root 和无 TTY smoke。`mvn -B -ntp clean verify` 10 模块、450 测试通过；`clawkit.cmd --version`、包内启动、Docker build/smoke、workflow YAML 和 `git diff --check` 通过。真实 CI、Windows `-it` 和 `v0.1.0` Release 仍按 D0 门禁执行。
+- 2026-07-18：P0-D 本地与 CI 交付收口 — 修复首次 GitHub CI 暴露的 whitespace 和 Dockerfile 漏模块问题；版本收敛为 `0.1.0`；Windows 启动器支持源码与发布包稳定文件名；Release 增加 Windows ZIP 与统一 SHA-256；Docker 去除不必要的 apt 联网层并补齐挂载、权限、非 root 和无 TTY smoke。`mvn -B -ntp clean verify` 10 模块、450 测试通过；`clawkit.cmd --version`、包内启动、Docker build/smoke、workflow YAML 和 `git diff --check` 通过。收口提交 `bf2466e` 已推送，真实 CI 和 CodeQL 成功；仅余 Windows `-it` 和 `v0.1.0` Release。
 - 2026-07-17：P0-D 本地实现与路线重排 — 配置、DeepSeek 凭据边界、`/config`、用户可读错误、Windows 启动、示例和分层文档完成；CI/Docker/Release workflow 已实现并保留外部证据门禁。真实 DeepSeek 文本和工具调用通过，修复 Map 型工具 Schema 序列化；`mvn -B -ntp clean verify` 10 模块、449 测试通过，ArchUnit 10/10 和 `git diff --check` 通过。Ops 路线收缩为 App Down 工程冒烟、PostgreSQL 锁等待黄金诊断、远程只读、写前可靠性门禁、审批修复和有限自动化。
 - 2026-07-15：AgentEngine 职责拆分收尾 — 修复跨 run 会话遗漏 assistant/tool、Provider 完成事件重复、RunCompleted 重复和 SubAgent parentRunId 丢失；Workspace、事件、Session、Context、internal tools、SubAgent、Plan runtime 全部迁出并删除旧路径。`AgentEngine` 按物理行从约 2058 降至 1162，`ClawkitApp` 为 740；`mvn clean compile`、`mvn test`（10 模块，BUILD SUCCESS，约 3 分 26 秒）、ArchUnit 10/10 和 `git diff --check` 全部通过。
 - 2026-07-15：P0-R 小型清理 — 删除 ClawkitApp 中未调用的 resolveWorkDir/readConfigValue/createToolRegistry、遗留装配 imports 和无效字段；清除 AgentEngine 未使用 imports 及 Provider/Context 旧路径注释。按物理行计 AgentEngine 2045 行，ClawkitApp 740 行。
