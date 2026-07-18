@@ -45,6 +45,7 @@ class ClawkitAppTest {
         assertThat(resolveCommand("/clear")).isEqualTo("clear");
         assertThat(resolveCommand("/compact")).isEqualTo("compact");
         assertThat(resolveCommand("/context")).isEqualTo("context");
+        assertThat(resolveCommand("/config")).isEqualTo("config");
     }
 
     @Test

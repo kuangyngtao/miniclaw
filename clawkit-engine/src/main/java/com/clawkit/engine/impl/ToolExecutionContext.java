@@ -10,6 +10,7 @@ import com.clawkit.tools.PermissionPolicy;
  * 工具执行上下文，将 engine 侧信息传递给 ToolCallExecutor。
  *
  * <p>V2：使用 tools 模块的 PermissionMode/PermissionPolicy/ApprovalGrantCache。
+ * PermissionPolicy 为必需参数，不得为 null。
  */
 public record ToolExecutionContext(
     String runId,
@@ -21,16 +22,9 @@ public record ToolExecutionContext(
     InternalToolRouter internalTools,
     ApprovalGrantCache approvalCache
 ) {
-    /** 兼容构造器（无 PermissionPolicy，使用内联逻辑降级） */
-    public ToolExecutionContext(
-        String runId,
-        int turnNumber,
-        PermissionMode permissionMode,
-        ApprovalHandler approvalHandler,
-        RunRecorder recorder,
-        InternalToolRouter internalTools,
-        ApprovalGrantCache approvalCache
-    ) {
-        this(runId, turnNumber, permissionMode, null, approvalHandler, recorder, internalTools, approvalCache);
+    public ToolExecutionContext {
+        if (permissionPolicy == null) {
+            throw new NullPointerException("permissionPolicy must not be null");
+        }
     }
 }

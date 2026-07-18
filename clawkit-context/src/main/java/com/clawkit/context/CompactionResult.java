@@ -17,5 +17,21 @@ public record CompactionResult(
     ContextBudgetReport beforeReport,
     ContextBudgetReport afterReport,
     List<String> retainedConstraints,
-    List<String> appliedRules
-) {}
+    List<String> appliedRules,
+    // ── PR-1: 扩展统计字段 ───────────────────────────────────────
+    int beforeMessages,
+    int afterMessages,
+    boolean compacted
+) {
+    /** 兼容构造器（旧调用方） */
+    public CompactionResult(
+        List<Message> messages,
+        ContextBudgetReport beforeReport,
+        ContextBudgetReport afterReport,
+        List<String> retainedConstraints,
+        List<String> appliedRules
+    ) {
+        this(messages, beforeReport, afterReport, retainedConstraints, appliedRules,
+            messages.size(), messages.size(), false);
+    }
+}

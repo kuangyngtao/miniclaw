@@ -1,0 +1,14 @@
+.git
+**/target
+.clawkit
+.claude
+.codex_docx_review
+.idea
+.vscode
+.env*
+*.log
+config.yaml
+config.yml
+secrets
+docs
+examples

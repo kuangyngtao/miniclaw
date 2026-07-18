@@ -9,7 +9,7 @@ import java.util.List;
 /**
  * DeepSeek V4 端到端连通性验证。
  *
- * 从环境变量 CLAWKIT-DS-API 或系统属性 apiKey 读取密钥。
+ * 从环境变量 CLAWKIT_API_KEY 读取密钥。
  * 运行: mvn exec:java -pl clawkit-provider \
  *   -Dexec.classpathScope=test \
  *   -Dexec.mainClass=com.clawkit.provider.impl.openai.DeepSeekConnectivityDemo
@@ -17,15 +17,9 @@ import java.util.List;
 public class DeepSeekConnectivityDemo {
 
     public static void main(String[] args) {
-        String apiKey = System.getenv("CLAWKIT-DS-API");
+        String apiKey = System.getenv("CLAWKIT_API_KEY");
         if (apiKey == null || apiKey.isBlank()) {
-            apiKey = System.getenv("CLAWKIT_API_KEY");
-        }
-        if (apiKey == null || apiKey.isBlank()) {
-            apiKey = System.getProperty("apiKey");
-        }
-        if (apiKey == null || apiKey.isBlank()) {
-            System.err.println("请设置 CLAWKIT-DS-API 环境变量或 -DapiKey=xxx");
+            System.err.println("请设置 CLAWKIT_API_KEY 环境变量");
             System.exit(1);
         }
 

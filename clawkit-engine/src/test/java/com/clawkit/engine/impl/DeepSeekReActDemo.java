@@ -123,15 +123,9 @@ public class DeepSeekReActDemo {
 
     public static void main(String[] args) {
         // 1. 获取 API Key
-        String apiKey = System.getenv("CLAWKIT-DS-API");
+        String apiKey = System.getenv("CLAWKIT_API_KEY");
         if (apiKey == null || apiKey.isBlank()) {
-            apiKey = System.getenv("CLAWKIT_API_KEY");
-        }
-        if (apiKey == null || apiKey.isBlank()) {
-            apiKey = System.getProperty("apiKey");
-        }
-        if (apiKey == null || apiKey.isBlank()) {
-            System.err.println("请设置 CLAWKIT-DS-API 环境变量或 -DapiKey=xxx");
+            System.err.println("请设置 CLAWKIT_API_KEY 环境变量");
             System.exit(1);
         }
 

@@ -134,6 +134,8 @@ class SubAgentTest {
         };
 
         AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
+        // ToolCallExecutor requires ApprovalHandler for non-read-only tools in AUTO/ASK mode
+        engine.setApprovalHandler(req -> new ApprovalResult.Approve());
         String result = engine.run("create config");
 
         assertThat(result).contains("task done");

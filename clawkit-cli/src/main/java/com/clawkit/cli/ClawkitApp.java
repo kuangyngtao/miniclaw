@@ -1,54 +1,25 @@
 package com.clawkit.cli;
 
-import com.clawkit.context.SkillCatalog;
 import com.clawkit.context.SkillLoader;
-import com.clawkit.engine.ApprovalHandler;
-import com.clawkit.engine.ApprovalRequest;
-import com.clawkit.engine.ApprovalResult;
 import com.clawkit.engine.ExecutionMode;
 import com.clawkit.engine.PermissionMode;
-import com.clawkit.tools.ToolRiskLevel;
-import com.clawkit.engine.SessionMeta;
 import com.clawkit.engine.SessionService;
 import com.clawkit.engine.ThinkingMode;
-import com.clawkit.engine.AgentState;
 import com.clawkit.engine.impl.AgentEngine;
 import com.clawkit.engine.impl.PlanParser;
 import com.clawkit.tools.schema.ExecutionPlan;
 import com.clawkit.tools.schema.Task;
 import com.clawkit.im.ImChannel;
-import com.clawkit.im.ImChannelStatus;
-import com.clawkit.im.ConfigHelper;
 import com.clawkit.im.feishu.FeishuChannel;
 import com.clawkit.im.feishu.FeishuConfig;
 import com.clawkit.im.weixin.WeixinChannel;
 import com.clawkit.im.weixin.WeixinConfig;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.clawkit.memory.MemoryEntry;
 import com.clawkit.memory.MemoryType;
 import com.clawkit.memory.impl.DiskMemoryService;
-import com.clawkit.provider.LLMConfig;
-import com.clawkit.provider.LLMProvider;
-import com.clawkit.provider.ProviderFactory;
-import com.clawkit.tools.schema.Message;
-import com.clawkit.tools.Tool;
 import com.clawkit.tools.ToolRegistry;
-import com.clawkit.tools.impl.BashTool;
-import com.clawkit.tools.impl.CommandSafetyInterceptor;
-import com.clawkit.tools.impl.EditTool;
-import com.clawkit.tools.impl.GitReadTool;
-import com.clawkit.tools.impl.GlobTool;
-import com.clawkit.tools.impl.GrepTool;
-import com.clawkit.tools.impl.ReadTool;
-import com.clawkit.tools.impl.TodoWriteTool;
-import com.clawkit.tools.impl.WebFetchTool;
-import com.clawkit.tools.impl.WriteTool;
-import com.clawkit.tools.mcp.McpConfig;
 import com.clawkit.tools.mcp.McpManager;
-import com.clawkit.tools.mcp.McpServerConfig;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Instant;
 import java.util.List;
 import org.jline.reader.LineReader;
 import org.jline.reader.LineReaderBuilder;
@@ -65,21 +36,21 @@ import picocli.CommandLine.Option;
     name = "clawkit",
     description = "A minimal AI coding assistant",
     mixinStandardHelpOptions = true,
-    version = "clawkit 0.1.0"
+    versionProvider = BuildInfo.class
 )
 public class ClawkitApp implements Runnable {
 
     private static final Logger log = LoggerFactory.getLogger(ClawkitApp.class);
 
-    @Option(names = {"-m", "--model"}, defaultValue = "deepseek-chat",
+    @Option(names = {"-m", "--model"},
         description = "Model name (default: deepseek-chat)")
     private String model;
 
-    @Option(names = {"--base-url"}, defaultValue = "https://api.deepseek.com",
+    @Option(names = {"--base-url"},
         description = "API base URL")
     private String baseUrl;
 
-    @Option(names = {"--protocol"}, defaultValue = "OPENAI_COMPAT",
+    @Option(names = {"--protocol"},
         description = "API protocol: OPENAI_COMPAT, ANTHROPIC")
     private String protocol;
 
@@ -99,12 +70,12 @@ public class ClawkitApp implements Runnable {
     private SkillLoader skillLoader;
     private McpManager mcpManager;
     private ToolRegistry registry;
-    private LLMConfig.Protocol protocolEnum;
     private LineReader reader;
     private com.clawkit.observability.RunReader runReader;
     private final ConsoleRenderer renderer = new ConsoleRenderer();
-    private LLMProvider provider;
     private DiskMemoryService memoryService;
+    private CliCommandHandlers commandHandlers;
+    private EffectiveConfig effectiveConfig;
 
     @Override
     public void run() {
@@ -113,94 +84,22 @@ public class ClawkitApp implements Runnable {
             return;
         }
 
-        resolvedWorkDir = resolveWorkDir(rootDir);
+        // P0-R: 统一走 ApplicationBootstrap 装配
+        var ctx = ApplicationBootstrap.bootstrap(model, baseUrl, protocol, thinking, rootDir);
+        this.engine = ctx.engine();
+        this.registry = ctx.registry();
+        this.sessionService = ctx.sessionService();
+        this.skillLoader = ctx.skillLoader();
+        this.mcpManager = ctx.mcpManager();
+        this.memoryService = ctx.memoryService();
+        this.runReader = ctx.runReader();
+        this.resolvedWorkDir = ctx.workDir();
+        this.effectiveConfig = ctx.effectiveConfig();
+        ThinkingMode mode = ctx.thinkingMode();
 
-        String apiKey = readConfigValue("CLAWKIT_API_KEY", "ANTHROPIC_AUTH_TOKEN", "apiKey");
-        if (apiKey == null || apiKey.isBlank()) {
-            System.err.println("[C-003] CLAWKIT_API_KEY not set (env or ~/.clawkit/config.yaml).");
-            System.exit(1);
-        }
-
-        try {
-            protocolEnum = LLMConfig.Protocol.valueOf(protocol.toUpperCase());
-        } catch (IllegalArgumentException e) {
-            System.err.println("[C-004] Unknown protocol '" + protocol
-                + "'. Valid: OPENAI_COMPAT, ANTHROPIC");
-            System.exit(1);
-            return; // unreachable, but javac doesn't know that
-        }
-
-        LLMConfig config = LLMConfig.builder()
-            .apiKey(apiKey)
-            .baseUrl(baseUrl)
-            .model(model)
-            .protocol(protocolEnum)
-            .build();
-
-        // 包装 provider 以记录调用指标（retry 计数待 OpenAIProvider 暴露后接入）
-        this.provider = new com.clawkit.observability.ObservableLLMProvider(
-            ProviderFactory.create(config),
-            metrics -> { /* 由 AgentEngine 内部 ProviderCallCompleted 事件记录 */ });
-        log.info("Provider wrapped with ObservableLLMProvider");
-
-        Path userSkillsDir = Path.of(System.getProperty("user.home"), ".agents", "skills");
-        registry = createToolRegistry(resolvedWorkDir, userSkillsDir);
-
-        McpConfig mcpConfig = McpConfig.load(resolvedWorkDir);
-        if (!mcpConfig.servers().isEmpty()) {
-            var servers = new java.util.LinkedHashMap<>(mcpConfig.servers());
-            boolean hasInteractive = servers.values().stream().anyMatch(s -> !s.disabled());
-            if (hasInteractive) {
-                System.out.println();
-                for (var entry : servers.entrySet()) {
-                    var sc = entry.getValue();
-                    if (sc.disabled()) continue;
-                    System.out.print("  Enable MCP [" + sc.name() + "] ("
-                        + sc.transport().name().toLowerCase() + ")? [Y/n] ");
-                    String answer = System.console().readLine().trim().toLowerCase();
-                    if ("n".equals(answer) || "no".equals(answer)) {
-                        servers.put(entry.getKey(),
-                            new McpServerConfig(sc.name(), sc.command(), sc.args(),
-                                sc.url(), sc.env(), true));
-                        System.out.println(ConsoleRenderer.GRAY + "    " + sc.name() + " disabled." + ConsoleRenderer.RESET);
-                    }
-                }
-                System.out.println();
-            }
-            mcpConfig = new McpConfig(servers);
-        }
-        mcpManager = new McpManager();
-        List<Tool> mcpTools = mcpManager.startAll(mcpConfig, resolvedWorkDir);
-        for (Tool t : mcpTools) registry.register(t);
-
-        ThinkingMode mode = thinking ? ThinkingMode.TWO_STAGE : ThinkingMode.OFF;
-        Path memoryDir = Path.of(System.getProperty("user.home"), ".clawkit", "memory");
-        this.memoryService = new DiskMemoryService(memoryDir);
-        String memoryIndex = memoryService.loadIndex();
-
-        // 读取分级 CLAUDE.md（~/.clawkit/CLAUDE.md + ./CLAUDE.md）
+        // 加载工作区 rules（Bootstrap 已设置基础 rules，此处补充 CLI 特定逻辑）
         String workspaceRules = loadWorkspaceRules(resolvedWorkDir);
-
-        engine = new AgentEngine(provider, registry, resolvedWorkDir.toString(),
-            mode, null, System.out::print, memoryIndex);
         engine.setWorkspaceRules(workspaceRules);
-
-        // 初始化 Skills 系统
-        Path projectSkillsDir = resolvedWorkDir.resolve(".clawkit").resolve("skills");
-        skillLoader = new SkillLoader(userSkillsDir, projectSkillsDir);
-        engine.setSkillLoader(skillLoader);
-        engine.rebuildSkillCatalog(skillLoader.buildCatalog());
-        engine.setDiskMemoryService(memoryService);
-
-        // 初始化观测系统
-        Path clawkitDir = Path.of(System.getProperty("user.home"), ".clawkit");
-        var fileRunRecorder = new com.clawkit.observability.FileRunRecorder(clawkitDir);
-        engine.addRecorder(fileRunRecorder);
-        runReader = new com.clawkit.observability.RunReader(clawkitDir);
-
-        Path sessionsDir = clawkitDir.resolve("sessions");
-        sessionService = new SessionService(sessionsDir, provider);
-        engine.setSessionService(sessionService);
 
         if (mode == ThinkingMode.TWO_STAGE) {
             engine.setOnThinkingBegin(this::onThinkingBegin);
@@ -210,8 +109,15 @@ public class ClawkitApp implements Runnable {
 
         Path historyPath = Path.of(System.getProperty("user.home"), ".clawkit", "history");
         try {
+            Terminal terminal = TerminalBuilder.terminal();
+            if (System.console() == null && "dumb".equalsIgnoreCase(terminal.getType())) {
+                terminal.close();
+                throw new ConfigurationException("C-007", "Interactive terminal is required",
+                    "the interactive CLI was not started",
+                    "Run in Windows Terminal or use docker run -it.");
+            }
             reader = LineReaderBuilder.builder()
-                .terminal(TerminalBuilder.terminal())
+                .terminal(terminal)
                 .completer(new ClawkitCompleter())
                 .variable(LineReader.HISTORY_FILE, historyPath)
                 .build();
@@ -224,7 +130,11 @@ public class ClawkitApp implements Runnable {
             engine.interrupt();
         });
 
-        engine.setApprovalHandler(this::handleApproval);
+        engine.setApprovalHandler(new ApprovalConsole(() -> {
+            try { return reader.readLine(""); } catch (Exception e) { return null; }
+        }).asHandler());
+        this.commandHandlers = new CliCommandHandlers(engine, sessionService, skillLoader,
+            mcpManager, registry, memoryService, runReader, reader);
 
         // SubAgent 回调 — 委托给 ConsoleRenderer
         engine.onSubAgentSpawn(event -> renderer.onSubAgentSpawn(
@@ -236,9 +146,9 @@ public class ClawkitApp implements Runnable {
         engine.onToolEnd(event -> renderer.onToolEnd(event.name(), event.success(), event.detail()));
         engine.onStateChange(event -> { /* 工具执行由 onToolStart/onToolEnd 显示 */ });
 
-        log.info("clawkit started — model={}, thinking={}", model, mode);
+        log.info("clawkit started — model={}, thinking={}", effectiveConfig.model(), mode);
 
-        printBanner(model, registry.count(), resolvedWorkDir.toString());
+        printBanner(effectiveConfig.model(), registry.count(), resolvedWorkDir.toString());
 
         while (true) {
             String input;
@@ -282,8 +192,8 @@ public class ClawkitApp implements Runnable {
                     System.out.println("\n");
                 }
             } catch (Exception e) {
-                log.error("Engine error: {}", e.getMessage(), e);
-                System.err.println("[A-003] " + e.getMessage());
+                String diagnosticId = CliErrorRenderer.renderUnexpected(e);
+                log.error("[{}] Engine error: {}", diagnosticId, e.getMessage(), e);
                 for (var ch : imChannels) {
                     if (ch.isRunning()) ch.finalizeMirror(null);
                 }
@@ -295,70 +205,6 @@ public class ClawkitApp implements Runnable {
         if (mcpManager != null) mcpManager.shutdown();
         log.info("clawkit exiting normally.");
         System.out.println("Goodbye.");
-    }
-
-    private ApprovalResult handleApproval(ApprovalRequest req) {
-        printApprovalBox(req);
-
-        for (int attempt = 0; attempt < 5; attempt++) {
-            System.out.print(ConsoleRenderer.GRAY + "  [y]批准 [a]同类型全放行 [n]拒绝 [m]修改参数 > " + ConsoleRenderer.RESET);
-            String input = reader.readLine("").trim().toLowerCase();
-
-            return switch (input) {
-                case "", "y" -> new ApprovalResult.Approve();
-                case "a" -> new ApprovalResult.ApproveAllSameType(req.toolName());
-                case "n" -> {
-                    System.out.print(ConsoleRenderer.GRAY + "  拒绝原因（可选，回车跳过）> " + ConsoleRenderer.RESET);
-                    String reason = reader.readLine("").trim();
-                    yield new ApprovalResult.Reject(
-                        reason.isEmpty() ? "User denied " + req.toolName() : reason);
-                }
-                case "m" -> {
-                    System.out.print(ConsoleRenderer.GRAY + "  修改建议 > " + ConsoleRenderer.RESET);
-                    String guidance = reader.readLine("").trim();
-                    yield new ApprovalResult.ModifyParams(
-                        guidance.isEmpty() ? "Please use different parameters." : guidance);
-                }
-                default -> {
-                    System.out.println(ConsoleRenderer.GRAY + "  ?? 请输入 y/a/n/m" + ConsoleRenderer.RESET);
-                    yield null;
-                }
-            };
-        }
-        return new ApprovalResult.Reject("连续多次无效输入");
-    }
-
-    private void printApprovalBox(ApprovalRequest req) {
-        String riskIcon = switch (req.riskLevel()) {
-            case HIGH   -> "!!";
-            case MEDIUM -> "! ";
-            case LOW    -> "  ";
-        };
-        String riskName = switch (req.riskLevel()) {
-            case HIGH -> "高危"; case MEDIUM -> "中危"; case LOW -> "低危";
-        };
-
-        System.out.println();
-        System.out.println("  +----------------------------------------+");
-        System.out.println("  |  " + riskIcon + "  需要审批                          |");
-        System.out.println("  +----------------------------------------+");
-        System.out.println("  |  工具: " + padRight(req.toolName(), 31) + "|");
-        System.out.println("  |  等级: " + padRight(riskIcon + " " + riskName, 31) + "|");
-        System.out.println("  |  风险: " + padRight(req.riskDescription(), 31) + "|");
-        System.out.println("  +----------------------------------------+");
-        System.out.println("  |  参数:                                  |");
-        for (String line : req.parameters().split("\n")) {
-            if (line.length() > 38) line = line.substring(0, 38);
-            System.out.println("  |    " + padRight(line, 38) + "|");
-        }
-        if (req.llmIntent() != null && !req.llmIntent().isEmpty()) {
-            System.out.println("  |  ---                                   |");
-            String intent = req.llmIntent();
-            if (intent.length() > 38) intent = intent.substring(0, 38);
-            System.out.println("  |  " + padRight(intent, 38) + "|");
-        }
-        System.out.println("  +----------------------------------------+");
-        System.out.println();
     }
 
     private void printContext(AgentEngine engine) {
@@ -426,158 +272,9 @@ public class ClawkitApp implements Runnable {
         System.out.println();
     }
 
-    // ── /runs /metrics /trace handlers ──────────────────────────────
-
-    private void printRuns() {
-        System.out.println();
-        try {
-            var runs = runReader.listRuns(10);
-            if (runs.isEmpty()) {
-                System.out.println(ConsoleRenderer.GRAY + "  暂无运行记录。执行一次任务后 run 记录会自动生成。" + ConsoleRenderer.RESET);
-                System.out.println();
-                return;
-            }
-            System.out.println(ConsoleRenderer.GRAY + "  run                                     status      turns  tools  fails  compact  time     mode" + ConsoleRenderer.RESET);
-            System.out.println(ConsoleRenderer.GRAY + "  ──────────────────────────────────────── ─────────── ───── ────── ────── ──────── ──────── ──────" + ConsoleRenderer.RESET);
-            for (var r : runs) {
-                String time = r.startTime() != null
-                    ? java.time.LocalTime.from(r.startTime().atZone(java.time.ZoneId.systemDefault())).toString()
-                    : "-";
-                String duration = formatDuration(r.durationMs());
-                System.out.printf("  %-40s %-11s %5d %6d %6d %8d %8s %s%n",
-                    r.runId(), r.status().name(), r.turns(), r.toolCalls(),
-                    r.toolFailures(), r.compactCount(), duration, r.permissionMode());
-            }
-            System.out.println();
-        } catch (Exception e) {
-            System.out.println(ConsoleRenderer.GRAY + "  读取 run 记录失败: " + e.getMessage() + ConsoleRenderer.RESET);
-        }
-    }
-
-    private void printMetrics(String input) {
-        System.out.println();
-        try {
-            String runId = extractRunId(input, "/metrics");
-            com.clawkit.observability.RunMetrics m;
-            if (runId != null) {
-                m = runReader.readMetrics(runId).value();
-            } else {
-                var runs = runReader.listRuns(1);
-                if (runs.isEmpty()) {
-                    System.out.println(ConsoleRenderer.GRAY + "  暂无运行记录" + ConsoleRenderer.RESET);
-                    System.out.println();
-                    return;
-                }
-                m = runReader.readMetrics(runs.get(0).runId()).value();
-            }
-            if (m == null) {
-                System.out.println(ConsoleRenderer.GRAY + "  run 记录不存在: " + runId + ConsoleRenderer.RESET);
-                System.out.println();
-                return;
-            }
-            var s = m.summary();
-            System.out.printf("  run:      %s%n", m.runId());
-            System.out.printf("  status:   %s%n", s.status());
-            System.out.printf("  duration: %s%n", formatDuration(s.durationMs()));
-            System.out.printf("  turns:    %d%n", s.turns());
-            System.out.printf("  tools:    %d (%d failed)%n", s.toolCalls(), s.toolFailures());
-            System.out.printf("  compact:  %d%n", s.compactCount());
-            System.out.printf("  mode:     %s / %s / %s%n", s.permissionMode(), s.thinkingMode(), s.executionMode());
-            if (s.errorMessage() != null) {
-                System.out.printf("  error:    %s%n", s.errorMessage());
-            }
-            System.out.println();
-        } catch (Exception e) {
-            System.out.println(ConsoleRenderer.GRAY + "  读取 metrics 失败: " + e.getMessage() + ConsoleRenderer.RESET);
-        }
-    }
-
-    private void printTrace(String input) {
-        System.out.println();
-        try {
-            String runId = extractRunId(input, "/trace");
-            if (runId == null) {
-                var runs = runReader.listRuns(1);
-                if (runs.isEmpty()) {
-                    System.out.println(ConsoleRenderer.GRAY + "  暂无运行记录" + ConsoleRenderer.RESET);
-                    System.out.println();
-                    return;
-                }
-                runId = runs.get(0).runId();
-            }
-            var result = runReader.readEvents(runId);
-            var events = result.value();
-            if (events.isEmpty()) {
-                System.out.println(ConsoleRenderer.GRAY + "  trace 为空: " + runId + ConsoleRenderer.RESET);
-                System.out.println();
-                return;
-            }
-            if (!result.warnings().isEmpty()) {
-                for (var w : result.warnings()) {
-                    System.out.println(ConsoleRenderer.GRAY + "  ⚠ " + w.code() + " @line " + w.lineNumber() + ": " + w.message() + ConsoleRenderer.RESET);
-                }
-            }
-            System.out.println(ConsoleRenderer.GRAY + "  trace: " + runId + " (" + events.size() + " events)" + ConsoleRenderer.RESET);
-            int shown = 0;
-            for (var env : events) {
-                String time = env.occurredAt() != null
-                    ? java.time.LocalTime.from(env.occurredAt().atZone(java.time.ZoneId.systemDefault())).toString()
-                    : "--:--:--";
-                System.out.printf(ConsoleRenderer.GRAY + "  %03d %s %-30s turn=%s%n" + ConsoleRenderer.RESET,
-                    env.sequence(), time, env.eventType(),
-                    env.turnNumber() != null ? env.turnNumber().toString() : "-");
-                if (++shown >= 20) {
-                    System.out.println(ConsoleRenderer.GRAY + "  ... (" + (events.size() - shown) + " more events)" + ConsoleRenderer.RESET);
-                    break;
-                }
-            }
-            System.out.println();
-        } catch (Exception e) {
-            System.out.println(ConsoleRenderer.GRAY + "  读取 trace 失败: " + e.getMessage() + ConsoleRenderer.RESET);
-        }
-    }
-
-    private String extractRunId(String input, String command) {
-        String rest = input.substring(command.length()).trim();
-        return rest.isEmpty() ? null : rest;
-    }
-
-    private String formatDuration(long ms) {
-        if (ms < 1000) return ms + "ms";
-        if (ms < 60_000) return String.format("%.1fs", ms / 1000.0);
-        long min = ms / 60_000;
-        long sec = (ms % 60_000) / 1000;
-        return min + "m" + sec + "s";
-    }
-
-    /** 解析斜杠命令输入，返回规范化的命令名；非斜杠命令返回 null */
+    /** 解析斜杠命令输入 — 委托给 SlashCommandRouter */
     static String resolveCommand(String input) {
-        if (input == null || input.isBlank()) return null;
-        if (!input.startsWith("/")) return null;
-        return switch (input) {
-            case "/" -> "menu";
-            case "/h", "/help" -> "help";
-            case "/q", "/exit" -> "exit";
-            case "/t", "/thinking" -> "thinking";
-            case "/p", "/plan" -> "plan";
-            case "/a", "/ask" -> "ask";
-            case "/auto" -> "auto";
-            case "/plan-exec" -> "plan-exec";
-            case "/c", "/clear" -> "clear";
-            case "/compact" -> "compact";
-            case "/context" -> "context";
-            case "/runs" -> "runs";
-            case "/metrics" -> "metrics";
-            case "/trace" -> "trace";
-            case "/feishu-on" -> "feishu-on";
-            case "/feishu-off" -> "feishu-off";
-            case "/im-on" -> "im-on";
-            case "/im-off" -> "im-off";
-            case "/im-status" -> "im-status";
-            case "/skill" -> "skill";
-            case "/mcp" -> "mcp";
-            default -> null;
-        };
+        return SlashCommandRouter.resolve(input);
     }
 
     static String formatTokens(int tokens) {
@@ -585,217 +282,58 @@ public class ClawkitApp implements Runnable {
         return String.format("%.1fkt", tokens / 1000.0);
     }
 
-    // === 记忆命令 ===
-
-    private static final String MEMORY_EXTRACT_PROMPT =
-        "Extract metadata from this user memory.\n"
-        + "Output ONLY a JSON object with keys: name, description, type. No other text.\n\n"
-        + "name: kebab-case identifier (e.g. \"coding-style\", \"short-replies\")\n"
-        + "description: one-line summary under 120 chars\n"
-        + "type: one of [user, feedback, project, reference]\n"
-        + "  user = personal preferences, coding style, role, knowledge\n"
-        + "  feedback = corrections about how to approach tasks\n"
-        + "  project = facts about ongoing work, goals, deadlines\n"
-        + "  reference = pointers to external resources\n\n"
-        + "Memory content:\n";
-
     /**
      * 斜杠命令路由分派。从 REPL 主循环提取为独立方法。
      * @return true 表示退出应用，false 继续循环
      */
     private boolean dispatchCommand(String input) {
-        // 记忆命令
-        if (input.equals("/remember") || input.startsWith("/remember ")) {
-            handleRemember(reader, memoryService, provider, engine, input);
+        var command = SlashCommandRouter.parse(input);
+        if (command == null) {
+            System.out.println("未知命令，输入 / 查看菜单。\n");
             return false;
         }
-        if (input.startsWith("/memory")) {
-            handleMemory(input, memoryService, engine);
-            return false;
-        }
+        String args = command.arguments();
+        if (commandHandlers.handle(command)) return false;
 
-        // 参数化命令
-        if (input.equals("/session")) {
-            printSessionUsage();
-            return false;
-        }
-        if (input.startsWith("/session ")) {
-            handleSessionCommand(input.substring("/session ".length()).trim());
-            return false;
-        }
-        if (input.startsWith("/mcp")) {
-            handleMcpCommand(input.substring("/mcp".length()).trim());
-            return false;
-        }
-        if (input.startsWith("/skill")) {
-            handleSkillCommand(input.substring("/skill".length()).trim());
-            return false;
-        }
-
-        // 简单斜杠命令
-        switch (input) {
-            case "/" -> printMenu(engine.thinkingMode(), engine.permissionMode());
-            case "/h", "/help" -> printHelp(engine.thinkingMode(), engine.permissionMode());
-            case "/q", "/exit" -> {
+        switch (command.name()) {
+            case "menu" -> printMenu(engine.thinkingMode(), engine.permissionMode());
+            case "help" -> printHelp(engine.thinkingMode(), engine.permissionMode());
+            case "exit" -> {
                 if (mcpManager != null) mcpManager.shutdown();
                 System.out.println("Goodbye.");
                 return true;
             }
-            case "/t", "/thinking" -> toggleThinking(engine);
-            case "/p", "/plan" -> setPermissionMode(engine, PermissionMode.PLAN);
-            case "/a", "/ask" -> setPermissionMode(engine, PermissionMode.ASK);
-            case "/auto" -> setPermissionMode(engine, PermissionMode.AUTO);
-            case "/plan-exec" -> togglePlanExec(engine);
-            case "/c", "/clear" -> {
+            case "thinking" -> toggleThinking(engine);
+            case "plan" -> setPermissionMode(engine, PermissionMode.PLAN);
+            case "ask" -> setPermissionMode(engine, PermissionMode.ASK);
+            case "auto" -> setPermissionMode(engine, PermissionMode.AUTO);
+            case "plan-exec" -> togglePlanExec(engine);
+            case "clear" -> {
                 engine.clearSession();
                 System.out.println(ConsoleRenderer.GRAY + "  session cleared." + ConsoleRenderer.RESET + "\n");
                 log.info("Session cleared");
             }
-            case "/feishu-on" -> startImChannel("feishu", reader);
-            case "/feishu-off" -> stopImChannel("feishu");
-            case "/im-on" -> {
-                String[] parts = input.split("\\s+", 3);
-                if (parts.length >= 2) startImChannel(parts[1], reader);
+            case "feishu-on" -> startImChannel("feishu", reader);
+            case "feishu-off" -> stopImChannel("feishu");
+            case "im-on" -> {
+                if (!args.isBlank()) startImChannel(args, reader);
                 else System.out.println(ConsoleRenderer.GRAY + "  Usage: /im-on feishu|weixin" + ConsoleRenderer.RESET + "\n");
             }
-            case "/im-off" -> {
-                String[] parts = input.split("\\s+", 3);
-                if (parts.length >= 2) stopImChannel(parts[1]);
+            case "im-off" -> {
+                if (!args.isBlank()) stopImChannel(args);
                 else stopAllImChannels();
             }
-            case "/im-status" -> printImStatus();
-            case "/compact" -> {
+            case "im-status" -> printImStatus();
+            case "compact" -> {
                 String stats = engine.compactSession();
                 System.out.println(ConsoleRenderer.GRAY + "  " + stats + ConsoleRenderer.RESET + "\n");
                 log.info("Manual compaction: {}", stats);
             }
-            case "/context" -> printContext(engine);
-            case "/runs" -> printRuns();
-            case "/metrics" -> printMetrics(input);
-            case "/trace" -> printTrace(input);
+            case "context" -> printContext(engine);
+            case "config" -> printConfig();
             default -> System.out.println("未知命令，输入 / 查看菜单。\n");
         }
         return false;
-    }
-
-    private void handleRemember(LineReader reader, DiskMemoryService service,
-                                LLMProvider provider, AgentEngine engine,
-                                String input) {
-        String rawContent = input.substring("/remember".length()).trim();
-
-        // 无内容 → 提示输入
-        if (rawContent.isEmpty()) {
-            rawContent = reader.readLine(ConsoleRenderer.GRAY + "  What should I remember? " + ConsoleRenderer.RESET);
-            if (rawContent == null || rawContent.isBlank()) {
-                System.out.println(ConsoleRenderer.GRAY + "  Cancelled." + ConsoleRenderer.RESET + "\n");
-                return;
-            }
-        }
-
-        // 调用 LLM 提取元数据
-        System.out.print(ConsoleRenderer.GRAY + "  extracting metadata..." + ConsoleRenderer.RESET);
-        String json;
-        try {
-            Message msg = provider.generate(
-                List.of(Message.system(MEMORY_EXTRACT_PROMPT), Message.user(rawContent)),
-                List.of());
-            json = msg.content() != null ? msg.content().trim() : "";
-        } catch (Exception e) {
-            log.warn("Memory metadata extraction failed: {}", e.getMessage());
-            System.out.println(ConsoleRenderer.GRAY + " failed, using defaults." + ConsoleRenderer.RESET);
-            json = "";
-        }
-
-        // 解析 LLM 输出
-        String name = "";
-        String description = "";
-        MemoryType type = MemoryType.USER;
-        if (!json.isEmpty()) {
-            try {
-                var node = new ObjectMapper().readTree(json);
-                name = node.has("name") ? node.get("name").asText() : "";
-                description = node.has("description") ? node.get("description").asText() : "";
-                if (node.has("type")) {
-                    type = parseMemoryType(node.get("type").asText());
-                }
-            } catch (Exception e) {
-                log.warn("Failed to parse memory metadata JSON: {}", json);
-            }
-        }
-
-        // 兜底
-        if (name.isEmpty()) {
-            name = rawContent.length() > 30
-                ? rawContent.substring(0, 30).replaceAll("[^a-zA-Z0-9_-]", "_").toLowerCase()
-                : rawContent.replaceAll("[^a-zA-Z0-9_-]", "_").toLowerCase();
-        }
-        if (description.isEmpty()) {
-            description = rawContent.length() > 100
-                ? rawContent.substring(0, 100) + "..."
-                : rawContent;
-        }
-        if (type == null) type = MemoryType.USER;
-
-        MemoryEntry entry = new MemoryEntry(name, description, type, Instant.now(), rawContent);
-        service.save(entry);
-        engine.setMemoryIndex(service.loadIndex());
-        System.out.println(ConsoleRenderer.GRAY + "\r  saved " + entry.filename()
-            + " [" + type.name().toLowerCase() + "] " + description + ConsoleRenderer.RESET + "\n");
-    }
-
-    private void handleMemory(String input, DiskMemoryService service,
-                              AgentEngine engine) {
-        String sub = input.substring("/memory".length()).trim();
-        if (sub.equals("list") || sub.isEmpty()) {
-            var entries = service.listIndex();
-            if (entries.isEmpty()) {
-                System.out.println(ConsoleRenderer.GRAY + "  No memory entries." + ConsoleRenderer.RESET + "\n");
-                return;
-            }
-            System.out.println();
-            for (var entry : entries) {
-                System.out.println(ConsoleRenderer.GRAY + "  - [" + entry.name() + "]("
-                    + entry.filename() + ") — " + entry.description() + ConsoleRenderer.RESET);
-            }
-            System.out.println();
-        } else if (sub.equals("regen")) {
-            service.regenerateIndex();
-            engine.setMemoryIndex(service.loadIndex());
-            System.out.println(ConsoleRenderer.GRAY + "  Index regenerated from files." + ConsoleRenderer.RESET + "\n");
-        } else if (sub.startsWith("add ")) {
-            handleMemoryAdd(sub.substring("add ".length()).trim(), service, engine);
-        } else {
-            System.out.println(ConsoleRenderer.GRAY + "  Usage: /memory list | /memory add <type> <name> <content> | /memory regen" + ConsoleRenderer.RESET + "\n");
-        }
-    }
-
-    private void handleMemoryAdd(String args, DiskMemoryService service,
-                                 AgentEngine engine) {
-        // 解析: <type> <name> <content>
-        String[] parts = args.split("\\s+", 3);
-        if (parts.length < 3) {
-            System.out.println(ConsoleRenderer.GRAY + "  Usage: /memory add <type> <name> <content>" + ConsoleRenderer.RESET);
-            System.out.println(ConsoleRenderer.GRAY + "  Types: user, feedback, project, reference" + ConsoleRenderer.RESET + "\n");
-            return;
-        }
-        MemoryType type;
-        try {
-            type = MemoryType.valueOf(parts[0].toUpperCase());
-        } catch (IllegalArgumentException e) {
-            System.out.println(ConsoleRenderer.GRAY + "  Invalid type: " + parts[0]
-                + ". Use: user, feedback, project, reference" + ConsoleRenderer.RESET + "\n");
-            return;
-        }
-        String name = parts[1].replaceAll("[^a-zA-Z0-9_-]", "_");
-        String content = parts[2];
-        String description = content.length() > 100
-            ? content.substring(0, 100) + "..." : content;
-
-        MemoryEntry entry = new MemoryEntry(name, description, type, Instant.now(), content);
-        service.save(entry);
-        engine.setMemoryIndex(service.loadIndex());
-        System.out.println(ConsoleRenderer.GRAY + "  saved " + entry.filename()
-            + " [" + type.name().toLowerCase() + "]" + ConsoleRenderer.RESET + "\n");
     }
 
     /** Load hierarchical CLAUDE.md: ~/.clawkit/CLAUDE.md + ./CLAUDE.md (fallback AGENTS.md). */
@@ -859,275 +397,6 @@ public class ClawkitApp implements Runnable {
         return sb.toString();
     }
 
-    // === 会话命令 ===
-
-    private void handleSessionCommand(String args) {
-        if (args.startsWith("save")) {
-            String name = args.substring("save".length()).trim();
-            if (name.isEmpty()) {
-                name = "session-" + Instant.now().toString().replace(":", "-").substring(0, 19);
-            }
-            String result = engine.saveSession(name);
-            System.out.println(ConsoleRenderer.GRAY + "  " + result + ConsoleRenderer.RESET + "\n");
-        } else if (args.startsWith("load ")) {
-            String id = args.substring("load ".length()).trim();
-            try {
-                engine.loadSession(id);
-                System.out.println(ConsoleRenderer.GRAY + "  Session loaded: " + id + ConsoleRenderer.RESET + "\n");
-            } catch (Exception e) {
-                System.out.println(ConsoleRenderer.GRAY + "  [H-003] " + e.getMessage() + ConsoleRenderer.RESET + "\n");
-            }
-        } else if (args.equals("list")) {
-            List<SessionMeta> sessions = engine.listSessions();
-            if (sessions.isEmpty()) {
-                System.out.println(ConsoleRenderer.GRAY + "  No saved sessions." + ConsoleRenderer.RESET + "\n");
-                return;
-            }
-            System.out.println();
-            for (SessionMeta s : sessions) {
-                String updated = s.updatedAt().toString().replace("T", " ").substring(0, 16);
-                String first = s.firstUserMessage() != null ? s.firstUserMessage() : "";
-                if (first.length() > 60) first = first.substring(0, 60) + "...";
-                System.out.println(ConsoleRenderer.GRAY + "  [" + s.id() + "] " + s.name()
-                    + "  (" + s.messageCount() + " msgs, " + updated + ")" + ConsoleRenderer.RESET);
-                if (!first.isEmpty()) {
-                    System.out.println(ConsoleRenderer.GRAY + "      " + first + ConsoleRenderer.RESET);
-                }
-            }
-            System.out.println();
-        } else if (args.startsWith("delete ")) {
-            String id = args.substring("delete ".length()).trim();
-            try {
-                engine.deleteSession(id);
-                System.out.println(ConsoleRenderer.GRAY + "  Session deleted: " + id + ConsoleRenderer.RESET + "\n");
-            } catch (Exception e) {
-                System.out.println(ConsoleRenderer.GRAY + "  [H-003] " + e.getMessage() + ConsoleRenderer.RESET + "\n");
-            }
-        } else if (args.startsWith("search ")) {
-            String query = args.substring("search ".length()).trim();
-            if (sessionService == null) {
-                System.out.println(ConsoleRenderer.GRAY + "  Session service not available." + ConsoleRenderer.RESET + "\n");
-                return;
-            }
-            List<SessionMeta> matches = sessionService.search(query);
-            if (matches.isEmpty()) {
-                System.out.println(ConsoleRenderer.GRAY + "  No sessions matching \"" + query + "\"." + ConsoleRenderer.RESET + "\n");
-                return;
-            }
-            System.out.println();
-            for (SessionMeta s : matches) {
-                String updated = s.updatedAt().toString().replace("T", " ").substring(0, 16);
-                System.out.println(ConsoleRenderer.GRAY + "  [" + s.id() + "] " + s.name()
-                    + "  (" + s.messageCount() + " msgs, " + updated + ")" + ConsoleRenderer.RESET);
-                if (s.summary() != null && !s.summary().isBlank()) {
-                    System.out.println(ConsoleRenderer.GRAY + "      " + s.summary() + ConsoleRenderer.RESET);
-                }
-            }
-            System.out.println();
-        } else if (args.equals("stats")) {
-            if (sessionService == null) {
-                System.out.println(ConsoleRenderer.GRAY + "  Session service not available." + ConsoleRenderer.RESET + "\n");
-                return;
-            }
-            List<SessionService.AgeBucket> buckets = sessionService.stats();
-            if (buckets.isEmpty()) {
-                System.out.println(ConsoleRenderer.GRAY + "  No saved sessions." + ConsoleRenderer.RESET + "\n");
-                return;
-            }
-            long totalBytes = 0;
-            int totalCount = 0;
-            System.out.println();
-            System.out.println(ConsoleRenderer.GRAY + "  Session storage breakdown:" + ConsoleRenderer.RESET);
-            for (SessionService.AgeBucket b : buckets) {
-                System.out.println(ConsoleRenderer.GRAY + "    " + padRight(b.label(), 16)
-                    + String.format("%3d sessions", b.count())
-                    + String.format("%8s", formatSize(b.bytes())) + ConsoleRenderer.RESET);
-                totalBytes += b.bytes();
-                totalCount += b.count();
-            }
-            System.out.println(ConsoleRenderer.GRAY + "    " + padRight("───", 16)
-                + "───────────" + "  ────────" + ConsoleRenderer.RESET);
-            System.out.println(ConsoleRenderer.GRAY + "    " + padRight("Total", 16)
-                + String.format("%3d sessions", totalCount)
-                + String.format("%8s", formatSize(totalBytes)) + ConsoleRenderer.RESET);
-            System.out.println();
-        } else if (args.startsWith("prune")) {
-            String rest = args.substring("prune".length()).trim();
-            int days;
-            try {
-                days = Integer.parseInt(rest);
-                if (days <= 0) {
-                    System.out.println(ConsoleRenderer.GRAY + "  Usage: /session prune <days>  (days must be > 0)" + ConsoleRenderer.RESET + "\n");
-                    return;
-                }
-            } catch (NumberFormatException e) {
-                System.out.println(ConsoleRenderer.GRAY + "  Usage: /session prune <days>  (e.g. /session prune 30)" + ConsoleRenderer.RESET + "\n");
-                return;
-            }
-            if (sessionService == null) {
-                System.out.println(ConsoleRenderer.GRAY + "  Session service not available." + ConsoleRenderer.RESET + "\n");
-                return;
-            }
-            int count = sessionService.prune(days);
-            if (count == 0) {
-                System.out.println(ConsoleRenderer.GRAY + "  No sessions older than " + days + " days." + ConsoleRenderer.RESET + "\n");
-            } else {
-                System.out.println(ConsoleRenderer.GRAY + "  Pruned " + count + " session(s) older than " + days + " days." + ConsoleRenderer.RESET + "\n");
-            }
-        } else if (args.equals("new")) {
-            String result = engine.newSession();
-            System.out.println(ConsoleRenderer.GRAY + "  " + result + ConsoleRenderer.RESET + "\n");
-        } else {
-            printSessionUsage();
-        }
-    }
-
-    private void printSessionUsage() {
-        System.out.println();
-        System.out.println(ConsoleRenderer.GRAY + "  /session save [name]     save current session" + ConsoleRenderer.RESET);
-        System.out.println(ConsoleRenderer.GRAY + "  /session load <id>       load a saved session" + ConsoleRenderer.RESET);
-        System.out.println(ConsoleRenderer.GRAY + "  /session list            list all saved sessions" + ConsoleRenderer.RESET);
-        System.out.println(ConsoleRenderer.GRAY + "  /session search <query>  search past sessions" + ConsoleRenderer.RESET);
-        System.out.println(ConsoleRenderer.GRAY + "  /session stats           show storage breakdown by age" + ConsoleRenderer.RESET);
-        System.out.println(ConsoleRenderer.GRAY + "  /session prune <days>    delete sessions older than N days" + ConsoleRenderer.RESET);
-        System.out.println(ConsoleRenderer.GRAY + "  /session delete <id>     delete a specific session" + ConsoleRenderer.RESET);
-        System.out.println(ConsoleRenderer.GRAY + "  /session new             clear and start new session" + ConsoleRenderer.RESET);
-        System.out.println();
-    }
-
-    // === MCP 命令 ===
-
-    private void handleMcpCommand(String args) {
-        if (mcpManager == null) {
-            System.out.println(ConsoleRenderer.GRAY + "  MCP manager not initialized." + ConsoleRenderer.RESET + "\n");
-            return;
-        }
-
-        if (args.isEmpty()) {
-            var statuses = mcpManager.status();
-            if (statuses.isEmpty()) {
-                System.out.println(ConsoleRenderer.GRAY + "  No MCP servers configured." + ConsoleRenderer.RESET + "\n");
-                return;
-            }
-            System.out.println();
-            System.out.println(ConsoleRenderer.GRAY + "  MCP Servers:" + ConsoleRenderer.RESET);
-            for (var s : statuses) {
-                String icon = "RUNNING".equals(s.state()) ? "●" : "○";
-                String tools = s.toolCount() > 0 ? s.toolCount() + " tools" : "—";
-                System.out.println(ConsoleRenderer.GRAY + "    " + icon + " " + padRight(s.name(), 20)
-                    + padRight(s.transport(), 8) + padRight(s.state(), 10) + tools + ConsoleRenderer.RESET);
-            }
-            System.out.println();
-            return;
-        }
-
-        if (args.startsWith("restart ")) {
-            String name = args.substring("restart ".length()).trim();
-            List<Tool> tools = mcpManager.restart(name);
-            for (Tool t : tools) registry.register(t);
-            System.out.println(ConsoleRenderer.GRAY + "  MCP server '" + name + "' restarted with "
-                + tools.size() + " tools." + ConsoleRenderer.RESET + "\n");
-            return;
-        }
-
-        if (args.startsWith("logs ")) {
-            String name = args.substring("logs ".length()).trim();
-            List<String> logs = mcpManager.logs(name);
-            if (logs.isEmpty()) {
-                System.out.println(ConsoleRenderer.GRAY + "  No logs for: " + name + ConsoleRenderer.RESET + "\n");
-                return;
-            }
-            System.out.println();
-            for (String line : logs) {
-                System.out.println(ConsoleRenderer.GRAY + "  " + line + ConsoleRenderer.RESET);
-            }
-            System.out.println();
-            return;
-        }
-
-        if (args.startsWith("disable ")) {
-            String name = args.substring("disable ".length()).trim();
-            mcpManager.disable(name);
-            System.out.println(ConsoleRenderer.GRAY + "  MCP server '" + name + "' disabled." + ConsoleRenderer.RESET + "\n");
-            return;
-        }
-
-        if (args.startsWith("enable ")) {
-            String name = args.substring("enable ".length()).trim();
-            List<Tool> tools = mcpManager.restart(name);
-            for (Tool t : tools) registry.register(t);
-            System.out.println(ConsoleRenderer.GRAY + "  MCP server '" + name + "' enabled with "
-                + tools.size() + " tools." + ConsoleRenderer.RESET + "\n");
-            return;
-        }
-
-        printMcpUsage();
-    }
-
-    private void printMcpUsage() {
-        System.out.println();
-        System.out.println(ConsoleRenderer.GRAY + "  /mcp                    list all MCP servers" + ConsoleRenderer.RESET);
-        System.out.println(ConsoleRenderer.GRAY + "  /mcp restart <name>     restart a server" + ConsoleRenderer.RESET);
-        System.out.println(ConsoleRenderer.GRAY + "  /mcp logs <name>        show server stderr logs" + ConsoleRenderer.RESET);
-        System.out.println(ConsoleRenderer.GRAY + "  /mcp disable <name>     stop and disable a server" + ConsoleRenderer.RESET);
-        System.out.println(ConsoleRenderer.GRAY + "  /mcp enable <name>      re-enable a disabled server" + ConsoleRenderer.RESET);
-        System.out.println();
-    }
-
-    // === 技能命令 ===
-
-    private void handleSkillCommand(String args) {
-        if (args.isEmpty()) {
-            printSkillUsage();
-            return;
-        }
-        if (args.equals("list")) {
-            var skills = skillLoader.listAll();
-            if (skills.isEmpty()) {
-                System.out.println(ConsoleRenderer.GRAY + "  No skills found." + ConsoleRenderer.RESET + "\n");
-                return;
-            }
-            System.out.println();
-            for (var s : skills) {
-                String status = engine.hasSkillLoaded(s.name()) ? " (*loaded)" : "";
-                System.out.println(ConsoleRenderer.GRAY + "  - " + s.name() + status + ConsoleRenderer.RESET);
-                System.out.println(ConsoleRenderer.GRAY + "    " + s.description() + ConsoleRenderer.RESET);
-            }
-            System.out.println();
-        } else if (args.startsWith("load ")) {
-            String name = args.substring("load ".length()).trim();
-            if (name.isEmpty()) {
-                System.out.println(ConsoleRenderer.GRAY + "  Usage: /skill load <name>" + ConsoleRenderer.RESET + "\n");
-                return;
-            }
-            String prompt = skillLoader.loadPrompt(name);
-            if (prompt == null) {
-                System.out.println(ConsoleRenderer.GRAY + "  [S-001] Skill not found: " + name + ConsoleRenderer.RESET + "\n");
-                return;
-            }
-            engine.loadSkill(name, prompt);
-            System.out.println(ConsoleRenderer.GRAY + "  Skill loaded: " + name + " (" + prompt.length() + " chars)" + ConsoleRenderer.RESET + "\n");
-        } else if (args.startsWith("unload ")) {
-            String name = args.substring("unload ".length()).trim();
-            if (name.isEmpty()) {
-                System.out.println(ConsoleRenderer.GRAY + "  Usage: /skill unload <name>" + ConsoleRenderer.RESET + "\n");
-                return;
-            }
-            engine.unloadSkill(name);
-            System.out.println(ConsoleRenderer.GRAY + "  Skill unloaded: " + name + ConsoleRenderer.RESET + "\n");
-        } else {
-            printSkillUsage();
-        }
-    }
-
-    private void printSkillUsage() {
-        System.out.println();
-        System.out.println(ConsoleRenderer.GRAY + "  /skill list             list available skills" + ConsoleRenderer.RESET);
-        System.out.println(ConsoleRenderer.GRAY + "  /skill load <name>      load a skill into current session" + ConsoleRenderer.RESET);
-        System.out.println(ConsoleRenderer.GRAY + "  /skill unload <name>    unload a skill" + ConsoleRenderer.RESET);
-        System.out.println();
-    }
-
     static String formatSize(long bytes) {
         if (bytes < 1024) return bytes + " B";
         if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
@@ -1158,6 +427,7 @@ public class ClawkitApp implements Runnable {
         System.out.println(ConsoleRenderer.GRAY + "  /ask        confirm writes      /auto   full-auto" + ConsoleRenderer.RESET);
         System.out.println(ConsoleRenderer.GRAY + "  /clear      reset session       /compact compress" + ConsoleRenderer.RESET);
         System.out.println(ConsoleRenderer.GRAY + "  /context    token usage         /remember add memory" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /config     effective non-secret configuration" + ConsoleRenderer.RESET);
         System.out.println(ConsoleRenderer.GRAY + "  /runs       recent runs         /metrics run summary" + ConsoleRenderer.RESET);
         System.out.println(ConsoleRenderer.GRAY + "  /trace      run event trace     /memory  list memories" + ConsoleRenderer.RESET);
         System.out.println(ConsoleRenderer.GRAY + "  /session    manage sessions     /skill load/unload" + ConsoleRenderer.RESET);
@@ -1168,7 +438,7 @@ public class ClawkitApp implements Runnable {
 
     private void printHelp(ThinkingMode thinking, PermissionMode perm) {
         System.out.println();
-        System.out.println("  clawkit v0.1.0 — your local AI coding companion");
+        System.out.println("  clawkit v" + BuildInfo.version() + " — your local AI coding companion");
         System.out.println();
         System.out.println("  COMMANDS");
         System.out.println("    /thinking    toggle slow thinking mode  (current: " + thinking + ")");
@@ -1178,6 +448,7 @@ public class ClawkitApp implements Runnable {
         System.out.println("    /clear       reset conversation session");
         System.out.println("    /compact     manually compress context (L1/L2)");
         System.out.println("    /context     show token usage and session info");
+        System.out.println("    /config      show effective non-secret configuration");
         System.out.println("    /runs        list recent runs");
         System.out.println("    /metrics     show run summary [runId]");
         System.out.println("    /trace       show trace events <runId>");
@@ -1271,7 +542,9 @@ public class ClawkitApp implements Runnable {
 
         System.out.print(ConsoleRenderer.GRAY + "  Execute this plan? [Y/n] " + ConsoleRenderer.RESET);
         try {
-            String input = System.console().readLine().trim().toLowerCase();
+            String line = reader.readLine("");
+            if (line == null) return false;
+            String input = line.trim().toLowerCase();
             return input.isEmpty() || "y".equals(input) || "yes".equals(input);
         } catch (Exception e) {
             return false;
@@ -1319,7 +592,7 @@ public class ClawkitApp implements Runnable {
         System.out.println(boxLine(W, center("|_| |_| |_|_|_| |_|_|\\___|_|\\__,_| \\_/\\_/", W)));
         System.out.println(boxLine(W, ""));
         System.out.println(boxLine(W, center("your local AI coding companion", W)));
-        System.out.println(boxLine(W, center("v0.1.0", W)));
+        System.out.println(boxLine(W, center("v" + BuildInfo.version(), W)));
         System.out.println(boxLine(W, ""));
         System.out.println(boxLine(W, "", '╠', '╣'));
         System.out.println(boxLine(W, "  model     " + padRight(model, W - 12)));
@@ -1371,64 +644,12 @@ public class ClawkitApp implements Runnable {
         return "..." + path.substring(path.length() - maxLen + 3);
     }
 
-    private static Path resolveWorkDir(Path rootDir) {
-        if (rootDir != null) {
-            Path path = rootDir.toAbsolutePath().normalize();
-            if (!Files.exists(path)) {
-                System.err.println("[C-003] --root path does not exist: " + path);
-                System.exit(1);
-            }
-            if (!Files.isDirectory(path)) {
-                System.err.println("[C-003] --root path is not a directory: " + path);
-                System.exit(1);
-            }
-            return path;
-        }
-        return Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
-    }
-
-    private String readConfigValue(String envKey, String altEnvKey, String... configPath) {
-        String val = System.getenv(envKey);
-        if (val != null && !val.isBlank()) return val;
-        if (altEnvKey != null) {
-            val = System.getenv(altEnvKey);
-            if (val != null && !val.isBlank()) return val;
-        }
-        return ConfigHelper.readConfig(configPath);
-    }
-
     private void startImBot(String channelName) {
-        String apiKey = readConfigValue("CLAWKIT_API_KEY", "ANTHROPIC_AUTH_TOKEN", "apiKey");
-        if (apiKey == null || apiKey.isBlank()) {
-            System.err.println("[C-003] CLAWKIT_API_KEY not set (env or ~/.clawkit/config.yaml).");
-            System.exit(1);
-        }
-
-        LLMConfig.Protocol proto;
-        try {
-            proto = LLMConfig.Protocol.valueOf(protocol.toUpperCase());
-        } catch (IllegalArgumentException e) {
-            System.err.println("[C-004] Unknown protocol '" + protocol
-                + "'. Valid: OPENAI_COMPAT, ANTHROPIC");
-            System.exit(1);
-            return;
-        }
-
-        LLMConfig llmConfig = LLMConfig.builder()
-            .apiKey(apiKey)
-            .baseUrl(baseUrl)
-            .model(model)
-            .protocol(proto)
-            .build();
-
+        // P0-R: IM 模式也走 Bootstrap
         Path workDir = resolvedWorkDir != null ? resolvedWorkDir : Path.of(System.getProperty("user.dir"));
-        LLMProvider provider = ProviderFactory.create(llmConfig);
-        Path skillsDir = Path.of(System.getProperty("user.home"), ".agents", "skills");
-        ToolRegistry registry = createToolRegistry(workDir, skillsDir);
-        AgentEngine eng = new AgentEngine(provider, registry, workDir.toString(),
-            ThinkingMode.OFF, null, null, null);
+        var ctx = ApplicationBootstrap.bootstrap(model, baseUrl, protocol, false, workDir);
+        AgentEngine eng = ctx.engine();
         eng.setPermissionMode(PermissionMode.AUTO);
-        eng.setWorkspaceRules(loadWorkspaceRules(workDir));
 
         ImChannel channel = switch (channelName) {
             case "feishu" -> new FeishuChannel(FeishuConfig.fromEnv());
@@ -1526,23 +747,39 @@ public class ClawkitApp implements Runnable {
         System.out.println();
     }
 
-    private ToolRegistry createToolRegistry(Path workDir, Path... extraReadRoots) {
-        ToolRegistry registry = new ToolRegistry();
-        registry.register(new ReadTool(workDir, extraReadRoots));
-        registry.register(new WriteTool(workDir));
-        registry.register(new TodoWriteTool());
-        registry.register(new WebFetchTool());
-        registry.register(new BashTool(workDir));
-        registry.register(new GitReadTool(workDir));
-        registry.register(new EditTool(workDir));
-        registry.register(new GlobTool(workDir));
-        registry.register(new GrepTool(workDir));
-        registry.addInterceptor(new CommandSafetyInterceptor());
-        return registry;
+    public static void main(String[] args) {
+        CommandLine commandLine = new CommandLine(new ClawkitApp());
+        commandLine.setExecutionExceptionHandler((error, cmd, parseResult) -> {
+            if (error instanceof ConfigurationException configuration) {
+                CliErrorRenderer.render(configuration);
+                return 2;
+            }
+            String diagnosticId = CliErrorRenderer.renderUnexpected(error);
+            LoggerFactory.getLogger(ClawkitApp.class)
+                .error("[{}] Unexpected startup failure: {}", diagnosticId, error.getMessage(), error);
+            return 4;
+        });
+        int exitCode = commandLine.execute(args);
+        System.exit(exitCode);
     }
 
-    public static void main(String[] args) {
-        int exitCode = new CommandLine(new ClawkitApp()).execute(args);
-        System.exit(exitCode);
+    private void printConfig() {
+        if (effectiveConfig == null) return;
+        System.out.println();
+        printSetting("provider", "deepseek", "fixed");
+        printSetting("model", effectiveConfig.model(), effectiveConfig.sources().get("model"));
+        printSetting("endpoint", effectiveConfig.baseUrl(), effectiveConfig.sources().get("baseUrl"));
+        printSetting("requestTimeout", effectiveConfig.requestTimeoutSeconds() + "s",
+            effectiveConfig.sources().get("requestTimeoutSeconds"));
+        printSetting("maxRetries", Integer.toString(effectiveConfig.maxRetries()),
+            effectiveConfig.sources().get("maxRetries"));
+        printSetting("apiKey", effectiveConfig.apiKeyConfigured() ? "SET" : "NOT SET",
+            "env:CLAWKIT_API_KEY");
+        printSetting("workdir", resolvedWorkDir.toString(), rootDir == null ? "default" : "cli");
+        System.out.println();
+    }
+
+    private static void printSetting(String name, String value, String source) {
+        System.out.printf("  %-16s %-42s [%s]%n", name, value, source);
     }
 }

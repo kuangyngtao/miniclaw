@@ -1,0 +1,9 @@
+# Copy non-secret settings to ~/.clawkit/config.yaml.
+# Credentials are forbidden here; set CLAWKIT_API_KEY in the environment.
+provider:
+  model: deepseek-chat
+  requestTimeoutSeconds: 60
+  maxRetries: 3
+
+runtime:
+  thinking: false

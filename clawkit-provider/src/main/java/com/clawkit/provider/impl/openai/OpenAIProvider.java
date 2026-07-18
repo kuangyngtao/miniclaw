@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.clawkit.provider.LLMConfig;
 import com.clawkit.provider.LLMException;
 import com.clawkit.provider.LLMProvider;
+import com.clawkit.provider.ProviderError;
 import com.clawkit.tools.schema.Message;
 import com.clawkit.tools.schema.ToolCall;
 import com.clawkit.tools.schema.ToolDefinition;
@@ -23,6 +24,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,13 +43,24 @@ public class OpenAIProvider implements LLMProvider {
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
     private final OpenAIResponseParser responseParser;
+    private final RetrySleeper retrySleeper;
+    private final LongSupplier clockMillis;
+
+    @FunctionalInterface
+    interface RetrySleeper { void sleep(long millis) throws InterruptedException; }
 
     // 熔断器状态（CLOSED → OPEN → HALF_OPEN）
     private int consecutiveFailures;
     private long circuitOpenUntil;
 
     public OpenAIProvider(LLMConfig config) {
+        this(config, Thread::sleep, System::currentTimeMillis);
+    }
+
+    OpenAIProvider(LLMConfig config, RetrySleeper retrySleeper, LongSupplier clockMillis) {
         this.config = config;
+        this.retrySleeper = retrySleeper;
+        this.clockMillis = clockMillis;
         this.objectMapper = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
         this.responseParser = new OpenAIResponseParser(objectMapper);
@@ -66,7 +79,7 @@ public class OpenAIProvider implements LLMProvider {
      */
     private void checkCircuit() {
         if (circuitOpenUntil == 0) return; // CLOSED
-        long now = System.currentTimeMillis();
+        long now = clockMillis.getAsLong();
         if (now < circuitOpenUntil) {
             long remaining = (circuitOpenUntil - now) / 1000;
             throw new LLMException("熔断器开启，请等待 " + remaining + "s 后重试");
@@ -87,11 +100,11 @@ public class OpenAIProvider implements LLMProvider {
         consecutiveFailures++;
         log.warn("熔断器记录失败: {}/{}", consecutiveFailures, CIRCUIT_THRESHOLD);
         if (consecutiveFailures >= CIRCUIT_THRESHOLD && circuitOpenUntil == 0) {
-            circuitOpenUntil = System.currentTimeMillis() + CIRCUIT_COOLDOWN_MS;
+            circuitOpenUntil = clockMillis.getAsLong() + CIRCUIT_COOLDOWN_MS;
             log.warn("熔断器开启，{}s 内直接快速失败", CIRCUIT_COOLDOWN_MS / 1000);
         } else if (consecutiveFailures >= CIRCUIT_THRESHOLD) {
             // HALF_OPEN 探测失败，重新计时
-            circuitOpenUntil = System.currentTimeMillis() + CIRCUIT_COOLDOWN_MS;
+            circuitOpenUntil = clockMillis.getAsLong() + CIRCUIT_COOLDOWN_MS;
             log.warn("熔断器探测失败，重新开启 {}s", CIRCUIT_COOLDOWN_MS / 1000);
         }
     }
@@ -364,19 +377,29 @@ public class OpenAIProvider implements LLMProvider {
         return role.name().toLowerCase();
     }
 
-    /** 将 inputSchema 字符串解析为 JsonNode，确保参数被序列化为 JSON 对象。 */
+    /** 将 inputSchema 转为 JsonNode，确保 Map/POJO 不会经由 toString() 丢失结构。 */
     private JsonNode parseSchema(Object inputSchema) {
         if (inputSchema == null) {
-            return objectMapper.createObjectNode();
+            return emptyObjectSchema();
         }
         if (inputSchema instanceof JsonNode node) {
             return node;
         }
+        if (!(inputSchema instanceof CharSequence)) {
+            return objectMapper.valueToTree(inputSchema);
+        }
         try {
             return objectMapper.readTree(inputSchema.toString());
         } catch (IOException e) {
-            return objectMapper.createObjectNode();
+            return emptyObjectSchema();
         }
+    }
+
+    private JsonNode emptyObjectSchema() {
+        var schema = objectMapper.createObjectNode();
+        schema.put("type", "object");
+        schema.set("properties", objectMapper.createObjectNode());
+        return schema;
     }
 
     // === 响应转换：OpenAI JSON → 内部 Message ===
@@ -395,10 +418,11 @@ public class OpenAIProvider implements LLMProvider {
                 long delayMs = (long) Math.pow(2, attempt) * 1000; // 2s, 4s, 8s
                 log.warn("LLM 调用重试 {}/{}，等待 {}ms", attempt, config.maxRetries(), delayMs);
                 try {
-                    Thread.sleep(delayMs);
+                    retrySleeper.sleep(delayMs);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    throw new LLMException("重试等待被中断", e);
+                    throw new LLMException("DeepSeek retry was interrupted", e,
+                        new ProviderError.Cancelled());
                 }
             }
 
@@ -418,11 +442,11 @@ public class OpenAIProvider implements LLMProvider {
                     statusCode, attempt + 1, config.maxRetries() + 1, errorMsg);
 
                 if (!shouldRetry(statusCode)) {
-                    throw new LLMException("HTTP " + statusCode + ": " + errorMsg);
+                    throw classifiedHttpError(statusCode, errorMsg);
                 }
 
-                lastException = new LLMException(
-                    "HTTP " + statusCode + " (attempt " + (attempt + 1) + "): " + errorMsg);
+                lastException = classifiedHttpError(statusCode,
+                    "attempt " + (attempt + 1) + ": " + errorMsg);
 
             } catch (LLMException e) {
                 // 不可重试错误直接抛
@@ -430,7 +454,10 @@ public class OpenAIProvider implements LLMProvider {
             } catch (IOException e) {
                 log.warn("LLM API IO 异常 (attempt {}/{}): {}",
                     attempt + 1, config.maxRetries() + 1, e.getMessage());
-                lastException = new LLMException("I/O 错误: " + e.getMessage(), e);
+                ProviderError error = e instanceof java.net.http.HttpTimeoutException
+                    ? new ProviderError.Timeout("DeepSeek request timed out")
+                    : new ProviderError.Network("Cannot reach DeepSeek");
+                lastException = new LLMException(errorMessage(error), e, error);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new LLMException("请求被中断", e);
@@ -440,7 +467,35 @@ public class OpenAIProvider implements LLMProvider {
         throw new LLMException(
             "LLM 调用失败，已重试 " + config.maxRetries() + " 次。最后错误: " +
             (lastException != null ? lastException.getMessage() : "unknown"),
-            lastException);
+            lastException, lastException != null ? lastException.providerError() : null);
+    }
+
+    private LLMException classifiedHttpError(int statusCode, String detail) {
+        String lower = detail == null ? "" : detail.toLowerCase();
+        ProviderError error = switch (statusCode) {
+            case 401, 403 -> new ProviderError.Authentication("DeepSeek authentication failed");
+            case 429 -> new ProviderError.RateLimited("DeepSeek rate limit exceeded", null);
+            default -> lower.contains("context") && (lower.contains("length") || lower.contains("token"))
+                ? new ProviderError.ContextLengthExceeded("DeepSeek context length exceeded")
+                : statusCode >= 400 && statusCode < 500
+                    ? new ProviderError.Protocol("DeepSeek rejected the request")
+                    : new ProviderError.Server("DeepSeek service error", statusCode);
+        };
+        return new LLMException("HTTP " + statusCode + ": " + sanitize(detail), error);
+    }
+
+    private static String errorMessage(ProviderError error) {
+        return switch (error) {
+            case ProviderError.Timeout ignored -> "DeepSeek request timed out";
+            case ProviderError.Network ignored -> "Cannot reach DeepSeek";
+            default -> "DeepSeek request failed";
+        };
+    }
+
+    private static String sanitize(String value) {
+        if (value == null) return "unknown";
+        String safe = value.replaceAll("(?i)(bearer\\s+|sk-)[A-Za-z0-9._-]+", "$1***");
+        return safe.length() > 200 ? safe.substring(0, 200) + "..." : safe;
     }
 
     private boolean shouldRetry(int statusCode) {

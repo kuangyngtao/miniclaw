@@ -19,6 +19,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.time.Duration;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
@@ -34,29 +35,40 @@ public class ApplicationBootstrap {
     public static ApplicationContext bootstrap(
             String model, String baseUrl, String protocol, boolean thinking, Path rootDir) {
 
-        Path workDir = ApplicationBootstrap.resolveWorkDir(rootDir);
+        ResolvedConfiguration resolved = ConfigResolver.resolve(model, baseUrl, protocol,
+            thinking, rootDir, System.getenv(), Path.of(System.getProperty("user.home")));
+        return bootstrap(resolved);
+    }
+
+    static ApplicationContext bootstrap(ResolvedConfiguration resolved) {
+        EffectiveConfig effective = resolved.effective();
+
+        Path workDir = ApplicationBootstrap.resolveWorkDir(effective.rootDir());
 
         // API Key
-        String apiKey = readConfigValue("CLAWKIT_API_KEY", "ANTHROPIC_AUTH_TOKEN", "apiKey");
+        String apiKey = resolved.apiKey();
         if (apiKey == null || apiKey.isBlank()) {
-            System.err.println("[C-003] CLAWKIT_API_KEY not set (env or ~/.clawkit/config.yaml).");
-            System.exit(1);
+            throw new ConfigurationException("C-003", "CLAWKIT_API_KEY is not set",
+                "clawkit was not started",
+                "In PowerShell run: $env:CLAWKIT_API_KEY = '<your-deepseek-key>'");
         }
 
         // Protocol
         LLMConfig.Protocol protocolEnum;
         try {
-            protocolEnum = LLMConfig.Protocol.valueOf(protocol.toUpperCase());
+            protocolEnum = LLMConfig.Protocol.valueOf(effective.protocol().toUpperCase());
         } catch (IllegalArgumentException e) {
-            System.err.println("[C-004] Unknown protocol '" + protocol
-                + "'. Valid: OPENAI_COMPAT, ANTHROPIC");
-            System.exit(1);
-            return null;
+            throw new ConfigurationException("C-004", "Unsupported protocol: " + effective.protocol(),
+                "the provider was not created", "Use OPENAI_COMPAT for DeepSeek.");
         }
 
         // Provider
         LLMConfig config = LLMConfig.builder()
-            .apiKey(apiKey).baseUrl(baseUrl).model(model).protocol(protocolEnum).build();
+            .apiKey(apiKey).baseUrl(effective.baseUrl()).model(effective.model())
+            .protocol(protocolEnum)
+            .requestTimeout(Duration.ofSeconds(effective.requestTimeoutSeconds()))
+            .maxRetries(effective.maxRetries())
+            .build();
         LLMProvider provider = ProviderFactory.create(config);
 
         // Tool registry
@@ -75,7 +87,14 @@ public class ApplicationBootstrap {
                     if (sc.disabled()) continue;
                     System.out.print("  Enable MCP [" + sc.name() + "] ("
                         + sc.transport().name().toLowerCase() + ")? [Y/n] ");
-                    String answer = System.console().readLine().trim().toLowerCase();
+                    if (System.console() == null) {
+                        throw new ConfigurationException("C-007",
+                            "Interactive terminal required to approve MCP server '" + sc.name() + "'",
+                            "MCP servers were not started",
+                            "Run from a terminal or use docker run -it; otherwise disable the server.");
+                    }
+                    String line = System.console().readLine();
+                    String answer = line == null ? "n" : line.trim().toLowerCase();
                     if ("n".equals(answer) || "no".equals(answer)) {
                         servers.put(entry.getKey(),
                             new McpServerConfig(sc.name(), sc.command(), sc.args(),
@@ -92,32 +111,46 @@ public class ApplicationBootstrap {
         for (Tool t : mcpTools) registry.register(t);
 
         // Memory
-        ThinkingMode mode = thinking ? ThinkingMode.TWO_STAGE : ThinkingMode.OFF;
+        ThinkingMode mode = effective.thinking() ? ThinkingMode.TWO_STAGE : ThinkingMode.OFF;
         Path memoryDir = Path.of(System.getProperty("user.home"), ".clawkit", "memory");
         DiskMemoryService memoryService = new DiskMemoryService(memoryDir);
         String memoryIndex = memoryService.loadIndex();
 
-        // Engine
+        // Engine — PR-2: AgentRuntimeDependencies 构造
         String workspaceRules = ClawkitApp.loadWorkspaceRules(workDir);
-        AgentEngine engine = new AgentEngine(provider, registry, workDir.toString(),
-            mode, null, System.out::print, memoryIndex);
-        engine.setWorkspaceRules(workspaceRules);
 
-        // Skills
+        // Runtime integrations are created before the engine so production does not
+        // rely on post-construction setters.
         Path projectSkillsDir = workDir.resolve(".clawkit").resolve("skills");
         SkillLoader skillLoader = new SkillLoader(userSkillsDir, projectSkillsDir);
-        engine.setSkillLoader(skillLoader);
-        engine.rebuildSkillCatalog(skillLoader.buildCatalog());
-        engine.setDiskMemoryService(memoryService);
+        var skillRuntime = new com.clawkit.engine.impl.DefaultSkillRuntime(skillLoader);
+
+        // PR-9: 统一 recorder — FileRunRecorder 加入共享 CompositeRunRecorder
+        Path clawkitDir = Path.of(System.getProperty("user.home"), ".clawkit");
+        var sharedRecorder = new com.clawkit.observability.CompositeRunRecorder(
+            new com.clawkit.observability.FileRunRecorder(clawkitDir));
+        var gateway = new com.clawkit.engine.impl.ObservingProviderGateway(provider, sharedRecorder);
+        var memoryHooks = new com.clawkit.engine.impl.DefaultMemoryHooks(
+            memoryService, gateway, provider.getContextWindow(), provider.getEncoding());
+        var deps = new com.clawkit.engine.AgentRuntimeDependencies(
+            gateway, null, registry,
+            provider.getContextWindow(), provider.getEncoding(),
+            sharedRecorder, memoryHooks, skillRuntime);
+        AgentEngine engine = new AgentEngine(deps, workDir.toString(), mode, memoryIndex);
+        engine.setWorkspaceRules(workspaceRules);
+        // contextPipeline 已由构造器自建，无需手动 init
+
+        // Skills are owned by SkillRuntime; only its catalog is refreshed here.
+        engine.rebuildSkillCatalog();
 
         // Observability
-        Path clawkitDir = Path.of(System.getProperty("user.home"), ".clawkit");
-        engine.addRecorder(new FileRunRecorder(clawkitDir));
         RunReader runReader = new RunReader(clawkitDir);
 
-        // Sessions
-        SessionService sessionService = new SessionService(
-            clawkitDir.resolve("sessions"), provider);
+        // Sessions (PR-12: SessionStore 接口)
+        var sessionStore = new com.clawkit.engine.impl.FileSessionStore(
+            clawkitDir.resolve("sessions"));
+        SessionService sessionService = new SessionService(sessionStore);
+        sessionService.setProviderGateway(gateway);  // Session 摘要经 gateway
         engine.setSessionService(sessionService);
 
         return new ApplicationContext(
@@ -125,7 +158,7 @@ public class ApplicationBootstrap {
             mcpManager, memoryService, runReader,
             null, // reader — 由 ClawkitApp 创建（需要 Terminal 初始化）
             new java.util.ArrayList<>(), // imChannels
-            workDir, model, mode);
+            workDir, effective.model(), mode, effective);
     }
 
     // ── 静态工具方法 ─────────────────────────────────────────────────
@@ -146,29 +179,6 @@ public class ApplicationBootstrap {
         return registry;
     }
 
-    private static String readConfigValue(String envKey, String altEnvKey, String... configPath) {
-        String val = System.getenv(envKey);
-        if (val != null && !val.isBlank()) return val;
-        val = System.getenv(altEnvKey);
-        if (val != null && !val.isBlank()) return val;
-        Path configFile = Path.of(System.getProperty("user.home"), ".clawkit", "config.yaml");
-        if (java.nio.file.Files.exists(configFile)) {
-            try {
-                var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-                var yamlMapper = new com.fasterxml.jackson.dataformat.yaml.YAMLFactory();
-                var reader = mapper.readTree(
-                    java.nio.file.Files.readString(configFile));
-                for (String key : configPath) {
-                    if (reader.has(key)) {
-                        var node = reader.get(key);
-                        return node.isTextual() ? node.asText() : node.toString();
-                    }
-                }
-            } catch (Exception ignored) {}
-        }
-        return null;
-    }
-
     static Path resolveWorkDir(Path rootDir) {
         if (rootDir == null) {
             return Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
@@ -179,8 +189,8 @@ public class ApplicationBootstrap {
                 java.nio.file.Files.createDirectories(path);
             }
         } catch (java.io.IOException e) {
-            System.err.println("[C-001] Cannot create root directory: " + path);
-            System.exit(1);
+            throw new ConfigurationException("C-001", "Cannot create root directory: " + path,
+                "clawkit was not started", "Choose an existing writable directory with --root.");
         }
         return path;
     }

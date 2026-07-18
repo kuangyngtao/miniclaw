@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "example": {
+      "command": "npx",
+      "args": ["-y", "example-mcp-package"],
+      "env": {
+        "EXAMPLE_TOKEN": "${env:EXAMPLE_TOKEN}"
+      },
+      "disabled": true
+    }
+  }
+}

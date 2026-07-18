@@ -31,5 +31,6 @@ public record ApplicationContext(
     List<ImChannel> imChannels,
     Path workDir,
     String model,
-    ThinkingMode thinkingMode
+    ThinkingMode thinkingMode,
+    EffectiveConfig effectiveConfig
 ) {}

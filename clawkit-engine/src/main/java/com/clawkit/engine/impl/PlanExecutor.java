@@ -1,6 +1,9 @@
 package com.clawkit.engine.impl;
 
-import com.clawkit.provider.LLMProvider;
+import com.clawkit.engine.ProviderGateway;
+import com.clawkit.engine.RunPhase;
+import com.clawkit.engine.RunScope;
+import com.clawkit.provider.ModelRequest;
 import com.clawkit.tools.ApprovalGrantCache;
 import com.clawkit.tools.DefaultApprovalGrantCache;
 import com.clawkit.tools.PermissionMode;
@@ -29,31 +32,21 @@ public class PlanExecutor {
     private static final int MAX_RETRIES       = 2;
     private static final int MAX_SLOT_CHARS    = 8000;
 
-    private final LLMProvider provider;
+    private final ProviderGateway gateway;
     private final Registry registry;
     private final ToolCallExecutor toolCallExecutor;
-    private final ToolExecutionContext planExecContext;
 
-    public PlanExecutor(LLMProvider provider, Registry registry, String workDir) {
-        this(provider, registry, workDir, null);
-    }
-
-    public PlanExecutor(LLMProvider provider, Registry registry, String workDir,
+    public PlanExecutor(ProviderGateway gateway, Registry registry,
                          ToolCallExecutor toolCallExecutor) {
-        this.provider = provider;
+        this.gateway = gateway;
         this.registry = registry;
         this.toolCallExecutor = toolCallExecutor;
-        this.planExecContext = new ToolExecutionContext(
-            "plan-" + workDir, 0, com.clawkit.tools.PermissionMode.AUTO,
-            (com.clawkit.engine.ApprovalHandler) null,
-            (com.clawkit.observability.RunRecorder) null,
-            new InternalToolRouter(), new DefaultApprovalGrantCache());
     }
 
     /**
-     * 主入口：执行完整计划。所有 Task 的 status/result/errorMessage 被原地更新。
+     * 主入口：执行完整计划。执行上下文每次传入，不再缓存权限/approval/recorder/runId。
      */
-    public ExecutionPlan execute(ExecutionPlan plan) {
+    public ExecutionPlan execute(ExecutionPlan plan, PlanExecutionContext ctx) {
         plan.setStatus(PlanStatus.RUNNING);
         Map<String, String> slotValues = new ConcurrentHashMap<>();
         List<List<String>> levels = PlanParser.computeLevels(plan.getTasks());
@@ -69,7 +62,7 @@ public class PlanExecutor {
             log.info("[PlanExecutor] Level {}/{}: {} tasks",
                 levelIdx + 1, levels.size(), level.size());
 
-            boolean shouldCancel = executeLevel(level, plan.getTasks(), slotValues, cancelled);
+            boolean shouldCancel = executeLevel(level, plan.getTasks(), slotValues, cancelled, ctx);
 
             if (shouldCancel) {
                 skipRemainingTasks(plan, levelIdx + 1, levels);
@@ -80,12 +73,11 @@ public class PlanExecutor {
         // 确定计划最终状态
         boolean allCompleted = plan.getTasks().values().stream()
             .allMatch(t -> t.getStatus() == TaskStatus.COMPLETED);
-        boolean anyFailed = plan.getTasks().values().stream()
-            .anyMatch(t -> t.getStatus() == TaskStatus.FAILED);
-
         if (allCompleted) {
             plan.setStatus(PlanStatus.COMPLETED);
-        } else if (anyFailed) {
+        } else {
+            // A plan that contains failed, skipped or unfinished tasks did not
+            // achieve its goal and must never remain in RUNNING after execute returns.
             plan.setStatus(PlanStatus.FAILED);
         }
 
@@ -98,7 +90,8 @@ public class PlanExecutor {
      * @return true 表示需要取消剩余层级（有 REPLAN 请求）
      */
     private boolean executeLevel(List<String> taskIds, Map<String, Task> tasks,
-                                  Map<String, String> slotValues, AtomicBoolean cancelled) {
+                                  Map<String, String> slotValues, AtomicBoolean cancelled,
+                                  PlanExecutionContext ctx) {
         CountDownLatch latch = new CountDownLatch(taskIds.size());
         AtomicInteger replanCount = new AtomicInteger(0);
 
@@ -107,7 +100,7 @@ public class PlanExecutor {
                 try {
                     if (cancelled.get()) return;
                     Task task = tasks.get(taskId);
-                    boolean needReplan = executeSingleTask(task, slotValues);
+                    boolean needReplan = executeSingleTask(task, slotValues, ctx);
                     if (needReplan) {
                         replanCount.incrementAndGet();
                         cancelled.set(true);
@@ -133,7 +126,8 @@ public class PlanExecutor {
      * 执行单个任务（带重试和失败分析）。
      * @return true 表示请求 REPLAN
      */
-    private boolean executeSingleTask(Task task, Map<String, String> slotValues) {
+    private boolean executeSingleTask(Task task, Map<String, String> slotValues,
+                                       PlanExecutionContext ctx) {
         log.info("[PlanExecutor]   -> {}: {} [{}]", task.getId(), task.getDescription(), task.getTaskType());
         task.setStatus(TaskStatus.RUNNING);
         task.setStartTime(Instant.now());
@@ -142,7 +136,7 @@ public class PlanExecutor {
 
         for (int attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
             try {
-                String result = runSubAgentForTask(task, resolvedPrompt);
+                String result = runSubAgentForTask(task, resolvedPrompt, ctx);
                 task.setResult(result);
                 task.setStatus(TaskStatus.COMPLETED);
                 task.setEndTime(Instant.now());
@@ -162,7 +156,7 @@ public class PlanExecutor {
                     task.getId(), attempt, MAX_RETRIES + 1, e.getMessage());
 
                 if (attempt <= MAX_RETRIES) {
-                    AnalysisResult analysis = analyzeFailure(task, e.getMessage(), attempt);
+                    AnalysisResult analysis = analyzeFailure(task, e.getMessage(), attempt, ctx);
                     switch (analysis.action()) {
                         case "RETRY" -> {
                             if (analysis.feedback() != null && !analysis.feedback().isBlank()) {
@@ -199,7 +193,7 @@ public class PlanExecutor {
      * 为任务启动轻量 ReAct 子循环。
      * 比 spawnSubAgent 更轻——无 session/技能/记忆。
      */
-    private String runSubAgentForTask(Task task, String prompt) {
+    private String runSubAgentForTask(Task task, String prompt, PlanExecutionContext ctx) {
         List<Message> messages = new ArrayList<>();
         messages.add(Message.system(buildTaskSystemPrompt(task.getTaskType())));
         messages.add(Message.user(prompt));
@@ -212,23 +206,22 @@ public class PlanExecutor {
         };
 
         for (int turn = 0; turn < maxTurns; turn++) {
-            Message response = provider.generate(messages, tools);
+            var req = ModelRequest.of(messages, tools);
+            var scope = new RunScope(ctx.parentRunId() + "-worker", ctx.parentRunId(), turn, RunPhase.PLAN_WORKER, null);
+            var resp = gateway.generate(req, scope);
+            Message response = resp.hasToolCalls()
+                ? Message.assistantWithTools(resp.toolCalls())
+                : Message.assistant(resp.content() != null ? resp.content() : "");
             messages.add(response);
 
-            if (response.toolCalls() == null || response.toolCalls().isEmpty()) {
-                return response.content() != null ? response.content() : "(no output)";
+            if (!resp.hasToolCalls()) {
+                return resp.content() != null ? resp.content() : "(no output)";
             }
 
-            for (ToolCall call : response.toolCalls()) {
+            for (ToolCall call : resp.toolCalls()) {
                 log.debug("  [{}] tool: {}", task.getId(), call.name());
-                String output;
-                if (toolCallExecutor != null) {
-                    var batchResult = toolCallExecutor.executeBatch(List.of(call), planExecContext);
-                    output = batchResult.results().isEmpty() ? "" : batchResult.results().get(0).output();
-                } else {
-                    ToolResult result = registry.execute(call);
-                    output = result.output();
-                }
+                var batchResult = toolCallExecutor.executeBatch(List.of(call), ctx.workerContext());
+                String output = batchResult.results().isEmpty() ? "" : batchResult.results().get(0).output();
                 messages.add(Message.toolResult(call.id(), output));
             }
         }
@@ -242,7 +235,8 @@ public class PlanExecutor {
     /**
      * Reviewer：轻量 ReAct 循环，用工具诊断失败根因 → 输出决策 + 反馈。
      */
-    private AnalysisResult analyzeFailure(Task task, String errorMessage, int attempt) {
+    private AnalysisResult analyzeFailure(Task task, String errorMessage, int attempt,
+                                           PlanExecutionContext ctx) {
         List<Message> messages = new ArrayList<>();
         messages.add(Message.system("""
             You are a Code Review agent. A sub-task has failed. Your job is to diagnose
@@ -273,7 +267,12 @@ public class PlanExecutor {
         for (int turn = 0; turn < MAX_REVIEWER_TURNS; turn++) {
             Message response;
             try {
-                response = provider.generate(messages, tools);
+                var req = ModelRequest.of(messages, tools);
+                var scope = new RunScope(ctx.parentRunId() + "-reviewer", ctx.parentRunId(), turn, RunPhase.PLAN_REVIEWER, null);
+                var resp = gateway.generate(req, scope);
+                response = resp.hasToolCalls()
+                    ? Message.assistantWithTools(resp.toolCalls())
+                    : Message.assistant(resp.content() != null ? resp.content() : "");
             } catch (Exception e) {
                 log.warn("[PlanExecutor] Reviewer LLM 异常, 默认 RETRY: {}", e.getMessage());
                 return new AnalysisResult("RETRY", e.getMessage());
@@ -283,8 +282,9 @@ public class PlanExecutor {
             if (response.toolCalls() != null && !response.toolCalls().isEmpty()) {
                 for (ToolCall call : response.toolCalls()) {
                     log.debug("  [Reviewer] tool: {}", call.name());
-                    ToolResult result = registry.execute(call);
-                    messages.add(Message.toolResult(call.id(), result.output()));
+                    var batchResult = toolCallExecutor.executeBatch(List.of(call), ctx.reviewerContext());
+                    String output = batchResult.results().isEmpty() ? "" : batchResult.results().get(0).output();
+                    messages.add(Message.toolResult(call.id(), output));
                 }
                 continue;
             }

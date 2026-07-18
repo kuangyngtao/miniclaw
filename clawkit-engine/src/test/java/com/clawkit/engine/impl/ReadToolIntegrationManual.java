@@ -16,29 +16,17 @@ import java.nio.file.Path;
  * ReadTool 端到端集成测试。
  * 创建真实文件 → 挂载 ReadTool → 启动引擎 → LLM 读取文件内容并回答。
  *
- * 运行: mvn test -pl clawkit-engine -Dtest=ReadToolIntegrationTest -DapiKey=xxx
+ * 运行前设置 CLAWKIT_API_KEY，然后执行本手工入口。
  */
 public class ReadToolIntegrationManual {
 
     private static final ObjectMapper mapper = new ObjectMapper();
 
     public static void main(String[] args) throws IOException {
-        // 0. 获取 API Key（按优先级尝试多个来源）
-        String apiKey = System.getenv("CLAWKIT-DS-API");
+        // 0. 获取 API Key（只允许环境变量）
+        String apiKey = System.getenv("CLAWKIT_API_KEY");
         if (apiKey == null || apiKey.isBlank()) {
-            apiKey = System.getenv("CLAWKIT_API_KEY");
-        }
-        if (apiKey == null || apiKey.isBlank()) {
-            apiKey = System.getenv("ANTHROPIC_AUTH_TOKEN");
-        }
-        if (apiKey == null || apiKey.isBlank()) {
-            apiKey = System.getenv("DEEPSEEK_API_KEY");
-        }
-        if (apiKey == null || apiKey.isBlank()) {
-            apiKey = System.getProperty("apiKey");
-        }
-        if (apiKey == null || apiKey.isBlank()) {
-            System.err.println("请设置 CLAWKIT-DS-API 环境变量或 -DapiKey=xxx");
+            System.err.println("请设置 CLAWKIT_API_KEY 环境变量");
             System.exit(1);
         }
 

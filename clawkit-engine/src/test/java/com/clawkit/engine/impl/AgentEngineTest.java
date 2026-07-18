@@ -3,10 +3,12 @@ package com.clawkit.engine.impl;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.clawkit.engine.SessionService;
+import com.clawkit.engine.AgentRuntimeDependencies;
 import com.clawkit.engine.ThinkingMode;
 import com.clawkit.provider.LLMException;
 import com.clawkit.provider.LLMProvider;
 import com.clawkit.tools.Registry;
+import com.clawkit.tools.Result;
 import com.clawkit.tools.Tool;
 import com.clawkit.tools.schema.Message;
 import com.clawkit.tools.schema.ToolCall;
@@ -16,6 +18,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+import java.util.ArrayList;
+import com.clawkit.observability.ProviderCallCompletedPayload;
+import com.clawkit.observability.ProviderCallStartedPayload;
+import com.clawkit.observability.RunCompletedPayload;
+import com.clawkit.observability.RunEventPayload;
 import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -76,9 +83,19 @@ class AgentEngineTest {
 
     // === Mock Registry ===
     static class MockRegistry implements Registry {
+        private static final Tool bashTool = new Tool() {
+            @Override public String name() { return "bash"; }
+            @Override public String description() { return "execute shell"; }
+            @Override public String inputSchema() { return "{}"; }
+            @Override public boolean isReadOnly() { return true; }  // ro to skip approval in tests
+            @Override public Result<String> execute(String arguments) {
+                return new Result.Ok<>("-rw-r--r--  1 user group  234 Oct 24 10:00 main.go\n");
+            }
+        };
+
         @Override
         public List<ToolDefinition> getAvailableTools() {
-            return List.of(new ToolDefinition("bash", "execute shell", null));
+            return List.of(bashTool.toDefinition());
         }
 
         @Override
@@ -92,12 +109,13 @@ class AgentEngineTest {
 
         @Override
         public Optional<Tool> lookup(String name) {
+            if ("bash".equals(name)) return Optional.of(bashTool);
             return Optional.empty();
         }
 
         @Override
         public boolean isReadOnly(String toolName) {
-            return false; // bash is a write tool
+            return "bash".equals(toolName);  // bash is readonly in mock
         }
     }
 
@@ -217,6 +235,7 @@ class AgentEngineTest {
     // 两轮对话：第一轮返回文件列表 → 第二轮引用第一轮结果
     static class MultiTurnProvider implements LLMProvider {
         int turn = 0;
+        List<Message> thirdCallMessages = List.of();
 
         @Override
         public Message generate(List<Message> messages, List<ToolDefinition> availableTools) {
@@ -231,6 +250,7 @@ class AgentEngineTest {
             }
             // 第二轮 run()：turn 3
             if (turn == 3) {
+                thirdCallMessages = List.copyOf(messages);
                 return Message.assistant(
                     "previously we found main.go — let me check it");
             }
@@ -251,6 +271,10 @@ class AgentEngineTest {
         // 第二轮调用：provider 应该能感知到这是第3次 generate
         String result2 = engine.run("check the first file");
         assertThat(result2).contains("previously");
+        assertThat(provider.thirdCallMessages)
+            .anyMatch(m -> m.role() == com.clawkit.tools.schema.Role.ASSISTANT)
+            .anyMatch(m -> m.role() == com.clawkit.tools.schema.Role.TOOL)
+            .anyMatch(m -> "check the first file".equals(m.content()));
     }
 
     @Test
@@ -345,6 +369,7 @@ class AgentEngineTest {
             AgentEngine engine = new AgentEngine(mockProvider, mockRegistry, "/tmp/work",
                 ThinkingMode.OFF);
             engine.setSessionService(sessionService);
+            engine.setApprovalHandler(req -> new com.clawkit.engine.ApprovalResult.Approve());
 
             engine.run("list files");
             engine.clearSession();
@@ -352,11 +377,71 @@ class AgentEngineTest {
             // 验证会话已保存
             assertThat(sessionService.list()).hasSize(1);
             assertThat(sessionService.list().get(0).name()).startsWith("[auto]");
+            assertThat(sessionService.list().get(0).messageCount()).isEqualTo(4);
         } finally {
             // cleanup temp dir
             Files.list(tempDir).forEach(p -> p.toFile().delete());
             Files.deleteIfExists(tempDir);
         }
+    }
+
+    @Test
+    void shouldEmitProviderAndRunTerminalEventsExactlyOnce() {
+        List<RunEventPayload> events = new ArrayList<>();
+        com.clawkit.observability.RunRecorder recorder =
+            (payload, runId, parentRunId, turn, time) -> events.add(payload);
+        LLMProvider provider = new LLMProvider() {
+            @Override public Message generate(List<Message> messages,
+                                              List<ToolDefinition> tools) {
+                return Message.assistant("done");
+            }
+        };
+        var gateway = new ObservingProviderGateway(provider, recorder);
+        var deps = new AgentRuntimeDependencies(gateway, null, new MockRegistry(),
+            128_000, "cl100k_base", recorder, null, null);
+        AgentEngine engine = new AgentEngine(deps, "/tmp/work", ThinkingMode.OFF, "");
+
+        assertThat(engine.run("hello")).isEqualTo("done");
+
+        assertThat(events.stream().filter(ProviderCallStartedPayload.class::isInstance)).hasSize(1);
+        assertThat(events.stream().filter(ProviderCallCompletedPayload.class::isInstance)).hasSize(1);
+        assertThat(events.stream().filter(RunCompletedPayload.class::isInstance)).hasSize(1);
+    }
+
+    @Test
+    void shouldPublishToolVisualizationCallbacks() {
+        AgentEngine engine = new AgentEngine(new MockProvider(), new MockRegistry(), "/tmp/work");
+        List<String> started = new ArrayList<>();
+        List<String> ended = new ArrayList<>();
+        engine.onToolStart(event -> started.add(event.name()));
+        engine.onToolEnd(event -> ended.add(event.name()));
+
+        engine.run("list files");
+
+        assertThat(started).containsExactly("bash");
+        assertThat(ended).containsExactly("bash");
+    }
+
+    @Test
+    void shouldDelegatePlanRunAndPersistPlanBeforeConfirmation() throws Exception {
+        Path workDir = Files.createTempDirectory("clawkit-plan-run");
+        LLMProvider planner = new LLMProvider() {
+            @Override public Message generate(List<Message> messages,
+                                              List<ToolDefinition> tools) {
+                return Message.assistant("""
+                    {"goal":"inspect project","tasks":{"task-1":{
+                      "id":"task-1","description":"inspect files","type":"EXPLORE",
+                      "dependencies":[]}}}
+                    """);
+            }
+        };
+        AgentEngine engine = new AgentEngine(planner, new MockRegistry(), workDir.toString());
+        engine.setExecutionMode(com.clawkit.engine.ExecutionMode.PLAN_EXECUTE);
+        engine.setOnPlanReady(plan -> false);
+
+        assertThat(engine.run("inspect project")).contains("计划已取消");
+        assertThat(Files.readString(workDir.resolve(".clawkit/plan.md")))
+            .contains("# Plan: inspect project", "task-1");
     }
 
     @Test
@@ -388,6 +473,7 @@ class AgentEngineTest {
             AgentEngine engine = new AgentEngine(mockProvider, mockRegistry, "/tmp/work",
                 ThinkingMode.OFF);
             engine.setSessionService(sessionService);
+            engine.setApprovalHandler(req -> new com.clawkit.engine.ApprovalResult.Approve());
 
             engine.run("list files");
             engine.clearSession();

@@ -1,6 +1,8 @@
 package com.clawkit.engine.impl;
 
 import com.clawkit.engine.SessionMeta;
+import com.clawkit.engine.SessionError;
+import com.clawkit.engine.SessionStoreException;
 import com.clawkit.tools.schema.Message;
 import java.nio.file.Path;
 import java.util.List;
@@ -36,7 +38,7 @@ class FileSessionStoreTest {
         assertThat(meta.name()).isEqualTo("refactor");
         assertThat(meta.messageCount()).isEqualTo(3);
 
-        List<Message> loaded = store.load("a1b2c3d4");
+        List<Message> loaded = store.loadMessages("a1b2c3d4");
         assertThat(loaded).hasSize(3);
         assertThat(loaded.get(0).role()).isEqualTo(com.clawkit.tools.schema.Role.SYSTEM);
         assertThat(loaded.get(1).role()).isEqualTo(com.clawkit.tools.schema.Role.USER);
@@ -60,9 +62,9 @@ class FileSessionStoreTest {
 
         store.delete("id1");
         assertThat(store.listSessions()).isEmpty();
-        assertThatThrownBy(() -> store.load("id1"))
-            .isInstanceOf(IllegalArgumentException.class)
-            .hasMessageContaining("not found");
+        assertThatThrownBy(() -> store.loadMessages("id1"))
+            .isInstanceOfSatisfying(SessionStoreException.class,
+                e -> assertThat(e.error()).isEqualTo(SessionError.NOT_FOUND));
     }
 
     @Test
@@ -81,9 +83,31 @@ class FileSessionStoreTest {
 
     @Test
     void shouldRejectLoadOfMissingSession() {
-        assertThatThrownBy(() -> store.load("nonexistent"))
-            .isInstanceOf(IllegalArgumentException.class)
-            .hasMessageContaining("not found");
+        assertThatThrownBy(() -> store.loadMessages("nonexistent"))
+            .isInstanceOfSatisfying(SessionStoreException.class,
+                e -> assertThat(e.error()).isEqualTo(SessionError.NOT_FOUND));
+    }
+
+    @Test
+    void shouldReportCorruptedJson() throws Exception {
+        java.nio.file.Files.writeString(tempDir.resolve("broken.json"), "{not-json");
+
+        assertThatThrownBy(() -> store.load("broken"))
+            .isInstanceOfSatisfying(SessionStoreException.class, e -> {
+                assertThat(e.error()).isEqualTo(SessionError.CORRUPTED_JSON);
+                assertThat(e.sessionId()).isEqualTo("broken");
+            });
+    }
+
+    @Test
+    void shouldReportUnsupportedVersion() throws Exception {
+        java.nio.file.Files.writeString(tempDir.resolve("future.json"), """
+            {"schemaVersion":999,"meta":null,"messages":[],"metadata":{}}
+            """);
+
+        assertThatThrownBy(() -> store.load("future"))
+            .isInstanceOfSatisfying(SessionStoreException.class,
+                e -> assertThat(e.error()).isEqualTo(SessionError.UNSUPPORTED_VERSION));
     }
 
     @Test

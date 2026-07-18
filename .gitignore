@@ -37,9 +37,13 @@ secrets/
 
 # miniclaw runtime
 .miniclaw/
+.clawkit/
 
 # Dev notes
 INTERVIEW.md
+
+# ArchUnit freeze store
+archunit_store/
 
 # Logs
 logs/

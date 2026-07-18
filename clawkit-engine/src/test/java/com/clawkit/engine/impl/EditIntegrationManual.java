@@ -50,19 +50,7 @@ public class EditIntegrationManual {
 
     public static void main(String[] args) throws IOException {
         // 0. API Key
-        String apiKey = System.getenv("CLAWKIT-DS-API");
-        if (apiKey == null || apiKey.isBlank()) {
-            apiKey = System.getenv("CLAWKIT_API_KEY");
-        }
-        if (apiKey == null || apiKey.isBlank()) {
-            apiKey = System.getenv("ANTHROPIC_AUTH_TOKEN");
-        }
-        if (apiKey == null || apiKey.isBlank()) {
-            apiKey = System.getenv("DEEPSEEK_API_KEY");
-        }
-        if (apiKey == null || apiKey.isBlank()) {
-            apiKey = System.getProperty("apiKey");
-        }
+        String apiKey = System.getenv("CLAWKIT_API_KEY");
         if (apiKey == null || apiKey.isBlank()) {
             System.err.println("请设置 API Key 环境变量");
             System.exit(1);

@@ -82,8 +82,8 @@ class PlanExecutorTest {
             }
         };
 
-        executor = new PlanExecutor(provider, registry, "/tmp");
-        ExecutionPlan result = executor.execute(plan);
+        executor = new PlanExecutor(new com.clawkit.engine.impl.ObservingProviderGateway(provider, new com.clawkit.observability.CompositeRunRecorder()), registry, new ToolCallExecutor(registry));
+        ExecutionPlan result = executor.execute(plan, new com.clawkit.engine.impl.PlanExecutionContext(com.clawkit.tools.PermissionMode.AUTO, null, null, "test-plan"));
 
         // All tasks should complete
         assertThat(result.getStatus()).isEqualTo(PlanStatus.COMPLETED);
@@ -128,8 +128,8 @@ class PlanExecutorTest {
             }
         };
 
-        executor = new PlanExecutor(provider, registry, "/tmp");
-        ExecutionPlan result = executor.execute(plan);
+        executor = new PlanExecutor(new com.clawkit.engine.impl.ObservingProviderGateway(provider, new com.clawkit.observability.CompositeRunRecorder()), registry, new ToolCallExecutor(registry));
+        ExecutionPlan result = executor.execute(plan, new com.clawkit.engine.impl.PlanExecutionContext(com.clawkit.tools.PermissionMode.AUTO, null, null, "test-plan"));
 
         assertThat(result.getStatus()).isEqualTo(PlanStatus.COMPLETED);
         // Task-2 should see resolved slot value, not the placeholder
@@ -160,8 +160,8 @@ class PlanExecutorTest {
             }
         };
 
-        executor = new PlanExecutor(provider, registry, "/tmp");
-        executor.execute(plan);
+        executor = new PlanExecutor(new com.clawkit.engine.impl.ObservingProviderGateway(provider, new com.clawkit.observability.CompositeRunRecorder()), registry, new ToolCallExecutor(registry));
+        executor.execute(plan, new com.clawkit.engine.impl.PlanExecutionContext(com.clawkit.tools.PermissionMode.AUTO, null, null, "test-plan"));
 
         // EXPLORE tasks should only see read tools
         assertThat(availableToolNames).contains("glob", "grep", "read", "web_fetch");
@@ -186,8 +186,8 @@ class PlanExecutorTest {
             }
         };
 
-        executor = new PlanExecutor(provider, registry, "/tmp");
-        executor.execute(plan);
+        executor = new PlanExecutor(new com.clawkit.engine.impl.ObservingProviderGateway(provider, new com.clawkit.observability.CompositeRunRecorder()), registry, new ToolCallExecutor(registry));
+        executor.execute(plan, new com.clawkit.engine.impl.PlanExecutionContext(com.clawkit.tools.PermissionMode.AUTO, null, null, "test-plan"));
 
         assertThat(availableToolNames.get(0)).contains("bash");
         assertThat(availableToolNames.get(0)).doesNotContain("write", "edit", "glob", "grep");
@@ -221,8 +221,8 @@ class PlanExecutorTest {
             }
         };
 
-        executor = new PlanExecutor(provider, registry, "/tmp");
-        ExecutionPlan result = executor.execute(plan);
+        executor = new PlanExecutor(new com.clawkit.engine.impl.ObservingProviderGateway(provider, new com.clawkit.observability.CompositeRunRecorder()), registry, new ToolCallExecutor(registry));
+        ExecutionPlan result = executor.execute(plan, new com.clawkit.engine.impl.PlanExecutionContext(com.clawkit.tools.PermissionMode.AUTO, null, null, "test-plan"));
 
         assertThat(result.getTask("task-1").getStatus()).isEqualTo(TaskStatus.COMPLETED);
         assertThat(result.getTask("task-1").getResult()).isEqualTo("success on retry");
@@ -248,8 +248,8 @@ class PlanExecutorTest {
             }
         };
 
-        executor = new PlanExecutor(provider, registry, "/tmp");
-        ExecutionPlan result = executor.execute(plan);
+        executor = new PlanExecutor(new com.clawkit.engine.impl.ObservingProviderGateway(provider, new com.clawkit.observability.CompositeRunRecorder()), registry, new ToolCallExecutor(registry));
+        ExecutionPlan result = executor.execute(plan, new com.clawkit.engine.impl.PlanExecutionContext(com.clawkit.tools.PermissionMode.AUTO, null, null, "test-plan"));
 
         assertThat(result.getStatus()).isEqualTo(PlanStatus.FAILED);
         assertThat(result.getTask("task-1").getStatus()).isEqualTo(TaskStatus.FAILED);
@@ -278,9 +278,10 @@ class PlanExecutorTest {
             }
         };
 
-        executor = new PlanExecutor(provider, registry, "/tmp");
-        ExecutionPlan result = executor.execute(plan);
+        executor = new PlanExecutor(new com.clawkit.engine.impl.ObservingProviderGateway(provider, new com.clawkit.observability.CompositeRunRecorder()), registry, new ToolCallExecutor(registry));
+        ExecutionPlan result = executor.execute(plan, new com.clawkit.engine.impl.PlanExecutionContext(com.clawkit.tools.PermissionMode.AUTO, null, null, "test-plan"));
 
+        assertThat(result.getStatus()).isEqualTo(PlanStatus.FAILED);
         assertThat(result.getTask("task-1").getStatus()).isEqualTo(TaskStatus.SKIPPED);
         // Downstream task should also be skipped
         assertThat(result.getTask("task-2").getStatus()).isEqualTo(TaskStatus.SKIPPED);

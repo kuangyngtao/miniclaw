@@ -3,6 +3,7 @@ package com.clawkit.provider.impl.openai;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.clawkit.provider.LLMConfig;
 import com.clawkit.provider.LLMException;
+import com.clawkit.provider.ProviderError;
 import com.clawkit.tools.schema.Message;
 import com.clawkit.tools.schema.ToolCall;
 import com.clawkit.tools.schema.ToolDefinition;
@@ -12,6 +13,7 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -71,7 +73,7 @@ class OpenAIProviderTest {
             .model("deepseek-chat")
             .requestTimeout(java.time.Duration.ofSeconds(5))
             .build();
-        provider = new OpenAIProvider(config);
+        provider = new OpenAIProvider(config, millis -> { }, System::currentTimeMillis);
     }
 
     // === Test 1: 纯文本回复 ===
@@ -128,6 +130,28 @@ class OpenAIProviderTest {
         assertThat(body).contains("\"type\":\"function\"");
     }
 
+    @Test
+    void shouldPreserveMapBasedToolSchema() throws Exception {
+        responseQueue.add(new StubResponse(200,
+            "{\"id\":\"x\",\"model\":\"x\",\"choices\":["
+            + "{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},"
+            + "\"finish_reason\":\"stop\"}]}"));
+
+        ToolDefinition toolDef = new ToolDefinition("read_file", "Read a file",
+            Map.of(
+                "type", "object",
+                "properties", Map.of("path", Map.of("type", "string")),
+                "required", List.of("path")));
+        provider.generate(List.of(Message.user("read")), List.of(toolDef));
+
+        var parameters = mapper.readTree(capturedBodies.get(0))
+            .path("tools").path(0).path("function").path("parameters");
+        assertThat(parameters.path("type").asText()).isEqualTo("object");
+        assertThat(parameters.path("properties").path("path").path("type").asText())
+            .isEqualTo("string");
+        assertThat(parameters.path("required").path(0).asText()).isEqualTo("path");
+    }
+
     // === Test 4: 请求体包含消息历史 ===
     @Test
     void shouldSerializeMessagesCorrectly() {
@@ -174,7 +198,9 @@ class OpenAIProviderTest {
         assertThatThrownBy(() ->
             provider.generate(List.of(Message.user("x")), List.of()))
             .isInstanceOf(LLMException.class)
-            .hasMessageContaining("HTTP 401");
+            .hasMessageContaining("HTTP 401")
+            .satisfies(e -> assertThat(((LLMException) e).providerError())
+                .isInstanceOf(ProviderError.Authentication.class));
     }
 
     // === Test 7: 429 重试后成功 ===

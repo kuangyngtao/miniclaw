@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# miniclaw launcher — auto-build on first run, then reuse JAR
+# Backward-compatible launcher. The product is now named clawkit.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-JAR="$SCRIPT_DIR/miniclaw-cli/target/miniclaw-cli-0.1.0-SNAPSHOT.jar"
+JAR="$SCRIPT_DIR/clawkit-cli/target/clawkit-cli-0.1.0-SNAPSHOT.jar"
 
 if [ ! -f "$JAR" ]; then
-    echo "[miniclaw] building..."
+    echo "[deprecated] miniclaw is now clawkit; building clawkit..."
     cd "$SCRIPT_DIR"
-    mvn install -pl miniclaw-cli -am -q -DskipTests
+    mvn package -pl clawkit-cli -am -q -DskipTests
 fi
 
 exec java -Dfile.encoding=UTF-8 -jar "$JAR" "$@"

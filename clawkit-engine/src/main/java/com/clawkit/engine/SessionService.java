@@ -2,7 +2,6 @@ package com.clawkit.engine;
 
 import com.clawkit.engine.impl.FileSessionStore;
 import com.clawkit.memory.impl.KeywordScorer;
-import com.clawkit.provider.LLMException;
 import com.clawkit.provider.LLMProvider;
 import com.clawkit.tools.schema.Message;
 import java.nio.file.Path;
@@ -15,8 +14,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Facade for session persistence operations.
- * Wraps FileSessionStore and optionally uses LLMProvider for session summarization.
+ * Session persistence facade. PR-12: 依赖 SessionStore 接口。
  */
 public class SessionService {
 
@@ -30,30 +28,59 @@ public class SessionService {
 
     private static final List<com.clawkit.tools.schema.ToolDefinition> EMPTY_TOOLS = List.of();
 
-    private final FileSessionStore store;
-    private final LLMProvider provider;
+    private final SessionStore store;
+    private ProviderGateway gateway;
 
+    /** PR-12: 新构造器（依赖接口） */
+    public SessionService(SessionStore store) {
+        this.store = store;
+    }
+
+    /** @deprecated 使用 SessionService(SessionStore) */
+    @Deprecated
     public SessionService(Path sessionsDir, LLMProvider provider) {
         this.store = new FileSessionStore(sessionsDir);
-        this.provider = provider;
+    }
+
+    public void setProviderGateway(ProviderGateway gateway) {
+        this.gateway = gateway;
     }
 
     public SessionMeta save(String name, List<Message> messages) {
-        String id = FileSessionStore.generateSessionId();
+        String id = java.util.UUID.randomUUID().toString().substring(0, 8);
         String summary = generateSummary(messages);
-        return store.save(id, name, messages, summary);
+        Instant now = Instant.now();
+        var doc = new SessionDocument(SessionStore.SCHEMA_VERSION, id, name, now, now,
+            messages, java.util.Map.of("summary", summary != null ? summary : ""));
+        store.save(doc);
+        return new SessionMeta(id, name, now, now, messages.size(),
+            extractFirstMessage(messages), summary);
     }
 
     public List<Message> load(String id) {
-        return store.load(id);
+        return store.load(id)
+            .map(SessionDocument::messages)
+            .orElseThrow(() -> new SessionStoreException(SessionError.NOT_FOUND, id,
+                "[H-003] Session not found: " + id));
     }
 
     public List<SessionMeta> list() {
-        return store.listSessions();
+        return store.list();
     }
 
     public void delete(String id) {
         store.delete(id);
+    }
+
+    private static String extractFirstMessage(List<Message> messages) {
+        for (Message m : messages) {
+            if (m.role() == com.clawkit.tools.schema.Role.USER
+                && m.content() != null && !m.content().isBlank()) {
+                String c = m.content().strip();
+                return c.length() > 120 ? c.substring(0, 120) + "..." : c;
+            }
+        }
+        return "";
     }
 
     // ── stats & prune ──
@@ -66,7 +93,7 @@ public class SessionService {
         int[] counts = {0, 0, 0, 0};
         String[] labels = {"< 7 days", "7 - 30 days", "30 - 90 days", "> 90 days"};
 
-        for (SessionMeta m : store.listSessions()) {
+        for (SessionMeta m : store.list()) {
             long days = ChronoUnit.DAYS.between(m.updatedAt(), now);
             long size = store.fileSize(m.id());
             if (days < 7) {
@@ -91,7 +118,7 @@ public class SessionService {
 
     public int prune(int olderThanDays) {
         Instant cutoff = Instant.now().minus(olderThanDays, ChronoUnit.DAYS);
-        List<SessionMeta> all = store.listSessions();
+        List<SessionMeta> all = store.list();
         int count = 0;
         for (SessionMeta m : all) {
             if (m.updatedAt().isBefore(cutoff)) {
@@ -104,7 +131,7 @@ public class SessionService {
     }
 
     public List<SessionMeta> search(String query) {
-        List<SessionMeta> all = store.listSessions();
+        List<SessionMeta> all = store.list();
         if (all.isEmpty()) return List.of();
 
         // Build corpus from session search texts for IDF computation
@@ -133,15 +160,25 @@ public class SessionService {
     }
 
     private String generateSummary(List<Message> messages) {
-        if (provider == null) return fallbackSummary(messages);
         try {
-            Message result = provider.generate(
-                List.of(Message.system(SUMMARY_PROMPT),
-                    Message.user("请为以下对话生成摘要：\n" + formatMessagesForSummary(messages))),
-                EMPTY_TOOLS);
+            Message result;
+            if (gateway != null) {
+                var req = com.clawkit.provider.ModelRequest.of(
+                    List.of(Message.system(SUMMARY_PROMPT),
+                        Message.user("请为以下对话生成摘要：\n" + formatMessagesForSummary(messages))),
+                    EMPTY_TOOLS);
+                var resp = gateway.generate(req,
+                    new com.clawkit.engine.RunScope("session-summary", null, 0,
+                        com.clawkit.engine.RunPhase.MEMORY_EXTRACT, null));
+                result = resp.hasToolCalls()
+                    ? Message.assistantWithTools(resp.toolCalls())
+                    : Message.assistant(resp.content() != null ? resp.content() : "");
+            } else {
+                return fallbackSummary(messages);
+            }
             String summary = result.content() != null ? result.content().trim() : "";
             if (!summary.isEmpty()) return summary;
-        } catch (LLMException e) {
+        } catch (Exception e) {
             log.warn("LLM summary failed, using fallback: {}", e.getMessage());
         }
         return fallbackSummary(messages);

@@ -2,6 +2,8 @@ package com.clawkit.engine.impl;
 
 import com.clawkit.engine.SessionMeta;
 import com.clawkit.engine.SessionService;
+import com.clawkit.engine.SessionStoreException;
+import com.clawkit.engine.SessionError;
 import com.clawkit.tools.schema.Message;
 import java.nio.file.Path;
 import java.util.List;
@@ -93,10 +95,10 @@ class SessionServiceTest {
     }
 
     @Test
-    void shouldNotThrowOnDeleteMissingSession() {
-        // SessionService delegates to store, which throws on missing
+    void shouldReturnStructuredErrorOnDeleteMissingSession() {
         assertThatCode(() -> service.delete("nonexistent"))
-            .isInstanceOf(IllegalArgumentException.class);
+            .isInstanceOfSatisfying(SessionStoreException.class,
+                e -> assertThat(e.error()).isEqualTo(SessionError.NOT_FOUND));
     }
 
     @Test
