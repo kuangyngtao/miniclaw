@@ -359,7 +359,7 @@ Case 递进：
 
 - OPS-0A/0B 本地稳定。
 - Fixture 可幂等重建和清理。
-- D0 的 Docker 和 Release Candidate 可用。
+- D0 的 Docker 和首个 Release 可用。
 
 远端只运行 Fixture、轻量数据库和故障执行器；Clawkit、模型、Incident、Evaluator 和报告留在本地。
 
@@ -453,7 +453,7 @@ terminate_fixture_session(case_id)
 
 | 里程碑 | 必须展示的产物 |
 | --- | --- |
-| D0 | CI 运行、Docker smoke、Release JAR 与 SHA-256 |
+| D0 | CI 运行、Docker smoke、Release JAR、Windows ZIP 与 SHA-256 |
 | OPS-0A | App Down 一键实验、Evidence Bundle、诊断和确定性得分 |
 | OPS-0B | PostgreSQL 锁等待 Flight Recorder、对抗变体和盲测数据 |
 | OPS-1 | 远程只读 Incident、SSH 安全审计和重建脚本 |
@@ -469,4 +469,3 @@ terminate_fixture_session(case_id)
 - 自动修改业务代码、自动提 PR 和自动发布。
 - 同时集成 ChaosBlade、Chaos Toolkit、Gatus 和 Ansible Runner。
 - 未通过独立验证和 Benchmark 的生产自动修复。
-

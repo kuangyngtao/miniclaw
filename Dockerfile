@@ -9,6 +9,7 @@ COPY clawkit-observability/pom.xml clawkit-observability/pom.xml
 COPY clawkit-engine/pom.xml clawkit-engine/pom.xml
 COPY clawkit-im/pom.xml clawkit-im/pom.xml
 COPY clawkit-cli/pom.xml clawkit-cli/pom.xml
+COPY clawkit-evaluation/pom.xml clawkit-evaluation/pom.xml
 RUN mvn -B -ntp -pl clawkit-cli -am dependency:go-offline
 COPY clawkit-tools clawkit-tools
 COPY clawkit-provider clawkit-provider
@@ -23,10 +24,8 @@ RUN find clawkit-cli/target -maxdepth 1 -name 'clawkit-cli-*.jar' ! -name 'origi
     -exec cp '{}' /tmp/clawkit.jar \;
 
 FROM maven:3.9.9-eclipse-temurin-21
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 10001 clawkit
+RUN useradd --create-home --uid 10001 clawkit \
+    && mkdir -p /home/clawkit/.clawkit
 WORKDIR /workspace
 COPY --from=build /tmp/clawkit.jar /opt/clawkit/clawkit.jar
 RUN chown -R clawkit:clawkit /opt/clawkit /workspace /home/clawkit

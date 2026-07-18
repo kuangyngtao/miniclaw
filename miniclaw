@@ -3,12 +3,15 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-JAR="$SCRIPT_DIR/clawkit-cli/target/clawkit-cli-0.1.0-SNAPSHOT.jar"
+JAR="$(find "$SCRIPT_DIR/clawkit-cli/target" -maxdepth 1 -type f \
+    -name 'clawkit-cli-*.jar' ! -name 'original-*' -print -quit 2>/dev/null || true)"
 
-if [ ! -f "$JAR" ]; then
+if [ -z "$JAR" ]; then
     echo "[deprecated] miniclaw is now clawkit; building clawkit..."
     cd "$SCRIPT_DIR"
     mvn package -pl clawkit-cli -am -q -DskipTests
+    JAR="$(find "$SCRIPT_DIR/clawkit-cli/target" -maxdepth 1 -type f \
+        -name 'clawkit-cli-*.jar' ! -name 'original-*' -print -quit)"
 fi
 
 exec java -Dfile.encoding=UTF-8 -jar "$JAR" "$@"

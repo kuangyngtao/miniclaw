@@ -1,8 +1,8 @@
 # P0-R 底层结构重构收尾实施方案与评审
 
-> 版本：v1.0  
-> 日期：2026-07-13  
-> 用途：交给 Claude + DeepSeek 按 PR 顺序实施  
+> 版本：v1.0
+> 日期：2026-07-13
+> 用途：交给 Claude + DeepSeek 按 PR 顺序实施
 > 依据：`CLAUDE.md`、`DESIGN.md`、`TODO.md`、当前工作区代码与 `docs/p0-r-implementation-plan-review.md`
 
 ## 1. 结论与范围

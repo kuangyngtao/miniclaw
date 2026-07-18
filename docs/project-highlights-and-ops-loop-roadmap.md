@@ -104,25 +104,27 @@ Metadata
 
 | 项目 | 状态 | 当前证据 | 剩余门禁 |
 | --- | --- | --- | --- |
-| Windows Java 21 CI | 部分完成 | push/PR `clean verify`、whitespace、构建差异和 Docker smoke workflow 已实现；本地验证通过 | 真实 GitHub Actions 首次成功 |
-| Docker 分发 | 部分完成 | 多阶段 Dockerfile、`.dockerignore`、非 root 用户和挂载约定已实现 | 基础镜像可用后完成 build 与 `docker run -it` smoke |
+| Windows Java 21 CI | 部分完成 | 首次 GitHub 运行已暴露 whitespace 与 Dockerfile 问题；修复后本地全量验证通过 | 推送收口提交并取得 CI 成功记录 |
+| Docker 分发 | 部分完成 | 镜像构建、帮助/版本、只读工作区、可写 `.clawkit`、非 root 和无 TTY `C-007` 已通过 | Windows Terminal 手工执行一次 `docker run --rm -it` |
 | 示例与演示 | 完成 | 非敏感配置、disabled MCP 和独立 Java/Maven demo | 无 |
 | 配置体验 | 完成 | CLI > env > 用户 YAML > 默认值；脱敏 `/config` | 无 |
 | DeepSeek 接入 | 完成 | 官方 endpoint；真实文本和工具调用成功 | 真实调用不进入普通 CI |
 | 凭据安全 | 完成 | 产品仅读取 `CLAWKIT_API_KEY`；配置拒绝 credential 字段 | 无 |
 | 用户可读错误 | 完成 | 配置、认证、限流、超时、网络和服务端错误类型化 | 无 |
 | 分层手册 | 完成 | configuration、runtime、mcp、development 和示例文档 | 持续维护 |
-| Release | 部分完成 | tag/POM 校验、全量测试、JAR smoke、SHA-256 和 Release workflow 已实现 | 非 SNAPSHOT 版本和真实 tag |
+| Release | 部分完成 | 版本已收敛为 `0.1.0`；JAR、Windows ZIP、SHA-256 和包内启动本地 smoke 通过 | 推送 `v0.1.0` tag 并取得真实 Release |
 
 ## 4. 当前验证证据
 
 - `mvn -B -ntp clean verify`
   - 10 个 Reactor 模块成功。
-  - 449 项测试，0 Failure、0 Error、0 Skipped。
+  - 450 项测试，0 Failure、0 Error、0 Skipped。
   - ArchUnit 10/10 硬规则通过。
 - 独立 Java/Maven 示例测试通过。
 - shaded JAR 的 `--help` 和 `--version` 通过。
 - `clawkit.cmd --version` 在 Windows 上通过。
+- Docker 镜像 `clawkit:p0d` 构建成功；帮助/版本、挂载、UID 10001、Git 和无 TTY 失败路径通过。
+- 本地组装 `clawkit-0.1.0-windows.zip`，从包内 `clawkit.cmd` 启动并返回 `clawkit 0.1.0`。
 - 未设置产品 Key 时以 `C-003` 和退出码 2 失败，未输出 Java 堆栈。
 - 真实 `deepseek-chat` 文本对话和 JSON Schema 工具调用成功。
 - 联调发现并修复 Map 型工具 Schema 丢失结构的问题，已增加回归测试。
@@ -130,15 +132,15 @@ Metadata
 
 ## 5. 当前阻断与风险
 
-### 5.1 发布阻断
+### 5.1 外部发布门禁
 
-- 工作区包含 P0-R/P0-D 的大量未提交变更，尚不是可复现的干净提交。
-- 当前版本仍为 `0.1.0-SNAPSHOT`。
-- 尚无真实 GitHub Actions 和 Release 运行记录。
+- P0-D 收口修改尚未提交和推送，因此修复后的 GitHub Actions 还没有运行记录。
+- `v0.1.0` tag 和 Release 尚未创建。
+- 仓库已经跟踪两份 `.codex_docx_review/*.docx` 历史产物；忽略规则已补上，是否从后续提交删除不影响运行功能，但影响仓库整洁度。
 
 ### 5.2 Docker 阻断
 
-Docker Desktop 已启动，但基础 Maven/JDK 镜像拉取连续超时，因此不能宣称镜像构建和交互式容器验收完成。
+Docker Desktop 镜像和自动 smoke 已通过。由于当前自动化终端不能提供 Windows ConPTY，真实 `docker run --rm -it` 仍需在 Windows Terminal 手工执行；无 TTY 失败路径已经验证为 `C-007`、退出码 2。
 
 ### 5.3 Ops Loop 尚未实现
 
@@ -219,7 +221,7 @@ App Down 只作为工程冒烟；公开演示固定为：
 - 四条核心主链和 10 条 ArchUnit 门禁。
 - Token Budget、Context Pipeline、Memory/Session 生命周期。
 - 类型化工具、安全执行、事件事实源和版本化 Benchmark。
-- 449 项自动化测试、Windows CLI 和真实 DeepSeek 工具调用。
+- 450 项自动化测试、Windows CLI 和真实 DeepSeek 工具调用。
 
 必须带限定：
 
@@ -248,4 +250,3 @@ P50/P95 MTTD 与 MTTR = 实测值。
 - 自动修改业务代码、自动提 PR 和自动发布。
 - 同时集成 ChaosBlade、Chaos Toolkit、Gatus 和 Ansible Runner。
 - 未通过独立验证和 Benchmark 的生产自动修复。
-

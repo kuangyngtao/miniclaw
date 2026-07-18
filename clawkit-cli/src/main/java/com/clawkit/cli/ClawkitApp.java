@@ -51,7 +51,7 @@ public class ClawkitApp implements Runnable {
     private String baseUrl;
 
     @Option(names = {"--protocol"},
-        description = "API protocol: OPENAI_COMPAT, ANTHROPIC")
+        description = "API protocol (DeepSeek: OPENAI_COMPAT)")
     private String protocol;
 
     @Option(names = {"--thinking"}, description = "Enable slow thinking mode (TWO_STAGE)")

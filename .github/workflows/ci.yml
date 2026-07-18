@@ -39,14 +39,37 @@ jobs:
       - name: Clean verify
         run: mvn -B -ntp clean verify
       - name: Ensure build did not modify tracked files
-        run: git diff --check
+        run: git diff --exit-code
 
   docker-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - run: docker build -t clawkit:ci .
-      - run: docker run --rm clawkit:ci --help
-      - run: docker run --rm clawkit:ci --version
-      - run: test "$(docker run --rm --entrypoint id clawkit:ci -u)" != "0"
+      - name: Build image
+        run: docker build -t clawkit:ci .
+      - name: Smoke help and version
+        run: |
+          docker run --rm clawkit:ci --help
+          docker run --rm clawkit:ci --version
+      - name: Verify workspace and persistent state mounts
+        run: |
+          docker run --rm \
+            -v "$PWD:/workspace:ro" \
+            --entrypoint sh clawkit:ci \
+            -c 'test "$PWD" = /workspace && test -r pom.xml && test ! -w pom.xml'
+          docker volume create clawkit-ci-home
+          docker run --rm \
+            -v clawkit-ci-home:/home/clawkit/.clawkit \
+            --entrypoint sh clawkit:ci \
+            -c 'touch /home/clawkit/.clawkit/write-test && rm /home/clawkit/.clawkit/write-test'
+          docker volume rm clawkit-ci-home
+      - name: Verify non-root and no-TTY fail-closed behavior
+        run: |
+          test "$(docker run --rm --entrypoint id clawkit:ci -u)" != "0"
+          set +e
+          output="$(docker run --rm -e CLAWKIT_API_KEY=ci-placeholder clawkit:ci 2>&1)"
+          exit_code=$?
+          set -e
+          test "$exit_code" -eq 2
+          grep -q '\[C-007\]' <<< "$output"

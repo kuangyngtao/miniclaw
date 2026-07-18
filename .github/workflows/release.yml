@@ -35,17 +35,35 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item "clawkit-cli/target/clawkit-cli-$env:VERSION.jar" "dist/clawkit-$env:VERSION.jar"
-          java -jar "dist/clawkit-$env:VERSION.jar" --help
-          $actual = java -jar "dist/clawkit-$env:VERSION.jar" --version
-          if ($actual -ne "clawkit $env:VERSION") { throw "Unexpected version: $actual" }
-          (Get-FileHash "dist/clawkit-$env:VERSION.jar" -Algorithm SHA256).Hash.ToLower() + "  clawkit-$env:VERSION.jar" |
-            Set-Content "dist/clawkit-$env:VERSION.jar.sha256"
+          $jarName = "clawkit-$env:VERSION.jar"
+          $zipName = "clawkit-$env:VERSION-windows.zip"
+          $windowsDir = "dist/clawkit-$env:VERSION-windows"
+
+          Copy-Item "clawkit-cli/target/clawkit-cli-$env:VERSION.jar" "dist/$jarName"
+          New-Item -ItemType Directory -Force $windowsDir | Out-Null
+          Copy-Item "dist/$jarName" "$windowsDir/clawkit.jar"
+          Copy-Item "clawkit.cmd" "$windowsDir/clawkit.cmd"
+          Copy-Item "README.md" "$windowsDir/README.md"
+
+          java -jar "dist/$jarName" --help
+          $jarVersion = java -jar "dist/$jarName" --version
+          if ($jarVersion -ne "clawkit $env:VERSION") { throw "Unexpected JAR version: $jarVersion" }
+          $windowsVersion = & "$windowsDir/clawkit.cmd" --version
+          if ($windowsVersion -ne "clawkit $env:VERSION") { throw "Unexpected Windows package version: $windowsVersion" }
+
+          Compress-Archive -Path "$windowsDir/*" -DestinationPath "dist/$zipName"
+          @(
+            (Get-FileHash "dist/$jarName" -Algorithm SHA256).Hash.ToLower() + "  $jarName"
+            (Get-FileHash "dist/$zipName" -Algorithm SHA256).Hash.ToLower() + "  $zipName"
+          ) | Set-Content "dist/SHA256SUMS.txt"
       - name: Publish release after all checks pass
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${{ github.ref_name }}" --draft --verify-tag --title "clawkit $env:VERSION"
-          gh release upload "${{ github.ref_name }}" "dist/clawkit-$env:VERSION.jar" "dist/clawkit-$env:VERSION.jar.sha256"
+          gh release upload "${{ github.ref_name }}" `
+            "dist/clawkit-$env:VERSION.jar" `
+            "dist/clawkit-$env:VERSION-windows.zip" `
+            "dist/SHA256SUMS.txt"
           gh release edit "${{ github.ref_name }}" --draft=false

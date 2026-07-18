@@ -41,6 +41,7 @@ secrets/
 
 # Dev notes
 INTERVIEW.md
+.codex_docx_review/
 
 # ArchUnit freeze store
 archunit_store/

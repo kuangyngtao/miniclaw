@@ -149,7 +149,7 @@ public class BenchmarkRunner {
         boolean anyFailed = results.stream().anyMatch(r -> !r.passed());
         String verdict = anyFailed ? "DEGRADED" : "UNCHANGED";
 
-        return new BenchmarkReport(evaluationId, "0.1.0-SNAPSHOT",
+        return new BenchmarkReport(evaluationId, "0.1.0",
             gitCommit(), startMs, System.currentTimeMillis() - startMs,
             results, verdict, null);
     }
