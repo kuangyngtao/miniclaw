@@ -7,6 +7,8 @@ package com.clawkit.tools;
 public enum ToolExecutionStatus {
     /** 成功完成 */
     SUCCESS,
+    /** 副作用已报告，但尚未由独立验证或人工确认收敛 */
+    VERIFICATION_PENDING,
     /** 用户拒绝 */
     REJECTED,
     /** 安全策略或拦截器阻断 */
@@ -33,6 +35,6 @@ public enum ToolExecutionStatus {
 
     /** 是否为失败的终态 */
     public boolean isFailure() {
-        return this != SUCCESS;
+        return this != SUCCESS && this != VERIFICATION_PENDING;
     }
 }

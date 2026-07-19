@@ -78,6 +78,58 @@ public class WriteTool implements Tool {
     @Override
     public String inputSchema() { return SCHEMA; }
 
+    /**
+     * P1-G4：写文件的动作描述符。
+     * expected effect = 目标文件内容 hash（确定性验证/reconcile 依据）；
+     * precondition = 当前文件 hash 或 absent（区分"已生效/未生效/漂移"）。
+     */
+    @Override
+    public com.clawkit.tools.action.ActionDescriptor describeAction(
+            com.clawkit.tools.ToolExecutionRequest req) {
+        JsonNode args = req.arguments();
+        if (args == null) return null;
+        JsonNode pathNode = args.get("path");
+        JsonNode contentNode = args.get("content");
+        if (pathNode == null || pathNode.asText().isEmpty() || contentNode == null) {
+            return null; // 参数不可信 → gate fail closed
+        }
+        Path resolved;
+        try {
+            resolved = pathPolicy.resolve(pathNode.asText(), true);
+        } catch (WorkspacePathPolicy.PathEscapeException e) {
+            return null; // 路径逃逸 → fail closed
+        }
+        boolean overwrite = args.has("overwrite") && args.get("overwrite").asBoolean(false);
+        String contentHash = com.clawkit.tools.action.Digests.sha256Hex(
+            contentNode.asText().getBytes(StandardCharsets.UTF_8));
+
+        java.util.List<String> preconditions = new java.util.ArrayList<>();
+        try {
+            if (Files.exists(resolved) && Files.isRegularFile(resolved)) {
+                preconditions.add("pre-file-sha256:" + resolved + ":"
+                    + com.clawkit.tools.action.Digests.sha256Hex(Files.readAllBytes(resolved)));
+            } else {
+                preconditions.add("pre-file-absent:" + resolved);
+            }
+        } catch (IOException e) {
+            preconditions.add("pre-unreadable:" + resolved);
+        }
+
+        return new com.clawkit.tools.action.ActionDescriptor(
+            "file.write",
+            com.clawkit.tools.action.ActionTargets.fileTarget(resolved),
+            com.clawkit.tools.action.Digests.sha256Hex(
+                pathNode.asText() + "|" + overwrite + "|" + contentHash),
+            ToolRiskLevel.HIGH,
+            com.clawkit.tools.action.Reversibility.COMPENSATABLE,
+            com.clawkit.tools.action.ActionReliability.idempotentSetter(),
+            com.clawkit.tools.action.VerificationMode.DETERMINISTIC,
+            preconditions,
+            java.util.List.of("file-sha256:" + resolved + ":" + contentHash),
+            "以 precondition 中的旧内容重写文件",
+            "single file: " + pathNode.asText());
+    }
+
     @Override
     public ToolMetadata metadata() {
         return new ToolMetadata(

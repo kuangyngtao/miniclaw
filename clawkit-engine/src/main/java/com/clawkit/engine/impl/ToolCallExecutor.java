@@ -30,7 +30,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -38,6 +37,10 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>所有工具调用——registry 工具 + internal tools——经过此 executor，
  * 统一审批、并行/串行决策、事件分发和结果回注。
+ *
+ * <p>P1-G4：executor 同时是唯一 Side Effect Gate 入口——
+ * 副作用工具（readOnly=false 或声明 side effect）必须提供 ActionDescriptor
+ * 并通过 Attempt 生命周期执行；无法生成描述符时 fail closed。
  */
 public class ToolCallExecutor {
 
@@ -45,9 +48,16 @@ public class ToolCallExecutor {
     private static final Duration PARALLEL_DEADLINE = Duration.ofMinutes(5);
 
     private final Registry registry;
+    private final com.clawkit.reliability.gate.SideEffectGate sideEffectGate;
 
     public ToolCallExecutor(Registry registry) {
+        this(registry, null);
+    }
+
+    public ToolCallExecutor(Registry registry,
+                            com.clawkit.reliability.gate.SideEffectGate sideEffectGate) {
         this.registry = registry;
+        this.sideEffectGate = sideEffectGate;
     }
 
     /**
@@ -72,10 +82,17 @@ public class ToolCallExecutor {
             executeParallel(calls, ctx, results, messages);
         } else {
             for (ToolCall call : calls) {
-                ToolMetadata meta = metadataFor(call.name());
+                ToolMetadata meta = metadataFor(call.name(), ctx);
                 boolean isInternal = ctx.internalTools().isInternal(call.name());
                 fireToolInvoked(call, ctx, meta, isInternal);
-                ToolExecutionResult r = executeOne(call, ctx);
+                ToolExecutionResult r;
+                if (ctx.control().isCancelled()) {
+                    // P1-G1：取消后不再启动新工具，剩余调用返回派发前取消
+                    r = ToolExecutionResult.cancelled(call.id(), call.name(),
+                        "执行已被取消，工具未启动。", 0, meta, true);
+                } else {
+                    r = executeOne(call, ctx);
+                }
                 results.add(r);
                 messages.add(toMessage(r));
                 fireToolCompleted(call, ctx, r, isInternal);
@@ -98,9 +115,18 @@ public class ToolCallExecutor {
         }
 
         // 2. 取得并冻结 metadata（对所有工具，包括 internal）
-        ToolMetadata meta = metadataFor(call.name());
+        ToolMetadata meta = metadataFor(call.name(), ctx);
         ToolExecutionRequest req = ToolExecutionRequest.from(call,
-            new ToolExecutionScope(ctx.runId(), ctx.turnNumber(), null, null));
+            new ToolExecutionScope(ctx.runId(), ctx.turnNumber(), null, null, ctx.control()));
+        boolean sideEffect = !meta.isReadOnly() || !meta.sideEffects().isEmpty();
+        com.clawkit.tools.action.ActionDescriptor descriptor =
+            sideEffect ? describeAction(call, req, ctx) : null;
+        if (sideEffect && descriptor == null) {
+            return ToolExecutionResult.blocked(
+                call.id(), call.name(),
+                "[T-SEG-001] Side-effecting tool has no trusted ActionDescriptor.",
+                elapsedMs(start), meta);
+        }
 
         // 3. 权限评估（internal 工具也经过此步骤）
         PermissionMode mode = ctx.permissionMode() != null ? ctx.permissionMode() : PermissionMode.ASK;
@@ -125,7 +151,8 @@ public class ToolCallExecutor {
                         "ASK mode requires an ApprovalHandler but none is configured",
                         elapsedMs(start), meta);
                 }
-                ApprovalRequest approvalReq = ApprovalRequest.from(meta, call, null);
+                ApprovalRequest approvalReq = ApprovalRequest.from(
+                    meta, call, null, descriptor != null ? descriptor.fingerprint() : null);
                 ApprovalResult approvalResult = ctx.approvalHandler().handle(approvalReq);
                 switch (approvalResult) {
                     case ApprovalResult.Approve __ -> { /* continue */ }
@@ -153,8 +180,36 @@ public class ToolCallExecutor {
             case ALLOW -> { /* 直接执行 */ }
         }
 
-        // 4. 执行：internal 工具走 router，注册表工具走 registry
+        // 4. 执行：P1-G4 副作用工具必须携带 ActionDescriptor 走 Side Effect Gate
+        try {
+            ctx.control().acquireToolCall();
+        } catch (com.clawkit.tools.control.ExecutionHaltedException halted) {
+            return ToolExecutionResult.blocked(
+                call.id(), call.name(),
+                "Tool call not started: " + halted.reason(),
+                elapsedMs(start), meta);
+        }
+
         Instant execStart = Instant.now();
+        if (sideEffect) {
+            if (sideEffectGate == null) {
+                // Gate 未装配：副作用一律 fail closed
+                return ToolExecutionResult.blocked(
+                    call.id(), call.name(),
+                    "[T-SEG-000] Side Effect Gate 未装配，副作用工具按 fail-closed 拒绝执行。",
+                    elapsedMs(start), meta);
+            }
+            return sideEffectGate.execute(descriptor, call.id(), call.name(), meta,
+                ctx.control(), ctx.runId(),
+                () -> doExecute(call, req, ctx, meta, execStart));
+        }
+        return doExecute(call, req, ctx, meta, execStart);
+    }
+
+    /** 真实执行体：internal 工具走 router，注册表工具走 registry。 */
+    private ToolExecutionResult doExecute(ToolCall call, ToolExecutionRequest req,
+                                          ToolExecutionContext ctx, ToolMetadata meta,
+                                          Instant execStart) {
         ToolExecutionResult result;
         try {
             if (ctx.internalTools().isInternal(call.name())) {
@@ -175,8 +230,23 @@ public class ToolCallExecutor {
             result = ToolExecutionResult.internalError(
                 call.id(), call.name(), e.getMessage(), elapsedMs(execStart), meta);
         }
-
         return result;
+    }
+
+    /** 生成 ActionDescriptor：internal 走 router，registry 工具走 Tool.describeAction()。 */
+    private com.clawkit.tools.action.ActionDescriptor describeAction(
+            ToolCall call, ToolExecutionRequest req, ToolExecutionContext ctx) {
+        try {
+            if (ctx.internalTools().isInternal(call.name())) {
+                return ctx.internalTools().describe(req);
+            }
+            return registry.lookup(call.name())
+                .map(tool -> tool.describeAction(req))
+                .orElse(null);
+        } catch (Exception e) {
+            log.warn("describeAction failed for {}: {}", call.name(), e.getMessage());
+            return null; // fail closed
+        }
     }
 
     // ── 降级权限逻辑 ──────────────────────────────────────────────
@@ -213,51 +283,76 @@ public class ToolCallExecutor {
 
     // ── 并行执行 ─────────────────────────────────────────────────
 
+    /**
+     * P1-G1：并行任务由 task group 持有真实 Future 句柄。
+     * 取消时不再 fork 新任务，取消未完成任务（中断线程）并等待终态归并；
+     * 未完成槽位以 CANCELLED 终态回注，不再留下 "missing result"。
+     */
     private void executeParallel(List<ToolCall> calls, ToolExecutionContext ctx,
                                   List<ToolExecutionResult> results, List<Message> messages) {
         int n = calls.size();
-        ToolExecutionResult[] resultArray = new ToolExecutionResult[n];
-        CountDownLatch latch = new CountDownLatch(n);
+        List<java.util.concurrent.Future<ToolExecutionResult>> futures = new ArrayList<>(n);
 
-        for (int i = 0; i < n; i++) {
-            final int idx = i;
-            final ToolCall call = calls.get(i);
-            fireToolInvoked(call, ctx, metadataFor(call.name()), false);
-            Thread.ofVirtual().start(() -> {
-                try {
-                    resultArray[idx] = executeOne(call, ctx);
-                } catch (Exception e) {
-                    resultArray[idx] = ToolExecutionResult.internalError(
-                        call.id(), call.name(), e.getMessage(), 0,
-                        metadataFor(call.name()));
-                } finally {
-                    latch.countDown();
+        var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
+        try {
+            for (int i = 0; i < n; i++) {
+                final ToolCall call = calls.get(i);
+                fireToolInvoked(call, ctx, metadataFor(call.name()), false);
+                if (ctx.control().isCancelled()) {
+                    // 取消后禁止 fork 新任务
+                    futures.add(java.util.concurrent.CompletableFuture.completedFuture(
+                        ToolExecutionResult.cancelled(call.id(), call.name(),
+                            "执行已被取消，工具未启动。", 0, metadataFor(call.name()), true)));
+                    continue;
+                }
+                futures.add(executor.submit(() -> executeOne(call, ctx)));
+            }
+
+            // 取消 → 中断所有未完成任务
+            try (var cancelReg = ctx.control().onCancel(() ->
+                    futures.forEach(f -> f.cancel(true)))) {
+                long deadlineNanos = System.nanoTime() + PARALLEL_DEADLINE.toNanos();
+                for (int i = 0; i < n; i++) {
+                    ToolCall call = calls.get(i);
+                    ToolExecutionResult r;
+                    try {
+                        long remaining = Math.max(1, deadlineNanos - System.nanoTime());
+                        r = futures.get(i).get(remaining, TimeUnit.NANOSECONDS);
+                    } catch (java.util.concurrent.CancellationException e) {
+                        r = ToolExecutionResult.cancelled(call.id(), call.name(),
+                            "并行执行已被取消。", 0, metadataFor(call.name()), false);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        r = ToolExecutionResult.cancelled(call.id(), call.name(),
+                            "并行执行等待被中断。", 0, metadataFor(call.name()), false);
+                    } catch (java.util.concurrent.TimeoutException e) {
+                        futures.get(i).cancel(true);
+                        log.warn("Parallel execution deadline exceeded for tool {}", call.name());
+                        r = ToolExecutionResult.timedOut(call.id(), call.name(),
+                            "并行执行超过 " + PARALLEL_DEADLINE.toMinutes() + " 分钟上限。",
+                            PARALLEL_DEADLINE.toMillis(), ToolOutputStats.EMPTY,
+                            metadataFor(call.name()));
+                    } catch (java.util.concurrent.ExecutionException e) {
+                        r = ToolExecutionResult.internalError(call.id(), call.name(),
+                            e.getCause() != null ? e.getCause().getMessage() : e.getMessage(),
+                            0, metadataFor(call.name()));
+                    }
+                    results.add(r);
+                    messages.add(toMessage(r));
+                    fireToolCompleted(call, ctx, r, false);
+                }
+            }
+        } finally {
+            futures.forEach(f -> {
+                if (!f.isDone()) {
+                    f.cancel(true);
                 }
             });
-        }
-
-        try {
-            if (!latch.await(PARALLEL_DEADLINE.toMillis(), TimeUnit.MILLISECONDS)) {
-                log.warn("Parallel execution deadline exceeded for {} calls", n);
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-
-        for (int i = 0; i < n; i++) {
-            ToolExecutionResult r = resultArray[i];
-            if (r != null) {
-                results.add(r);
-                messages.add(toMessage(r));
-                fireToolCompleted(calls.get(i), ctx, r, false);
-            } else {
-                var missing = ToolExecutionResult.internalError(
-                    calls.get(i).id(), calls.get(i).name(),
-                    "Parallel execution slot missing result", 0,
-                    metadataFor(calls.get(i).name()));
-                results.add(missing);
-                messages.add(toMessage(missing));
-                fireToolCompleted(calls.get(i), ctx, missing, false);
+            executor.shutdownNow();
+            try {
+                executor.awaitTermination(2, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
         }
     }
@@ -284,6 +379,15 @@ public class ToolCallExecutor {
             ro ? com.clawkit.tools.ToolExecutionPolicy.readOnlyDefaults()
                : com.clawkit.tools.ToolExecutionPolicy.defaults(),
             com.clawkit.tools.ToolMetadataProvenance.conservativeDefault());
+    }
+
+    /** internal tool 优先取 router 注册的权威 metadata。 */
+    ToolMetadata metadataFor(String toolName, ToolExecutionContext ctx) {
+        if (ctx != null && ctx.internalTools() != null && ctx.internalTools().isInternal(toolName)) {
+            return ctx.internalTools().metadataOf(toolName)
+                .orElseGet(() -> metadataFor(toolName));
+        }
+        return metadataFor(toolName);
     }
 
     private Message toMessage(ToolExecutionResult r) {

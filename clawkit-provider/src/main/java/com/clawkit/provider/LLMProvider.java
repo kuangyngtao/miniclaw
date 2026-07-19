@@ -18,9 +18,9 @@ public interface LLMProvider {
 
     // ── V2 统一接口（推荐） ──────────────────────────────────────────
 
-    /** V2 阻塞式调用。默认适配旧接口。 */
+    /** V2 阻塞式调用。默认适配旧接口；ExecutionControl 传入取消/deadline 感知实现。 */
     default ModelResponse generate(ModelRequest request) {
-        Message msg = generate(request.messages(), request.tools());
+        Message msg = generate(request.messages(), request.tools(), request.control());
         var toolCalls = msg.toolCalls();
         var reason = toolCalls != null && !toolCalls.isEmpty()
             ? FinishReason.TOOL_CALLS : FinishReason.STOP;
@@ -31,7 +31,8 @@ public interface LLMProvider {
     /** V2 流式调用。默认适配 generateStream。 */
     default ModelResponse generateStream(ModelRequest request, StreamObserver observer) {
         try {
-            Message msg = generateStream(request.messages(), request.tools(), observer::onContent);
+            Message msg = generateStream(request.messages(), request.tools(),
+                observer::onContent, request.control());
             var toolCalls = msg.toolCalls();
             var reason = toolCalls != null && !toolCalls.isEmpty()
                 ? FinishReason.TOOL_CALLS : FinishReason.STOP;
@@ -60,6 +61,17 @@ public interface LLMProvider {
     Message generate(List<Message> messages, List<ToolDefinition> availableTools);
 
     /**
+     * P1-G：取消/deadline/预算感知的阻塞式调用。
+     * 默认实现忽略 control（旧实现向后兼容）；生产 Provider 应覆盖：
+     * 单次请求 timeout 取配置与剩余 deadline 的较小值，每次调用和退避前
+     * 重新检查取消，阻塞请求可被取消中断。
+     */
+    default Message generate(List<Message> messages, List<ToolDefinition> availableTools,
+                             com.clawkit.tools.control.ExecutionControl control) {
+        return generate(messages, availableTools);
+    }
+
+    /**
      * 流式调用：以 SSE 方式逐步接收 token，每个文本 chunk 回调 onToken，
      * 最后返回完整的 Message（支持工具调用）。
      * 不重试——stream 中断无法重放，失败直接抛 LLMException。
@@ -67,6 +79,13 @@ public interface LLMProvider {
     default Message generateStream(List<Message> messages, List<ToolDefinition> tools,
                                    Consumer<String> onToken) {
         return generate(messages, tools);
+    }
+
+    /** P1-G：取消/deadline 感知的流式调用。默认实现忽略 control。 */
+    default Message generateStream(List<Message> messages, List<ToolDefinition> tools,
+                                   Consumer<String> onToken,
+                                   com.clawkit.tools.control.ExecutionControl control) {
+        return generateStream(messages, tools, onToken);
     }
 
     /** 模型上下文窗口大小（tokens），默认 128K。 */

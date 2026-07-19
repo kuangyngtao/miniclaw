@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.clawkit.tools.control.ExecutionControl;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -83,11 +84,16 @@ public class McpClient {
 
     /** 调用工具，返回结构化 McpCallResult（V2：保留 isError + content items） */
     public McpCallResult callTool(String toolName, JsonNode arguments) throws IOException {
+        return callTool(toolName, arguments, ExecutionControl.none());
+    }
+
+    public McpCallResult callTool(String toolName, JsonNode arguments,
+                                  ExecutionControl control) throws IOException {
         ObjectNode params = MAPPER.createObjectNode();
         params.put("name", toolName);
         params.set("arguments", arguments != null ? arguments : MAPPER.createObjectNode());
 
-        String resp = sendRequest("tools/call", params);
+        String resp = sendRequest("tools/call", params, control);
         JsonNode root = MAPPER.readTree(resp);
         JsonNode result = root.path("result");
         if (result.isMissingNode()) {
@@ -122,6 +128,11 @@ public class McpClient {
     }
 
     private String sendRequest(String method, ObjectNode params) throws IOException {
+        return sendRequest(method, params, ExecutionControl.none());
+    }
+
+    private String sendRequest(String method, ObjectNode params,
+                               ExecutionControl control) throws IOException {
         ObjectNode request = MAPPER.createObjectNode();
         request.put("jsonrpc", "2.0");
         request.put("id", nextId.getAndIncrement());
@@ -130,7 +141,7 @@ public class McpClient {
 
         String body = MAPPER.writeValueAsString(request);
         log.debug("[MCP:{}] → {}", serverName, method);
-        String resp = transport.send(body);
+        String resp = transport.send(body, control);
         log.debug("[MCP:{}] ← {}", serverName, method);
 
         // 检查 JSON-RPC error 字段

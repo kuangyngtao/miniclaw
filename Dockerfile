@@ -2,6 +2,7 @@ FROM maven:3.9.9-eclipse-temurin-21 AS build
 WORKDIR /src
 COPY pom.xml ./
 COPY clawkit-tools/pom.xml clawkit-tools/pom.xml
+COPY clawkit-reliability/pom.xml clawkit-reliability/pom.xml
 COPY clawkit-provider/pom.xml clawkit-provider/pom.xml
 COPY clawkit-context/pom.xml clawkit-context/pom.xml
 COPY clawkit-memory/pom.xml clawkit-memory/pom.xml
@@ -12,6 +13,7 @@ COPY clawkit-cli/pom.xml clawkit-cli/pom.xml
 COPY clawkit-evaluation/pom.xml clawkit-evaluation/pom.xml
 RUN mvn -B -ntp -pl clawkit-cli -am dependency:go-offline
 COPY clawkit-tools clawkit-tools
+COPY clawkit-reliability clawkit-reliability
 COPY clawkit-provider clawkit-provider
 COPY clawkit-context clawkit-context
 COPY clawkit-memory clawkit-memory

@@ -140,6 +140,18 @@ public class ApplicationBootstrap {
         engine.setWorkspaceRules(workspaceRules);
         // contextPipeline 已由构造器自建，无需手动 init
 
+        // P1-G5：进程启动恢复扫描——崩溃遗留的副作用 Attempt 按结果未知 reconcile
+        try {
+            var recovery = engine.recoverPendingAttempts();
+            if (recovery.scanned() > 0) {
+                org.slf4j.LoggerFactory.getLogger(ApplicationBootstrap.class)
+                    .info("[Bootstrap] reliability recovery: {}", recovery);
+            }
+        } catch (Exception e) {
+            org.slf4j.LoggerFactory.getLogger(ApplicationBootstrap.class)
+                .warn("[Bootstrap] reliability recovery failed: {}", e.getMessage());
+        }
+
         // Skills are owned by SkillRuntime; only its catalog is refreshed here.
         engine.rebuildSkillCatalog();
 

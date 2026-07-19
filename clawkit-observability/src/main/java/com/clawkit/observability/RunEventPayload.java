@@ -17,5 +17,6 @@ public sealed interface RunEventPayload
             ApprovalDecidedPayload,
             CompactTriggeredPayload,
             CompactCompletedPayload,
+            AttemptTransitionPayload,
             UnknownEventPayload {
 }

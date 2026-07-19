@@ -2,6 +2,7 @@ package com.clawkit.tools.mcp;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.clawkit.tools.control.ExecutionControl;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.IOException;
@@ -127,6 +128,13 @@ public class StdioTransport implements McpTransport {
 
     @Override
     public String send(String jsonRpcRequest) throws IOException {
+        return send(jsonRpcRequest, ExecutionControl.none());
+    }
+
+    @Override
+    public String send(String jsonRpcRequest, ExecutionControl control) throws IOException {
+        ExecutionControl effective = control != null ? control : ExecutionControl.none();
+        effective.checkpoint();
         if (!isAlive()) {
             throw new IOException("[MCP] transport not alive: " + command);
         }
@@ -151,11 +159,17 @@ public class StdioTransport implements McpTransport {
             writeLine(jsonRpcRequest);
         }
 
-        try {
-            return future.get(60, TimeUnit.SECONDS);
+        long timeoutMillis = effective.remainingTime()
+            .map(d -> Math.min(60_000L, Math.max(1L, d.toMillis())))
+            .orElse(60_000L);
+        try (var registration = effective.onCancel(() ->
+                future.completeExceptionally(new IOException(
+                    "[MCP] request cancelled; remote outcome is unknown")))) {
+            return future.get(timeoutMillis, TimeUnit.MILLISECONDS);
         } catch (java.util.concurrent.TimeoutException e) {
             pendingRequests.remove(id);
-            throw new IOException("[MCP] request timed out (60s): " + command + " id=" + id);
+            throw new IOException("[MCP] request timed out; remote outcome is unknown: "
+                + command + " id=" + id);
         } catch (InterruptedException e) {
             pendingRequests.remove(id);
             Thread.currentThread().interrupt();

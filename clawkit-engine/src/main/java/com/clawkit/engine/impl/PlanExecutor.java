@@ -12,7 +12,8 @@ import com.clawkit.tools.schema.*;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
@@ -55,18 +56,24 @@ public class PlanExecutor {
         log.info("[PlanExecutor] 开始执行: {} tasks, {} levels",
             plan.taskCount(), levels.size());
 
-        for (int levelIdx = 0; levelIdx < levels.size(); levelIdx++) {
-            if (cancelled.get()) break;
+        // P1-G1：外部取消 → 停止调度剩余任务
+        try (var cancelReg = ctx.control().onCancel(() -> cancelled.set(true))) {
+            for (int levelIdx = 0; levelIdx < levels.size(); levelIdx++) {
+                if (cancelled.get() || ctx.control().isCancelled()) {
+                    skipRemainingTasks(plan, levelIdx, levels);
+                    break;
+                }
 
-            List<String> level = levels.get(levelIdx);
-            log.info("[PlanExecutor] Level {}/{}: {} tasks",
-                levelIdx + 1, levels.size(), level.size());
+                List<String> level = levels.get(levelIdx);
+                log.info("[PlanExecutor] Level {}/{}: {} tasks",
+                    levelIdx + 1, levels.size(), level.size());
 
-            boolean shouldCancel = executeLevel(level, plan.getTasks(), slotValues, cancelled, ctx);
+                boolean shouldCancel = executeLevel(level, plan.getTasks(), slotValues, cancelled, ctx);
 
-            if (shouldCancel) {
-                skipRemainingTasks(plan, levelIdx + 1, levels);
-                break;
+                if (shouldCancel) {
+                    skipRemainingTasks(plan, levelIdx + 1, levels);
+                    break;
+                }
             }
         }
 
@@ -92,31 +99,53 @@ public class PlanExecutor {
     private boolean executeLevel(List<String> taskIds, Map<String, Task> tasks,
                                   Map<String, String> slotValues, AtomicBoolean cancelled,
                                   PlanExecutionContext ctx) {
-        CountDownLatch latch = new CountDownLatch(taskIds.size());
         AtomicInteger replanCount = new AtomicInteger(0);
-
-        for (String taskId : taskIds) {
-            Thread.ofVirtual().start(() -> {
-                try {
-                    if (cancelled.get()) return;
+        var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
+        List<Future<?>> futures = new ArrayList<>(taskIds.size());
+        try {
+            for (String taskId : taskIds) {
+                futures.add(executor.submit(() -> {
+                    if (cancelled.get() || ctx.control().isCancelled()) {
+                        return;
+                    }
                     Task task = tasks.get(taskId);
                     boolean needReplan = executeSingleTask(task, slotValues, ctx);
                     if (needReplan) {
                         replanCount.incrementAndGet();
                         cancelled.set(true);
                     }
-                } finally {
-                    latch.countDown();
+                }));
+            }
+
+            try (var cancelReg = ctx.control().onCancel(() -> {
+                cancelled.set(true);
+                futures.forEach(f -> f.cancel(true));
+            })) {
+                while (futures.stream().anyMatch(f -> !f.isDone())) {
+                    if (cancelled.get() || ctx.control().isCancelled()) {
+                        futures.forEach(f -> f.cancel(true));
+                        break;
+                    }
+                    Thread.sleep(25);
+                }
+            }
+        } catch (InterruptedException e) {
+            cancelled.set(true);
+            futures.forEach(f -> f.cancel(true));
+            Thread.currentThread().interrupt();
+            log.warn("[PlanExecutor] execution interrupted");
+        } finally {
+            futures.forEach(f -> {
+                if (!f.isDone()) {
+                    f.cancel(true);
                 }
             });
-        }
-
-        try {
-            latch.await();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            cancelled.set(true);
-            log.warn("[PlanExecutor] 执行被中断");
+            executor.shutdownNow();
+            try {
+                executor.awaitTermination(2, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
 
         return replanCount.get() > 0;
@@ -151,6 +180,13 @@ public class PlanExecutor {
                 log.info("[PlanExecutor]   <- {} 完成 (尝试{})", task.getId(), attempt);
                 return false;
 
+            } catch (com.clawkit.tools.control.ExecutionHaltedException halted) {
+                // P1-G1：控制面停止（取消/deadline/预算）不进入重试与 reviewer 分析
+                log.info("[PlanExecutor]   <- {} 被控制面停止: {}", task.getId(), halted.reason());
+                task.setErrorMessage("控制面停止: " + halted.reason());
+                task.setStatus(TaskStatus.FAILED);
+                task.setEndTime(Instant.now());
+                return false;
             } catch (Exception e) {
                 log.warn("[PlanExecutor]   <- {} 失败 (尝试{}/{}): {}",
                     task.getId(), attempt, MAX_RETRIES + 1, e.getMessage());
@@ -207,7 +243,8 @@ public class PlanExecutor {
 
         for (int turn = 0; turn < maxTurns; turn++) {
             var req = ModelRequest.of(messages, tools);
-            var scope = new RunScope(ctx.parentRunId() + "-worker", ctx.parentRunId(), turn, RunPhase.PLAN_WORKER, null);
+            var scope = new RunScope(ctx.parentRunId() + "-worker", ctx.parentRunId(), turn,
+                RunPhase.PLAN_WORKER, null, ctx.control());
             var resp = gateway.generate(req, scope);
             Message response = resp.hasToolCalls()
                 ? Message.assistantWithTools(resp.toolCalls())
@@ -268,11 +305,16 @@ public class PlanExecutor {
             Message response;
             try {
                 var req = ModelRequest.of(messages, tools);
-                var scope = new RunScope(ctx.parentRunId() + "-reviewer", ctx.parentRunId(), turn, RunPhase.PLAN_REVIEWER, null);
+                var scope = new RunScope(ctx.parentRunId() + "-reviewer", ctx.parentRunId(), turn,
+                    RunPhase.PLAN_REVIEWER, null, ctx.control());
                 var resp = gateway.generate(req, scope);
                 response = resp.hasToolCalls()
                     ? Message.assistantWithTools(resp.toolCalls())
                     : Message.assistant(resp.content() != null ? resp.content() : "");
+            } catch (com.clawkit.tools.control.ExecutionHaltedException halted) {
+                // 控制面停止：不再继续 reviewer 诊断，直接放弃重试
+                log.info("[PlanExecutor] Reviewer 被控制面停止: {}", halted.reason());
+                throw halted;
             } catch (Exception e) {
                 log.warn("[PlanExecutor] Reviewer LLM 异常, 默认 RETRY: {}", e.getMessage());
                 return new AnalysisResult("RETRY", e.getMessage());

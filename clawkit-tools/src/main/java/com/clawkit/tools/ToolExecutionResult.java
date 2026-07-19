@@ -1,5 +1,7 @@
 package com.clawkit.tools;
 
+import com.clawkit.tools.action.EffectCertainty;
+import com.clawkit.tools.action.FailureClass;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
@@ -9,6 +11,11 @@ import java.util.UUID;
  *
  * <p>V2：使用 {@link ToolExecutionStatus} 唯一终态替代 boolean error + boolean timedOut。
  * 增加 {@link ToolError}、{@link ToolOutputStats}、{@link ApprovalRecord} 和 auditId。
+ *
+ * <p>V3（P1-G）：增加副作用确定性 {@link EffectCertainty}、确定性失败分类
+ * {@link FailureClass}、截断保真 {@link OutputEnvelope} 和 attemptId。
+ * 未显式给出时按保守规则派生：只读工具 → NO_EFFECT_CONFIRMED；
+ * 其余从 status 派生的 FailureClass 取固有确定性，绝不高估"无副作用"。
  */
 public record ToolExecutionResult(
     String toolCallId,
@@ -27,8 +34,23 @@ public record ToolExecutionResult(
     ToolError toolError,
     ToolOutputStats outputStats,
     ApprovalRecord approval,
-    String auditId
+    String auditId,
+    // ── V3 字段（P1-G） ──────────────────────────────────────────
+    EffectCertainty effectCertainty,
+    FailureClass failureClass,
+    OutputEnvelope outputEnvelope,
+    String attemptId
 ) {
+    /** 保守派生：未显式声明的 V3 字段从 status/metadata 推导。 */
+    public ToolExecutionResult {
+        if (failureClass == null && status != null) {
+            failureClass = deriveFailureClass(status);
+        }
+        if (effectCertainty == null) {
+            effectCertainty = deriveCertainty(failureClass, metadata);
+        }
+    }
+
     // ── V2 规范构造器（旧字段从 status 派生，构造器链保证一致性） ──
 
     /** V2 规范构造器 */
@@ -55,7 +77,8 @@ public record ToolExecutionResult(
             status == ToolExecutionStatus.TIMED_OUT,                // timedOut
             exitCode,
             metadata,
-            status, toolError, outputStats, approval, auditId
+            status, toolError, outputStats, approval, auditId,
+            null, null, null, null                                  // V3 字段派生
         );
     }
 
@@ -83,7 +106,8 @@ public record ToolExecutionResult(
             error ? new ToolError(errorCode != null ? errorCode : "TOOL_ERROR", output, false, java.util.Map.of()) : null,
             ToolOutputStats.fromOutput(output, truncated),
             null,  // approval
-            null   // auditId
+            null,  // auditId
+            null, null, null, null // V3 字段派生
         );
     }
 
@@ -218,6 +242,48 @@ public record ToolExecutionResult(
         );
     }
 
+    // ── V3 工厂与副本方法（P1-G） ─────────────────────────────────
+
+    /** 取消结果：派发前取消 → NOT_DISPATCHED；执行中取消 → EFFECT_UNKNOWN。 */
+    public static ToolExecutionResult cancelled(
+            String toolCallId, String toolName, String reason,
+            long durationMs, ToolMetadata metadata, boolean beforeDispatch) {
+        FailureClass fc = beforeDispatch
+            ? FailureClass.CANCELLED_BEFORE_DISPATCH
+            : FailureClass.INTERRUPTED_OUTCOME_UNKNOWN;
+        return new ToolExecutionResult(
+            toolCallId, toolName, reason,
+            ToolExecutionStatus.CANCELLED.isFailure(), "CANCELLED",
+            durationMs, 0, false, false, null, metadata,
+            ToolExecutionStatus.CANCELLED,
+            ToolError.fatal("CANCELLED", reason),
+            ToolOutputStats.fromOutput(reason, false), null,
+            UUID.randomUUID().toString(),
+            null, fc, null, null
+        );
+    }
+
+    /** 替换可靠性维度（executor/attempt coordinator 使用）。 */
+    public ToolExecutionResult withReliability(
+            EffectCertainty certainty, FailureClass failure, String attempt) {
+        return new ToolExecutionResult(
+            toolCallId, toolName, output, error, errorCode, durationMs,
+            outputBytes, truncated, timedOut, exitCode, metadata,
+            status, toolError, outputStats, approval, auditId,
+            certainty, failure, outputEnvelope, attempt
+        );
+    }
+
+    /** 附加输出信封。 */
+    public ToolExecutionResult withOutputEnvelope(OutputEnvelope envelope) {
+        return new ToolExecutionResult(
+            toolCallId, toolName, output, error, errorCode, durationMs,
+            outputBytes, truncated, timedOut, exitCode, metadata,
+            status, toolError, outputStats, approval, auditId,
+            effectCertainty, failureClass, envelope, attemptId
+        );
+    }
+
     // ── 便利方法 ──────────────────────────────────────────────────
 
     /** 结果是否成功 */
@@ -239,5 +305,31 @@ public record ToolExecutionResult(
             return ToolExecutionStatus.TOOL_ERROR;
         }
         return ToolExecutionStatus.SUCCESS;
+    }
+
+    /** status → 确定性失败分类的保守派生（工具可显式给出更精确的分类）。 */
+    private static FailureClass deriveFailureClass(ToolExecutionStatus status) {
+        return switch (status) {
+            case SUCCESS, VERIFICATION_PENDING -> FailureClass.NONE;
+            case REJECTED -> FailureClass.APPROVAL_REJECTED;
+            case BLOCKED -> FailureClass.PERMISSION_BLOCKED;
+            case INVALID_ARGUMENTS -> FailureClass.INVALID_ARGUMENTS;
+            case NOT_FOUND -> FailureClass.PRECONDITION_FAILED;
+            case TIMED_OUT -> FailureClass.TIMEOUT_OUTCOME_UNKNOWN;
+            case CANCELLED -> FailureClass.INTERRUPTED_OUTCOME_UNKNOWN;
+            case NON_ZERO_EXIT, TOOL_ERROR -> FailureClass.EXECUTION_ERROR_OUTCOME_UNKNOWN;
+            case INTERNAL_ERROR -> FailureClass.UNCLASSIFIED;
+        };
+    }
+
+    /** 只读工具按契约无副作用；其余取失败分类的固有确定性，未知时保守 EFFECT_UNKNOWN。 */
+    private static EffectCertainty deriveCertainty(FailureClass failureClass, ToolMetadata metadata) {
+        if (metadata != null && metadata.isReadOnly()) {
+            return EffectCertainty.NO_EFFECT_CONFIRMED;
+        }
+        if (failureClass != null) {
+            return failureClass.certainty();
+        }
+        return EffectCertainty.EFFECT_UNKNOWN;
     }
 }

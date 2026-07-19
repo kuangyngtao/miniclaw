@@ -30,7 +30,7 @@ public final class DefaultApprovalGrantCache implements ApprovalGrantCache {
         // 风险等级必须一致
         if (entry.riskLevel != riskLevel) return false;
         // 参数骨架一致才命中
-        String argSkeleton = skeleton(arguments);
+        String argSkeleton = skeleton(arguments, sideEffects);
         return argSkeleton.equals(entry.argSkeleton);
     }
 
@@ -38,7 +38,7 @@ public final class DefaultApprovalGrantCache implements ApprovalGrantCache {
     public void grant(String toolName, ToolRiskLevel riskLevel,
                        JsonNode arguments, Set<ToolSideEffect> sideEffects) {
         if (riskLevel == ToolRiskLevel.HIGH) return;
-        cache.put(toolName, new CacheEntry(riskLevel, skeleton(arguments)));
+        cache.put(toolName, new CacheEntry(riskLevel, skeleton(arguments, sideEffects)));
     }
 
     @Override
@@ -46,9 +46,16 @@ public final class DefaultApprovalGrantCache implements ApprovalGrantCache {
         cache.clear();
     }
 
-    /** 参数骨架：提取顶层 key 集合 + 关键 key 的值作为结构指纹 */
-    private static String skeleton(JsonNode args) {
+    /**
+     * 参数骨架：提取顶层 key 集合 + 关键 key 的值作为结构指纹。
+     * P1-G4：声明了副作用的工具按全参数内容绑定（等价 action fingerprint）——
+     * 参数漂移必须重新门禁，same-type 授权不得跨参数复用。
+     */
+    private static String skeleton(JsonNode args, Set<ToolSideEffect> sideEffects) {
         if (args == null || !args.isObject()) return "{}";
+        if (sideEffects != null && !sideEffects.isEmpty()) {
+            return com.clawkit.tools.action.Digests.sha256Hex(args.toString());
+        }
         StringBuilder sb = new StringBuilder();
         TreeSet<String> keys = new TreeSet<>();
         var it = args.fieldNames();

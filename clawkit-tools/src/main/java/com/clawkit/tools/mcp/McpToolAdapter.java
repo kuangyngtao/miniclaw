@@ -87,6 +87,30 @@ public class McpToolAdapter implements Tool {
     }
 
     /**
+     * P1-G4：MCP 写工具的保守动作描述符。
+     * annotations 只能辅助风险判断，不能单独证明幂等或可恢复——
+     * 恢复能力一律 none()、不可逆、MANUAL_REQUIRED；
+     * 目标按 server+tool 串行化（远端资源无法静态识别时的保守边界）。
+     */
+    @Override
+    public com.clawkit.tools.action.ActionDescriptor describeAction(ToolExecutionRequest req) {
+        if (cachedMetadata.readOnly()) {
+            return null; // 只读工具不需要描述符（gate 不触发）
+        }
+        String args = req.arguments() != null ? req.arguments().toString() : "{}";
+        return new com.clawkit.tools.action.ActionDescriptor(
+            "mcp." + serverName + "." + toolName,
+            com.clawkit.tools.action.ActionTargets.mcpTarget(serverName, toolName),
+            com.clawkit.tools.action.Digests.sha256Hex(args),
+            cachedMetadata.riskLevel(),
+            com.clawkit.tools.action.Reversibility.IRREVERSIBLE,
+            com.clawkit.tools.action.ActionReliability.none(),
+            com.clawkit.tools.action.VerificationMode.MANUAL_REQUIRED,
+            java.util.List.of(), java.util.List.of(),
+            "", "mcp server " + serverName + " tool " + toolName);
+    }
+
+    /**
      * 旧接口（deprecated）。委托给结构化执行。
      */
     @Override
@@ -126,7 +150,9 @@ public class McpToolAdapter implements Tool {
 
         // ── 调用 transport ──────────────────────────────────
         try {
-            McpCallResult callResult = client.callTool(toolName, argsNode);
+            McpCallResult callResult = client.callTool(toolName, argsNode,
+                req.scope() != null ? req.scope().control()
+                    : com.clawkit.tools.control.ExecutionControl.none());
             long duration = System.currentTimeMillis() - start;
             byte[] outBytes = callResult.text().getBytes(StandardCharsets.UTF_8);
 

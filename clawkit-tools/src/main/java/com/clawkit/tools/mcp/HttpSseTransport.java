@@ -1,5 +1,6 @@
 package com.clawkit.tools.mcp;
 
+import com.clawkit.tools.control.ExecutionControl;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.StringReader;
@@ -8,16 +9,25 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** HTTP + SSE MCP 传输。每次 send() 是独立 HTTP POST。支持 5xx 重试 + 熔断器。 */
+/**
+ * HTTP/SSE MCP transport.
+ *
+ * <p>Every request is sent exactly once. Retrying a JSON-RPC tools/call at the
+ * transport layer can duplicate an already committed remote side effect.
+ */
 public class HttpSseTransport implements McpTransport {
 
     private static final Logger log = LoggerFactory.getLogger(HttpSseTransport.class);
-    private static final int MAX_RETRIES = 2;
     private static final int CIRCUIT_BREAKER_FAILURES = 3;
     private static final int CIRCUIT_BREAKER_COOLDOWN_SEC = 30;
+    private static final Duration MAX_REQUEST_TIME = Duration.ofSeconds(60);
 
     private final String url;
     private final HttpClient httpClient;
@@ -32,78 +42,88 @@ public class HttpSseTransport implements McpTransport {
     }
 
     @Override
-    public void start() throws IOException {
-        // HTTP transport 不需要预连接
+    public void start() {
         log.debug("[MCP] HTTP transport ready: {}", url);
     }
 
     @Override
     public String send(String jsonRpcRequest) throws IOException {
+        return send(jsonRpcRequest, ExecutionControl.none());
+    }
+
+    @Override
+    public String send(String jsonRpcRequest, ExecutionControl control) throws IOException {
+        ExecutionControl effective = control != null ? control : ExecutionControl.none();
+        effective.checkpoint();
         if (isCircuitOpen()) {
             throw new IOException("[MCP] circuit breaker open for " + url);
         }
 
-        IOException lastError = null;
-        for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-            try {
-                String result = doSend(jsonRpcRequest);
-                consecutiveFailures = 0;
-                return result;
-            } catch (IOException e) {
-                lastError = e;
-                log.debug("[MCP] attempt {} failed: {}", attempt + 1, e.getMessage());
-                if (attempt < MAX_RETRIES) {
-                    try {
-                        Thread.sleep((long) Math.pow(2, attempt) * 1000);  // 1s → 2s
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        throw new IOException("[MCP] interrupted during retry backoff", ie);
-                    }
-                }
+        try {
+            String result = doSend(jsonRpcRequest, effective);
+            consecutiveFailures = 0;
+            return result;
+        } catch (IOException e) {
+            consecutiveFailures++;
+            if (consecutiveFailures >= CIRCUIT_BREAKER_FAILURES) {
+                circuitOpenUntil = System.currentTimeMillis()
+                    + CIRCUIT_BREAKER_COOLDOWN_SEC * 1000L;
+                log.warn("[MCP] circuit breaker OPEN for {} ({} consecutive failures)",
+                    url, consecutiveFailures);
             }
+            throw e;
         }
-
-        // 熔断器计数
-        consecutiveFailures++;
-        if (consecutiveFailures >= CIRCUIT_BREAKER_FAILURES) {
-            circuitOpenUntil = System.currentTimeMillis() + CIRCUIT_BREAKER_COOLDOWN_SEC * 1000L;
-            log.warn("[MCP] circuit breaker OPEN for {} ({} consecutive failures)", url, consecutiveFailures);
-        }
-        throw lastError;
     }
 
-    private String doSend(String jsonRpcRequest) throws IOException {
+    private String doSend(String jsonRpcRequest, ExecutionControl control) throws IOException {
+        Duration timeout = control.remainingTime()
+            .map(remaining -> remaining.compareTo(MAX_REQUEST_TIME) < 0
+                ? remaining : MAX_REQUEST_TIME)
+            .orElse(MAX_REQUEST_TIME);
+        if (timeout.isNegative() || timeout.isZero()) {
+            control.checkpoint();
+        }
+
         HttpRequest request = HttpRequest.newBuilder()
             .uri(URI.create(url))
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/event-stream")
             .POST(HttpRequest.BodyPublishers.ofString(jsonRpcRequest))
-            .timeout(Duration.ofSeconds(60))
+            .timeout(timeout)
             .build();
 
+        var future = httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
         HttpResponse<String> response;
-        try {
-            response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        try (var registration = control.onCancel(() -> future.cancel(true))) {
+            response = future.get(Math.max(1L, timeout.toMillis()), TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
+            future.cancel(true);
             Thread.currentThread().interrupt();
-            throw new IOException("[MCP] HTTP request interrupted", e);
+            throw new IOException("[MCP] HTTP request interrupted; remote outcome is unknown", e);
+        } catch (CancellationException e) {
+            throw new IOException("[MCP] HTTP request cancelled; remote outcome is unknown", e);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            throw new IOException("[MCP] HTTP request timed out; remote outcome is unknown", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            throw new IOException("[MCP] HTTP request failed: "
+                + (cause != null ? cause.getMessage() : e.getMessage()), cause);
         }
 
         int status = response.statusCode();
         if (status >= 400) {
-            throw new IOException("[MCP] HTTP " + status + ": " + truncate(response.body(), 200));
+            throw new IOException("[MCP] HTTP " + status + ": "
+                + truncate(response.body(), 200));
         }
 
-        String contentType = response.headers().firstValue("Content-Type").orElse("application/json");
-        String body = response.body();
-
-        if (contentType.contains("text/event-stream")) {
-            return parseSse(body);
-        }
-        return body;
+        String contentType = response.headers().firstValue("Content-Type")
+            .orElse("application/json");
+        return contentType.contains("text/event-stream")
+            ? parseSse(response.body())
+            : response.body();
     }
 
-    /** 解析 SSE 流，提取 data: 行的 JSON */
     private String parseSse(String sseBody) {
         StringBuilder sb = new StringBuilder();
         try (BufferedReader reader = new BufferedReader(new StringReader(sseBody))) {
@@ -116,7 +136,9 @@ public class HttpSseTransport implements McpTransport {
                     }
                 }
             }
-        } catch (IOException ignored) {}
+        } catch (IOException ignored) {
+            // StringReader does not throw in practice.
+        }
         return sb.length() > 0 ? sb.toString() : sseBody;
     }
 
@@ -126,7 +148,7 @@ public class HttpSseTransport implements McpTransport {
 
     @Override
     public void stop() {
-        // 无持久连接需要关闭
+        // No persistent connection.
     }
 
     @Override
@@ -134,7 +156,9 @@ public class HttpSseTransport implements McpTransport {
         return !isCircuitOpen();
     }
 
-    private static String truncate(String s, int max) {
-        return s != null && s.length() > max ? s.substring(0, max) + "..." : s;
+    private static String truncate(String value, int max) {
+        return value != null && value.length() > max
+            ? value.substring(0, max) + "..."
+            : value;
     }
 }

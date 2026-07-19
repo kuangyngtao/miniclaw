@@ -21,6 +21,11 @@
         </dependency>
         <dependency>
             <groupId>com.clawkit</groupId>
+            <artifactId>clawkit-reliability</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.clawkit</groupId>
             <artifactId>clawkit-provider</artifactId>
             <version>${project.version}</version>
         </dependency>

@@ -16,7 +16,8 @@
 
 | 模块 | 公共职责 | 禁止承担 |
 | --- | --- | --- |
-| `clawkit-tools` | Tool 契约、结构化执行结果、内置工具、MCP adapter、安全拦截 | Agent loop、CLI、Provider 协议 |
+| `clawkit-tools` | Tool 契约、结构化执行结果、内置工具、MCP adapter、安全拦截、ExecutionControl/ActionDescriptor/OutputEnvelope 契约 | Agent loop、CLI、Provider 协议 |
+| `clawkit-reliability` | CancellationTree、BudgetLedger、失败决策表、Attempt journal/状态机、目标互斥、SideEffectGate、DeterministicVerifier、RecoveryScanner | Agent loop、CLI、Provider 协议、具体 Ops 领域 |
 | `clawkit-provider` | 模型请求、响应解析、流式协议、重试、熔断、降级 | 工具执行、上下文压缩、业务决策 |
 | `clawkit-context` | Prompt 组装、预算、压缩、消息裁剪、Skill 上下文 | 会话持久化、工具副作用 |
 | `clawkit-memory` | 记忆存储、检索、去重、冲突和衰减 | Agent 流程 |
@@ -28,9 +29,9 @@
 依赖约束：
 
 - 依赖必须单向、显式、无循环。
-- `tools`、`memory` 不依赖 `engine`、`cli`、`im`。
+- `tools`、`memory`、`reliability` 不依赖 `engine`、`cli`、`im`；`reliability` 只依赖 `tools` 契约。
 - `provider` 和 `context` 可以依赖稳定的 tools schema，但不能依赖 engine。
-- `observability` 只依赖生成指标所需的稳定数据契约，不反向控制 engine。
+- `observability` 只依赖生成指标所需的稳定数据契约，不反向控制 engine；RunEvent 写入失败不得改变控制面状态，Reliability Journal 写入失败必须阻断写动作。
 - `engine` 是运行时组装点，只消费抽象契约。
 - `cli`/`im` 只适配输入输出。composition root 可以实例化具体实现，但依赖必须在 POM 中显式声明。
 - 跨模块数据使用 record、enum、sealed interface 或窄接口；禁止以 `Map<String, Object>` 作为长期公共协议。

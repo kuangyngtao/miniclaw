@@ -55,6 +55,8 @@ final class SubAgentRunner {
             events.recorder(), null, null);
         AgentEngine child = new AgentEngine(deps, workDir, ThinkingMode.OFF, memoryIndex);
         child.configureAsChild(execution.runId());
+        // P1-G1：父取消级联到子 run，父子共享同一预算账本
+        child.attachParentControl(execution.control());
         child.setPermissionMode(com.clawkit.engine.PermissionMode.valueOf(
             execution.permissionMode().name().toUpperCase(Locale.ROOT)));
         child.setApprovalHandler(execution.approvalHandler());

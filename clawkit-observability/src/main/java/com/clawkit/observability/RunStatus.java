@@ -25,6 +25,10 @@ public enum RunStatus {
     EXECUTION_FAILED,
     /** 任务被安全拦截器阻止 */
     SAFETY_BLOCKED,
+    /** P1-G：run deadline 超出，Runtime 停止发起新调用 */
+    DEADLINE_EXCEEDED,
+    /** P1-G：token 预算耗尽，Runtime 停止发起新调用 */
+    BUDGET_EXHAUSTED,
     /** 未知错误 */
     UNKNOWN_ERROR,
     /** run 仍在执行中（初始状态） */

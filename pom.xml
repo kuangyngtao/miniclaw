@@ -18,6 +18,7 @@
         <module>clawkit-provider</module>
         <module>clawkit-context</module>
         <module>clawkit-tools</module>
+        <module>clawkit-reliability</module>
         <module>clawkit-memory</module>
         <module>clawkit-observability</module>
         <module>clawkit-im</module>

@@ -26,4 +26,6 @@ public final class RunEventType {
 
     public static final String COMPACT_TRIGGERED = "compact_triggered";
     public static final String COMPACT_COMPLETED = "compact_completed";
+
+    public static final String ATTEMPT_TRANSITION = "attempt_transition";
 }

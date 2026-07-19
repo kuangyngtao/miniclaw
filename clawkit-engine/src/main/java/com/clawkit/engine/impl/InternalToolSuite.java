@@ -73,19 +73,55 @@ final class InternalToolSuite {
     private void register() {
         router.register(TASK, (req, ctx) -> success(req.toolCallId(), TASK,
             subAgents.run(new ToolCall(req.toolCallId(), req.toolName(), req.arguments()),
-                ctx, memory.memoryIndex()), ToolMetadata.conservative(TASK)));
+                ctx, memory.memoryIndex()), writable(TASK, ToolRiskLevel.MEDIUM, false)),
+            writable(TASK, ToolRiskLevel.MEDIUM, false),
+            req -> taskDescriptor(req));
         router.register(SESSION_CONTEXT, (req, ctx) -> success(req.toolCallId(), SESSION_CONTEXT,
-            session.searchContext(req.arguments().path("query").asText("")), readOnly(SESSION_CONTEXT)));
+            session.searchContext(req.arguments().path("query").asText("")), readOnly(SESSION_CONTEXT)),
+            readOnly(SESSION_CONTEXT), null);
         router.register(SKILL_LOAD, (req, ctx) -> success(req.toolCallId(), SKILL_LOAD,
-            loadSkill(req.arguments().path("name").asText("")), readOnly(SKILL_LOAD)));
+            loadSkill(req.arguments().path("name").asText("")), readOnly(SKILL_LOAD)),
+            readOnly(SKILL_LOAD), null);
         router.register(SKILL_UNLOAD, (req, ctx) -> success(req.toolCallId(), SKILL_UNLOAD,
-            unloadSkill(req.arguments().path("name").asText("")), readOnly(SKILL_UNLOAD)));
+            unloadSkill(req.arguments().path("name").asText("")), readOnly(SKILL_UNLOAD)),
+            readOnly(SKILL_UNLOAD), null);
         router.register(MEMORY_SAVE, (req, ctx) -> success(req.toolCallId(), MEMORY_SAVE,
-            saveMemory(req.arguments()), writable(MEMORY_SAVE, ToolRiskLevel.MEDIUM, true)));
+            saveMemory(req.arguments()), writable(MEMORY_SAVE, ToolRiskLevel.MEDIUM, true)),
+            writable(MEMORY_SAVE, ToolRiskLevel.MEDIUM, true),
+            req -> internalDescriptor("internal.memory_save",
+                "memory:" + req.arguments().path("name").asText("unnamed"), req));
         router.register(REMEMBER, (req, ctx) -> success(req.toolCallId(), REMEMBER,
             remember(req.arguments().path("key").asText(""),
                 req.arguments().path("value").asText("")),
-            writable(REMEMBER, ToolRiskLevel.LOW, false)));
+            writable(REMEMBER, ToolRiskLevel.LOW, false)),
+            writable(REMEMBER, ToolRiskLevel.LOW, false),
+            req -> internalDescriptor("internal.remember",
+                "working-memory:" + req.arguments().path("key").asText("unnamed"), req));
+    }
+
+    /** task 描述符：目标按指令内容区分，互不相同的并行子任务不互斥。 */
+    private static com.clawkit.tools.action.ActionDescriptor taskDescriptor(
+            com.clawkit.tools.ToolExecutionRequest req) {
+        String instruction = req.arguments() != null
+            ? req.arguments().path("instruction").asText("") : "";
+        String key = com.clawkit.tools.action.Digests.sha256Hex(instruction).substring(0, 16);
+        return internalDescriptor("internal.task", "task:" + key, req);
+    }
+
+    /** 引擎内部状态变更的保守描述符：进程内可逆，确定性验证无外部断言。 */
+    private static com.clawkit.tools.action.ActionDescriptor internalDescriptor(
+            String actionCode, String targetName, com.clawkit.tools.ToolExecutionRequest req) {
+        String args = req.arguments() != null ? req.arguments().toString() : "{}";
+        return new com.clawkit.tools.action.ActionDescriptor(
+            actionCode,
+            com.clawkit.tools.action.ActionTargets.internalTarget(targetName),
+            com.clawkit.tools.action.Digests.sha256Hex(args),
+            ToolRiskLevel.MEDIUM,
+            com.clawkit.tools.action.Reversibility.REVERSIBLE,
+            com.clawkit.tools.action.ActionReliability.idempotentSetter(),
+            com.clawkit.tools.action.VerificationMode.MANUAL_REQUIRED,
+            java.util.List.of(), java.util.List.of(),
+            "re-run with corrected arguments", "engine-internal state");
     }
 
     private String loadSkill(String name) {

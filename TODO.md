@@ -15,18 +15,20 @@
 
 ## 当前代码事实
 
-截至 2026-07-18（P0-D 本地交付收口复核）：
+截至 2026-07-18（P1-G 写操作前强制门禁完成）：
 
-- 全量 `mvn -B -ntp clean verify` 通过：10 个 Reactor 模块、450 项测试，0 Failure、0 Error、0 Skipped；ArchUnit 10/10 硬规则通过，0 violations、0 frozen。
-- 四条主链已经收敛：
-  - ToolCallExecutor：工具调用唯一入口 ✅
+- 全量 `mvn -B -ntp clean verify` 通过：11 个 Reactor 模块、575 项测试，0 Failure、0 Error、0 Skipped；ArchUnit 10/10 硬规则通过，0 violations、0 frozen。
+- 新增 `clawkit-reliability` 模块（可靠性内核）：CancellationTree、BudgetLedger、FailureDecisionTable、ActionAttemptCoordinator、FileActionAttemptStore（CRC journal + force + 跨进程文件锁事务）、SideEffectGate、DeterministicVerifier、RecoveryScanner。
+- P1-G 七项门禁全部进入真实路径：取消/deadline/预算贯穿 ReAct、Plan、SubAgent、Provider、Tool、ProcessRunner；副作用工具必须生成 ActionDescriptor（无描述符 fail closed）；durable DISPATCH_INTENT 先于执行；结果未知 sticky 禁止自动重复写；MANUAL_REQUIRED 永不自动 VERIFIED_SUCCESS；进程启动恢复扫描 + reconcile；独立 Verification Run 隔离。定版设计与实现对照见 [docs/p1-g-design.md](docs/p1-g-design.md)。
+- 四条主链继续收敛：
+  - ToolCallExecutor：工具调用唯一入口，且是唯一 Side Effect Gate ✅
   - ContextPipeline：模型上下文与 compact 唯一入口，主 Agent/SubAgent 均接入 ✅
-  - ProviderGateway：模型请求唯一入口，无 raw-provider fallback ✅
-  - ApplicationBootstrap：CLI/IM 唯一装配点，运行时依赖构造期注入 ✅
-- PlanExecutor 已无状态化，每次执行接收 PlanExecutionContext；权限、审批、recorder、parentRunId 和 Gateway 均随本次运行传递。
+  - ProviderGateway：模型请求唯一入口 + 预算/取消硬拦截点，无 raw-provider fallback ✅
+  - ApplicationBootstrap：CLI/IM 唯一装配点 + 启动可靠性恢复扫描 ✅
+- PlanExecutor 已无状态化，每次执行接收 PlanExecutionContext（含 ExecutionControl）；权限、审批、recorder、parentRunId 和 Gateway 均随本次运行传递。
 - SessionStore、MemoryHooks、SkillRuntime、SlashCommandRouter、ApprovalConsole 已进入生产路径，不再只是类型占位。
 - Session 错误、Memory 生命周期和 CLI handler 下沉均已完成：SessionStoreException 携带稳定错误码，DefaultMemoryHooks 接管 recall/extract/save，命令业务已从 ClawkitApp 下沉到 CliCommandHandlers。
-- Engine 职责拆分已进入真实路径：WorkspaceStateStore、EngineEventHub、ConversationSession、EngineContextCoordinator、InternalToolSuite、SubAgentRunner、PlanRunCoordinator 分别接管工作区、事件、会话、上下文、内部工具、子 Agent 和 Plan runtime；AgentEngine 保留 ReAct 主循环与公共门面。
+- Engine 职责拆分已进入真实路径：WorkspaceStateStore、EngineEventHub、ConversationSession、EngineContextCoordinator、InternalToolSuite、SubAgentRunner、PlanRunCoordinator、VerificationRunLauncher 分别接管工作区、事件、会话、上下文、内部工具、子 Agent、Plan runtime 和独立验证；AgentEngine 保留 ReAct 主循环与公共门面。
 - P0-D 的配置、凭据边界、用户可读错误、Windows 启动、示例和分层文档已完成；收口提交、真实 CI、Docker 自动 smoke 和 CodeQL 已通过，版本已收敛为 `0.1.0`，仅余 Windows `-it` 人工 smoke 和 `v0.1.0` Release。
 - 真实 DeepSeek 文本和工具调用通过；Map 型工具 Schema 丢失结构的问题已修复并加入回归测试。产品仍仅读取 `CLAWKIT_API_KEY`，凭据不进入文件、日志或 diff。
 
@@ -34,11 +36,14 @@
 
 当前不再扩展新的 Runtime 底层抽象，按退出门禁推进：
 
-1. **D0 / P0-D 外部证据收口**：整理提交、真实 CI、Docker smoke 和首个 Release。
-2. **OPS-0A**：App Down 本地只读纵向切片，打通 Fixture、Evidence、Incident、Diagnosis、Evaluator 和 Cleanup。
-3. **OPS-0B**：PostgreSQL 锁等待黄金诊断及相同症状不同根因、旧证据、自恢复和 `INCONCLUSIVE` 对抗 Case。
-4. **OPS-1**：本地门禁通过后再启用远程只读靶机。
-5. **R1 + OPS-2A**：写操作前可靠性门禁满足后，才开放类型化审批修复。
+1. **D0 / P0-D 外部证据收口**：Windows `-it` 人工 smoke 和首个 Release（含 P1-G 变更的收口提交与真实 CI）。
+2. **P1-A 可靠性基础**：失败分类已由 P1-G 落地（FailureClass/决策表）；余下工具智能截断增强（PA-2 部分由 OutputEnvelope 覆盖）与任务感知 compact。
+3. **OPS-0A**：App Down 本地只读纵向切片，打通 Fixture、Evidence、Incident、Diagnosis、Evaluator 和 Cleanup。
+4. **OPS-0B**：PostgreSQL 锁等待黄金诊断及相同症状不同根因、旧证据、自恢复和 `INCONCLUSIVE` 对抗 Case。
+5. **OPS-1**：本地门禁通过后启用远程只读靶机（P1-G 已通过）。
+6. **OPS-2A**：审批修复（OPS-1 稳定后）；Ops 写工具注册必须满足 [docs/p1-g-design.md](docs/p1-g-design.md) 硬约束。
+7. **P2**：成本与效率（OPS-0B 基线数据驱动排序）。
+8. **OPS-2B / OPS-3**：有限自动修复与持续运行（OPS-2A 稳定后）。
 
 ## P0：可靠运行与安全重构
 
@@ -280,34 +285,64 @@
 
 ## P1：任务完成率与写操作前可靠性
 
-前置：P0-O/S/R 的关键链路稳定并可度量。OPS-0/OPS-1 的只读诊断不需要等待全部 P1，但任何远程写操作必须先满足 P1-G。
+P1-G 是 Runtime 安全基线的最后一道门禁——取消、结果未知、幂等和独立验证不是功能优化，而是防止 Agent 在不确定性下做出危险假设。P1-G 必须在任何远程操作（含 OPS-1 只读 SSH）前就位。
+
+P1-A 的前三项（失败分类、智能截断、任务感知 compact）直接影响 OPS 诊断链路的工程质量和调试效率，与 OPS-0A 并行推进。后三项（session 缓存、流式早停、Provider fallback）在 OPS-0B 基线数据出来后再排期。
 
 ### P1-G：Ops 写操作强制门禁
 
-- **[ ] 取消与预算贯穿**（engine / provider / tools）
-  取消信号、deadline、工具次数和 token/时间预算贯穿 ReAct、Plan、SubAgent、Provider 和 Tool。
-  验收：取消后不再启动新动作；已启动动作的终态可确认并记录。
+✅ **2026-07-18 完成 — 按定版设计 P1-G0..G6 全部落地**；设计与实现对照见 [docs/p1-g-design.md](docs/p1-g-design.md)。原 PG-1..PG-4 由定版方案的七项门禁覆盖并扩展。
 
-- **[ ] 远程结果未知模型**（ops / tools）
-  区分执行失败、客户端 timeout、服务端仍执行和结果未知，禁止把 timeout 直接当成无副作用失败。
-  验收：结果未知时只允许重新采证、Verification 或人工接管，不自动重复写动作。
+- **[x] PG-1 取消信号、deadline 和预算贯穿**（engine / provider / tools / reliability）
+  `ExecutionControl`（tools 契约）+ `CancellationTree`/`BudgetLedger`（reliability 实现）贯穿 ReAct loop、PlanExecutor、SubAgent、ProviderGateway、OpenAIProvider、ToolCallExecutor、ProcessRunner：
+  - `interrupt()` 级联取消；取消后不再启动新 Provider/工具调用；并行工具由 Future task group 中断并归并终态；进程树 SIGTERM→SIGKILL。
+  - Provider 单次请求 timeout = min(配置, 剩余 deadline)；每次尝试和退避前 checkpoint；阻塞请求可被取消中断；控制面停止不计入熔断。
+  - 预算在 ProviderGateway 预留→按真实 usage 结算；父子共享同一账本，子只能得到更小配额；耗尽 → `BUDGET_EXHAUSTED` 终态，不发起网络请求。
+  ✅ 验证：CancellationTreeTest/BudgetLedgerTest（18）、ExecutionControlThreadingTest（7）、DefaultProcessRunnerCancelTest（3）。
 
-- **[ ] Incident Attempt 幂等与恢复**（ops-loop）
-  每个写 Attempt 具备 idempotencyKey、次数上限、冷却、预算和目标互斥；进程恢复后识别执行中、结果未知和待验证状态。
-  验收：同一 Incident 不并发修复同一目标；重启进程不重复执行已提交动作。
+- **[x] PG-2 远程结果未知模型**（tools / engine）
+  `EffectCertainty` × `FailureClass`（固有 certainty，唯一事实来源）× `RecoveryDirective` + `FailureDecisionTable` 确定性映射；`ToolExecutionResult` V3 保守派生。
+  - timeout/中断/断网 → `EFFECT_UNKNOWN`，不被当作无副作用失败；engine 注入结构化警告（只允许重新采证，不得自动重复执行）。
+  - `OutputEnvelope` + `BoundedOutputCollector`：head/tail 环形缓冲/错误片段/sha256/脱敏，截断保真。
+  ✅ 验证：FailureClassTest、FailureDecisionTableTest、ToolExecutionResultReliabilityTest、BoundedOutputCollectorTest、UnknownOutcomeHandlingTest。
 
-- **[ ] 独立 Verification 隔离**（ops / engine）
-  Verification 使用新 runId、新上下文和重新采集的证据，不复用修复 Agent 的结论。
-  验收：能识别表面恢复、旧日志误导、业务事务仍失败和数据不一致。
+- **[x] PG-3 Attempt 幂等与恢复**（reliability）
+  `FileActionAttemptStore`（CRC journal + `force(true)` + 跨进程文件锁事务 + 幂等键唯一索引 + 持久化 target ownership）+ `ActionAttemptCoordinator`（连续无效果次数上限、冷却窗口、durable DISPATCH_INTENT、version CAS 防迟到反转）+ `SideEffectGate`（无 ActionDescriptor fail closed；journal 不可写阻断写动作）+ `RecoveryScanner`（重启恢复：pre-intent → 无副作用关闭；intent → OUTCOME_UNKNOWN → 确定性 reconcile）。
+  ✅ 验证：FileActionAttemptStoreTest（10）、ActionAttemptCoordinatorTest（9）、SideEffectGateTest（8）、RecoveryScannerTest（7）、FaultInjectionTest（3，含真实双 JVM 目标互斥与强杀窗口）。
 
-### P1-A：一般可靠性与完成率
+- **[x] PG-4 独立 Verification 隔离**（engine / reliability）
+  `VerificationRunLauncher`：新 root runId、全新 AgentEngine（空 session）、PLAN 只读、输入只含不可变 Action Contract；`DeterministicVerifier` 断言先行且模型结论不可推翻；`MANUAL_REQUIRED` 只能经 `manualConfirm` 进入 `VERIFIED_SUCCESS`；补偿是关联原 Attempt 的新 Attempt。
+  ✅ 验证：VerificationIsolationTest（2）、AttemptStateMachineTest（VERIFIED_SUCCESS 只能来自 VERIFYING）。
 
-- **[ ] 只读工具 session 缓存**：记录命中率，失效规则明确；Ops 证据默认不跨 Incident 缓存。
-- **[ ] 工具结果智能截断**：保留 head/tail、错误片段、匹配行、证据引用和截断原因。
-- **[ ] 任务感知 compact**：按任务类型保留不同证据，Ops 优先保留时间、来源、反证和未解决假设。
-- **[ ] Provider fallback**：超时、限流、熔断后切备用模型并记录指标；不改变当前 DeepSeek-only 交付范围，启用前需单独评审兼容和凭据边界。
-- **[ ] 流式早停**：坏协议或明显无效输出中止，不进入工具层。
-- **[ ] 失败分类与恢复策略**：区分可重试、需重新采证、需用户输入和不可恢复。
+  硬门禁（机械断言）：未验证动作标记成功 0；结果未知后自动重复写 0；同目标并发副作用 0；取消后启动新动作 0；无 ActionDescriptor 的副作用执行 0。远程写能力保持关闭；Ops 写工具注册以定版设计为前置门禁。
+
+### P1-A：一般可靠性与完成率（优先项）
+
+- **[~] PA-1 失败分类与恢复策略**（engine / provider / tools）
+  分类模型已由 P1-G 落地并更细：`FailureClass`（17 类，固有 EffectCertainty）+ `RecoveryDirective`（RETRY_ALLOWED≈RETRYABLE、RECOLLECT≈RE_EVIDENCE、USER_INPUT≈INPUT_REQUIRED、ABORT≈FATAL）+ `FailureDecisionTable` 确定性映射；Provider/工具/Engine 共用同一套契约。
+  剩余：Engine 对 `RETRY_ALLOWED` 的自动退避重试循环（≤3 次）尚未作为主动策略消费——当前副作用重试仅由 ActionAttemptCoordinator 的次数/冷却门禁约束，只读工具失败仍由模型自行决定重试。
+  验收（余项）：RETRY_ALLOWED 自动退避重试不超过 3 次；ABORT/USER_INPUT 不触发自动恢复。
+
+- **[ ] PA-2 工具结果智能截断**（tools）
+  当前截断只保留前 N 行，改为按工具类型保留关键内容：
+  - grep 结果：保留匹配行 + 上下文
+  - 日志读取：保留 ERROR/WARN + head/tail 时间戳
+  - pg_stat_activity / 系统视图：保留阻塞链关联行
+  - `ToolOutputStats` 中记录截断原因、截断前行数和保留策略
+  验收：BashTool/grep/log 输出截断后关键行不丢失；OutputStats 包含 truncationReason。
+
+- **[ ] PA-3 任务感知 compact**（context / engine）
+  ContextPipeline.compact() 增加 `CompactionHint` 参数：
+  - `GENERAL`：当前策略（按 token 权重裁剪）
+  - `OPS_DIAGNOSIS`：优先保留带时间戳的证据、反证、未解决假设；系统提示中注入 diagnoses 保留约束
+  compact 结果记录丢弃内容的摘要（被丢弃的 topic、时间范围和原因）。
+  验收：OPS_DIAGNOSIS 模式下不丢弃未解决的诊断假设；compact 后关键证据和反证仍在上下文中。
+
+### P1-A：一般可靠性与完成率（延后项）
+
+- **[ ] 只读工具 session 缓存**：记录命中率，失效规则明确；Ops 证据默认不跨 Incident 缓存。OPS-0B 完成后按实际数据排期。
+- **[ ] Provider fallback**：超时、限流、熔断后切备用模型。先积累 OPS-0A/0B 真实失败数据再决定策略。不改变 DeepSeek-only 交付范围。
+- **[ ] 流式早停**：坏协议或明显无效输出中止，不进入工具层。相对独立，OPS-0B 后按需排期。
 
 ## P2：成本与效率
 
@@ -321,7 +356,7 @@
 
 ## P3：Ops Loop 与高级扩展
 
-Ops Loop 按本地只读、黄金诊断、远程只读、审批修复、有限自动化和持续运行推进。只读阶段可在 P1-G 前开展；任何写操作必须等待 P1-G。完整架构和门禁见 [docs/ops-loop.md](docs/ops-loop.md)。
+Ops Loop 按 P1-G 安全基线、本地只读、黄金诊断、远程只读、审批修复、有限自动化和持续运行推进。任何生产及以上环境的操作必须等待 P1-G 全部通过。完整架构和门禁见 [docs/ops-loop.md](docs/ops-loop.md)。
 
 主线是“发现 → 采证 → 诊断 → Policy Gate → 修复 → 独立验证 → 回滚或补偿 → 复盘”，不包含自动修改业务代码。它是 clawkit 之上的运维应用，不是写入 AgentEngine 的垂类逻辑：
 
@@ -462,6 +497,10 @@ ops-fixtures/
 - 只能节省少量毫秒、但没有 benchmark 证明价值的微优化。
 
 ## 验证记录
+
+- 2026-07-18：**P1-G 写操作前强制门禁完成（P1-G0..G6）** — 新增 `clawkit-reliability` 模块与 `com.clawkit.tools.control/action` 契约族；取消/deadline/预算贯穿 ReAct、Plan、SubAgent、Provider、Tool、ProcessRunner；ToolCallExecutor 成为唯一 Side Effect Gate（无 ActionDescriptor fail closed）；CRC journal + `force(true)` + 跨进程文件锁 + 幂等索引 + 目标互斥；结果未知 sticky 禁止自动重复写；MANUAL_REQUIRED 永不自动 VERIFIED_SUCCESS；Bootstrap 启动恢复扫描 + 确定性 reconcile；独立 Verification Run 隔离。新增 68 项可靠性/门禁测试（含真实双 JVM 目标互斥、强杀窗口、journal 尾部/中段损坏、未来 schema、迟到响应 CAS 拒绝）。全量 `mvn -B -ntp clean verify`：11 模块、575 测试、0 失败；ArchUnit 10/10；`git diff --check` 通过；fat JAR 含 reliability 类且 `--version` smoke 通过；Dockerfile 补齐 reliability 模块。定版设计见 [docs/p1-g-design.md](docs/p1-g-design.md)。
+
+- 2026-07-18：路线重排 — P1-G 提至 OPS 之前作为写操作强制门禁，展开为 4 个可执行子任务（PG-1 取消贯穿、PG-2 结果未知模型、PG-3 Attempt 幂等、PG-4 独立 Verification）。P1-A 拆分为优先项（PA-1 失败分类、PA-2 智能截断、PA-3 任务感知 compact）和延后项（session 缓存、Provider fallback、流式早停）。OPS-1 进入条件增加 P1-G 通过。
 
 - 2026-07-18：P0-D 本地与 CI 交付收口 — 修复首次 GitHub CI 暴露的 whitespace 和 Dockerfile 漏模块问题；版本收敛为 `0.1.0`；Windows 启动器支持源码与发布包稳定文件名；Release 增加 Windows ZIP 与统一 SHA-256；Docker 去除不必要的 apt 联网层并补齐挂载、权限、非 root 和无 TTY smoke。`mvn -B -ntp clean verify` 10 模块、450 测试通过；`clawkit.cmd --version`、包内启动、Docker build/smoke、workflow YAML 和 `git diff --check` 通过。收口提交 `bf2466e` 已推送，真实 CI 和 CodeQL 成功；仅余 Windows `-it` 和 `v0.1.0` Release。
 - 2026-07-17：P0-D 本地实现与路线重排 — 配置、DeepSeek 凭据边界、`/config`、用户可读错误、Windows 启动、示例和分层文档完成；CI/Docker/Release workflow 已实现并保留外部证据门禁。真实 DeepSeek 文本和工具调用通过，修复 Map 型工具 Schema 序列化；`mvn -B -ntp clean verify` 10 模块、449 测试通过，ArchUnit 10/10 和 `git diff --check` 通过。Ops 路线收缩为 App Down 工程冒烟、PostgreSQL 锁等待黄金诊断、远程只读、写前可靠性门禁、审批修复和有限自动化。

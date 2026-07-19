@@ -73,6 +73,61 @@ public class EditTool implements Tool {
         return SCHEMA;
     }
 
+    /**
+     * P1-G4：编辑动作描述符。
+     * 尽可能预计算替换后内容 hash 作为确定性断言；
+     * 无法预计算（当前无匹配等）时保留空断言，precondition 仍记录当前文件 hash。
+     */
+    @Override
+    public com.clawkit.tools.action.ActionDescriptor describeAction(
+            com.clawkit.tools.ToolExecutionRequest req) {
+        JsonNode args = req.arguments();
+        if (args == null) return null;
+        JsonNode pathNode = args.get("path");
+        JsonNode oldNode = args.get("old_text");
+        JsonNode newNode = args.get("new_text");
+        if (pathNode == null || pathNode.asText().isEmpty()
+            || oldNode == null || newNode == null) {
+            return null; // 参数不可信 → gate fail closed
+        }
+        Path resolved = workDir.resolve(pathNode.asText()).normalize();
+        if (!resolved.startsWith(workDir)) {
+            return null; // 路径逃逸 → fail closed
+        }
+
+        java.util.List<String> preconditions = new java.util.ArrayList<>();
+        java.util.List<String> expectedEffects = new java.util.ArrayList<>();
+        try {
+            String original = Files.readString(resolved, StandardCharsets.UTF_8);
+            preconditions.add("pre-file-sha256:" + resolved + ":"
+                + com.clawkit.tools.action.Digests.sha256Hex(
+                    original.getBytes(StandardCharsets.UTF_8)));
+            try {
+                String replaced = fuzzyReplace(original, oldNode.asText(), newNode.asText());
+                expectedEffects.add("file-sha256:" + resolved + ":"
+                    + com.clawkit.tools.action.Digests.sha256Hex(
+                        replaced.getBytes(StandardCharsets.UTF_8)));
+            } catch (FuzzyMatchException ignored) {
+                // 当前内容无法完成替换：执行时会以同样原因失败，无需预置断言
+            }
+        } catch (IOException e) {
+            preconditions.add("pre-unreadable:" + resolved);
+        }
+
+        return new com.clawkit.tools.action.ActionDescriptor(
+            "file.edit",
+            com.clawkit.tools.action.ActionTargets.fileTarget(resolved),
+            com.clawkit.tools.action.Digests.sha256Hex(
+                pathNode.asText() + "|" + oldNode.asText() + "|" + newNode.asText()),
+            ToolRiskLevel.HIGH,
+            com.clawkit.tools.action.Reversibility.COMPENSATABLE,
+            com.clawkit.tools.action.ActionReliability.idempotentSetter(),
+            com.clawkit.tools.action.VerificationMode.DETERMINISTIC,
+            preconditions, expectedEffects,
+            "以 precondition 中的旧内容重写文件",
+            "single file: " + pathNode.asText());
+    }
+
     @Override
     public ToolMetadata metadata() {
         return new ToolMetadata(

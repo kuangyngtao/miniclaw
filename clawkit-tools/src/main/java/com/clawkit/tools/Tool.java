@@ -52,6 +52,17 @@ public interface Tool {
     }
 
     /**
+     * P1-G：根据本次请求参数生成动作描述符。
+     *
+     * <p>副作用工具（readOnly=false 或声明了 side effect）必须覆盖此方法；
+     * 返回 null 时统一执行器按 fail-closed 拒绝执行该副作用调用。
+     * 只读工具无需实现。
+     */
+    default com.clawkit.tools.action.ActionDescriptor describeAction(ToolExecutionRequest req) {
+        return null;
+    }
+
+    /**
      * 执行工具（V2 结构化接口）。
      * 默认实现适配旧 {@link #execute(String)}。
      */

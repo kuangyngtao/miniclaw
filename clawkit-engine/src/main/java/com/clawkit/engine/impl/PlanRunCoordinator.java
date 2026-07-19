@@ -49,7 +49,9 @@ final class PlanRunCoordinator {
 
     String run(String prompt, String runId, String parentRunId,
                PermissionMode permission, ThinkingMode thinking,
-               ApprovalHandler approval, Predicate<ExecutionPlan> confirmation) {
+               ApprovalHandler approval, Predicate<ExecutionPlan> confirmation,
+               com.clawkit.tools.control.ExecutionControl control) {
+        if (control == null) control = com.clawkit.tools.control.ExecutionControl.none();
         events.resetRun();
         events.record(new RunStartedPayload(ObservabilityRedactor.summarizeTask(prompt),
             workDir, "plan-exec", permission.name(), thinking.name(),
@@ -67,7 +69,7 @@ final class PlanRunCoordinator {
                     Message.system("You are a task planner. Output pure JSON only."),
                     Message.user(planningPrompt)), List.of()),
                     new RunScope(runId, parentRunId, 0,
-                        RunPhase.TWO_STAGE_PLAN, ExecutionMode.PLAN_EXECUTE));
+                        RunPhase.TWO_STAGE_PLAN, ExecutionMode.PLAN_EXECUTE, control));
                 planJson = response.content() != null ? response.content() : "";
             } catch (LLMException e) {
                 events.state(AgentState.ERROR, 0, Map.of("error", e.getMessage()));
@@ -95,7 +97,7 @@ final class PlanRunCoordinator {
 
             events.state(AgentState.EXECUTING, 0, Map.of("taskCount", plan.taskCount()));
             var context = new PlanExecutionContext(permission.toToolsMode(), approval,
-                events.recorder(), runId);
+                events.recorder(), runId, control);
             ExecutionPlan completed = executor.execute(plan, context);
             workspace.writePlan(formatCompletedPlan(completed));
             events.state(AgentState.REPLYING, completed.taskCount(), Map.of());
@@ -106,6 +108,25 @@ final class PlanRunCoordinator {
                     "计划未完成全部任务", runId, parentRunId);
             }
             return summary(completed);
+        } catch (com.clawkit.tools.control.ExecutionHaltedException halted) {
+            // P1-G1：控制面停止（取消/deadline/预算）映射为结构化终态
+            switch (halted.reason()) {
+                case CANCELLED -> {
+                    complete(RunStatus.INTERRUPTED, null, null, runId, parentRunId);
+                    return "[A-001] 计划执行已被用户中断。";
+                }
+                case DEADLINE_EXCEEDED -> {
+                    complete(RunStatus.DEADLINE_EXCEEDED, "A-006", halted.getMessage(),
+                        runId, parentRunId);
+                    return "[A-006] 计划执行超过 deadline，已停止。";
+                }
+                case BUDGET_EXHAUSTED -> {
+                    complete(RunStatus.BUDGET_EXHAUSTED, "A-007", halted.getMessage(),
+                        runId, parentRunId);
+                    return "[A-007] token 预算耗尽，计划执行已停止。";
+                }
+            }
+            throw new IllegalStateException("unreachable halt reason", halted);
         } catch (Exception e) {
             log.error("[PlanExecute] unhandled failure", e);
             complete(RunStatus.UNKNOWN_ERROR, "UNEXPECTED",

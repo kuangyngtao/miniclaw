@@ -125,6 +125,34 @@ public class BashTool implements Tool {
         return SCHEMA;
     }
 
+    /**
+     * P1-G4：任意 Shell 的动作描述符。
+     * 目标按命令内容划分：结果未知只 sticky 锁定同一命令的重复执行，
+     * 不冻结整个工作区的其他 shell 动作；不可逆、无可信恢复能力，
+     * 验证策略 MANUAL_REQUIRED（可记录动作，但不得自动进入 VERIFIED_SUCCESS）。
+     */
+    @Override
+    public com.clawkit.tools.action.ActionDescriptor describeAction(
+            com.clawkit.tools.ToolExecutionRequest req) {
+        JsonNode args = req.arguments();
+        if (args == null) return null;
+        JsonNode cmdNode = args.get("command");
+        if (cmdNode == null || cmdNode.asText().isEmpty()) return null;
+        String command = cmdNode.asText();
+        String commandDigest = com.clawkit.tools.action.Digests.sha256Hex(command);
+        return new com.clawkit.tools.action.ActionDescriptor(
+            "bash.exec",
+            com.clawkit.tools.action.ActionTargets.shellTarget(workDir)
+                + ":cmd:" + commandDigest.substring(0, 16),
+            commandDigest,
+            ToolRiskLevel.HIGH,
+            com.clawkit.tools.action.Reversibility.IRREVERSIBLE,
+            com.clawkit.tools.action.ActionReliability.none(),
+            com.clawkit.tools.action.VerificationMode.MANUAL_REQUIRED,
+            java.util.List.of(), java.util.List.of(),
+            "", "workspace-wide shell: " + shellCmd(command));
+    }
+
     @Override
     public ToolMetadata metadata() {
         return new ToolMetadata(
@@ -163,18 +191,34 @@ public class BashTool implements Tool {
 
             ProcessRunner.ProcessExecutionRequest pr = new ProcessRunner.ProcessExecutionRequest(
                 workDir, command, useShell, useFlag,
-                Duration.ofSeconds(TIMEOUT_SECONDS), MAX_OUTPUT_BYTES, null);
+                Duration.ofSeconds(TIMEOUT_SECONDS), MAX_OUTPUT_BYTES, null,
+                req.scope() != null ? req.scope().control() : null);
             ProcessRunner.ProcessExecutionResult presult = processRunner.execute(pr);
             long duration = System.currentTimeMillis() - start;
 
             String output = formatOutput(presult);
             ToolOutputStats stats = new ToolOutputStats(
                 presult.totalOutputBytes(), presult.totalOutputBytes(), presult.truncated());
+            com.clawkit.tools.OutputEnvelope envelope =
+                combineEnvelopes(presult.stdoutEnvelope(), presult.stderrEnvelope());
+
+            if (presult.cancelled()) {
+                // 派发前取消 → 确认无副作用；进程已启动后取消 → 结果未知
+                boolean beforeDispatch = "[CANCELLED_BEFORE_START]".equals(presult.stderr());
+                return ToolExecutionResult.cancelled(
+                    req.toolCallId(), name(),
+                    beforeDispatch
+                        ? "命令在启动前已被取消。"
+                        : "命令执行中被取消，进程树已终止；命令可能已产生部分副作用。\n" + truncate(output),
+                    duration, metadata(), beforeDispatch)
+                    .withOutputEnvelope(envelope);
+            }
 
             if (presult.timedOut()) {
                 output = output + "\n[警告: 命令执行超时(" + TIMEOUT_SECONDS + "s)，已被系统强制终止。]";
                 return ToolExecutionResult.timedOut(
-                    req.toolCallId(), name(), truncate(output), duration, stats, metadata());
+                    req.toolCallId(), name(), truncate(output), duration, stats, metadata())
+                    .withOutputEnvelope(envelope);
             }
 
             if (presult.exitCode() != 0) {
@@ -183,14 +227,16 @@ public class BashTool implements Tool {
                     "[exit=" + presult.exitCode() + "]\n" + truncate(output),
                     ToolExecutionStatus.NON_ZERO_EXIT,
                     ToolError.fatal("NON_ZERO_EXIT", "Process exited with code " + presult.exitCode()),
-                    duration, stats, presult.exitCode(), metadata(), null);
+                    duration, stats, presult.exitCode(), metadata(), null)
+                    .withOutputEnvelope(envelope);
             }
 
             if (output.isEmpty()) {
                 output = "命令执行成功，无终端输出。";
             }
             return ToolExecutionResult.success(
-                req.toolCallId(), name(), truncate(output), duration, stats, metadata());
+                req.toolCallId(), name(), truncate(output), duration, stats, metadata())
+                .withOutputEnvelope(envelope);
 
         } catch (Exception e) {
             long duration = System.currentTimeMillis() - start;
@@ -267,19 +313,61 @@ public class BashTool implements Tool {
             if (!sb.isEmpty()) sb.append('\n');
             sb.append("[stderr]\n").append(pr.stderr());
         }
+        // P1-G2：截断时附加错误片段，保证错误在中段也不丢失
+        var envelope = combineEnvelopes(pr.stdoutEnvelope(), pr.stderrEnvelope());
+        if (envelope != null && envelope.truncated() && !envelope.errorExcerpts().isEmpty()) {
+            sb.append("\n[错误片段]");
+            for (String excerpt : envelope.errorExcerpts()) {
+                sb.append('\n').append(excerpt);
+            }
+        }
         return sb.toString();
+    }
+
+    /**
+     * 合并 stdout/stderr 信封为结果级信封。
+     * head 优先 stdout；tail 优先 stderr（错误更可能在 stderr 尾部）；
+     * sha256 为两路 hash 的派生组合。
+     */
+    static com.clawkit.tools.OutputEnvelope combineEnvelopes(
+            com.clawkit.tools.OutputEnvelope stdout, com.clawkit.tools.OutputEnvelope stderr) {
+        if (stdout == null && stderr == null) return null;
+        if (stdout == null) return stderr;
+        if (stderr == null) return stdout;
+        var excerpts = new java.util.ArrayList<>(stdout.errorExcerpts());
+        excerpts.addAll(stderr.errorExcerpts());
+        String head = !stdout.head().isEmpty() ? stdout.head() : stderr.head();
+        String tail = !stderr.tail().isEmpty() ? stderr.tail() : stdout.tail();
+        String reason = stdout.truncationReason() != null
+            ? stdout.truncationReason() : stderr.truncationReason();
+        String sha = com.clawkit.tools.action.Digests.sha256Hex(
+            "stdout:" + stdout.sha256() + " stderr:" + stderr.sha256());
+        long total = stdout.totalBytes() + stderr.totalBytes();
+        long returned = head.getBytes(java.nio.charset.StandardCharsets.UTF_8).length
+            + tail.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        returned = Math.min(total, returned);
+        return new com.clawkit.tools.OutputEnvelope(
+            head, tail, excerpts,
+            total, returned, total - returned,
+            total > returned ? reason : null, sha, java.util.List.of(),
+            stdout.redactionApplied() || stderr.redactionApplied(), "UTF-8");
     }
 
     private static String shellCmd(String cmd) {
         return cmd.length() <= 80 ? cmd : cmd.substring(0, 77) + "...";
     }
 
-    /** 长度截断保护 — 防 OOM */
+    /**
+     * 长度截断保护 — 纯 OOM 兜底。
+     * P1-G2 后语义截断由 BoundedOutputCollector（head/tail/错误片段）完成，
+     * 此处上限放宽为 2×MAX_OUTPUT_BYTES，仅防御异常超长拼装。
+     */
     private String truncate(String output) {
+        int cap = MAX_OUTPUT_BYTES * 2;
         byte[] bytes = output.getBytes(StandardCharsets.UTF_8);
-        if (bytes.length > MAX_OUTPUT_BYTES) {
-            String head = new String(bytes, 0, MAX_OUTPUT_BYTES, StandardCharsets.UTF_8);
-            return head + "\n\n...[终端输出过长，已截断至前 " + MAX_OUTPUT_BYTES + " 字节]...";
+        if (bytes.length > cap) {
+            String head = new String(bytes, 0, cap, StandardCharsets.UTF_8);
+            return head + "\n\n...[终端输出过长，已截断至前 " + cap + " 字节]...";
         }
         return output;
     }

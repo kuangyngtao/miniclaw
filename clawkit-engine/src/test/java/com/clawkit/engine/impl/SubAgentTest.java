@@ -17,12 +17,15 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class SubAgentTest {
 
     private static final ObjectMapper mapper = new ObjectMapper();
+    @TempDir
+    java.nio.file.Path workDir;
 
     // === 测试工具 ===
     private static final List<String> executedToolNames = Collections.synchronizedList(new ArrayList<>());
@@ -33,6 +36,28 @@ class SubAgentTest {
             @Override public String description() { return "test tool: " + name; }
             @Override public String inputSchema() { return "{}"; }
             @Override public boolean isReadOnly() { return readOnly; }
+            @Override public com.clawkit.tools.ToolMetadata metadata() {
+                return new com.clawkit.tools.ToolMetadata(name, "test tool: " + name, null, null,
+                    new com.clawkit.tools.ToolBehavior(readOnly,
+                        readOnly ? com.clawkit.tools.ToolRiskLevel.LOW : com.clawkit.tools.ToolRiskLevel.MEDIUM,
+                        false, false, false, false, java.util.Set.of()),
+                    com.clawkit.tools.ToolExecutionPolicy.defaults(),
+                    com.clawkit.tools.ToolMetadataProvenance.builtin(name));
+            }
+            @Override public com.clawkit.tools.action.ActionDescriptor describeAction(
+                    com.clawkit.tools.ToolExecutionRequest req) {
+                if (readOnly) return null;
+                // P1-G4：副作用测试工具提供 per-args 描述符（DETERMINISTIC 空断言 → 即时收敛）
+                String args = req.arguments() != null ? req.arguments().toString() : "{}";
+                String digest = com.clawkit.tools.action.Digests.sha256Hex(name + "|" + args);
+                return new com.clawkit.tools.action.ActionDescriptor(
+                    "test." + name, "test:" + name + ":" + digest.substring(0, 16), digest,
+                    com.clawkit.tools.ToolRiskLevel.MEDIUM,
+                    com.clawkit.tools.action.Reversibility.REVERSIBLE,
+                    com.clawkit.tools.action.ActionReliability.idempotentSetter(),
+                    com.clawkit.tools.action.VerificationMode.DETERMINISTIC,
+                    java.util.List.of(), java.util.List.of(), "", "");
+            }
             @Override public Result<String> execute(String arguments) {
                 executedToolNames.add(name);
                 return new Result.Ok<>("ok: " + name);
@@ -88,7 +113,7 @@ class SubAgentTest {
             }
         };
 
-        AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
+        AgentEngine engine = new AgentEngine(provider, registry, workDir.toString());
         String result = engine.run("find java files");
 
         assertThat(result).contains("analysis complete");
@@ -133,7 +158,7 @@ class SubAgentTest {
             }
         };
 
-        AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
+        AgentEngine engine = new AgentEngine(provider, registry, workDir.toString());
         // ToolCallExecutor requires ApprovalHandler for non-read-only tools in AUTO/ASK mode
         engine.setApprovalHandler(req -> new ApprovalResult.Approve());
         String result = engine.run("create config");
@@ -180,7 +205,7 @@ class SubAgentTest {
             }
         };
 
-        AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
+        AgentEngine engine = new AgentEngine(provider, registry, workDir.toString());
         String result = engine.run("search both");
 
         assertThat(result).contains("all searches done");
@@ -217,7 +242,7 @@ class SubAgentTest {
             }
         };
 
-        AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
+        AgentEngine engine = new AgentEngine(provider, registry, workDir.toString());
         String result = engine.run("test no recursion");
         assertThat(result).contains("main done");
     }
@@ -237,7 +262,7 @@ class SubAgentTest {
             }
         };
 
-        AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
+        AgentEngine engine = new AgentEngine(provider, registry, workDir.toString());
         engine.setPermissionMode(PermissionMode.PLAN);
         String result = engine.run("plan this");
         assertThat(result).contains("planning complete");
@@ -278,7 +303,7 @@ class SubAgentTest {
             }
         };
 
-        AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
+        AgentEngine engine = new AgentEngine(provider, registry, workDir.toString());
         engine.setPermissionMode(PermissionMode.ASK);
         engine.setApprovalHandler(req -> {
             permissionChecked.add(req.toolName());

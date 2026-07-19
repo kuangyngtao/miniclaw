@@ -16,16 +16,59 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class PermissionModeTest {
 
     private static final ObjectMapper mapper = new ObjectMapper();
+    @TempDir
+    java.nio.file.Path workDir;
 
     // === 共享 Registry：含读工具 (glob) 和写工具 (bash) ===
     static class DualToolRegistry implements Registry {
         final List<ToolCall> executedCalls = Collections.synchronizedList(new ArrayList<>());
+
+        /** P1-G4：副作用工具必须能生成 ActionDescriptor，否则 gate fail-closed */
+        private final Tool bashTool = new Tool() {
+            @Override public String name() { return "bash"; }
+            @Override public String description() { return "execute shell command"; }
+            @Override public String inputSchema() { return "{}"; }
+            @Override public boolean isReadOnly() { return false; }
+            @Override public com.clawkit.tools.ToolMetadata metadata() {
+                return new com.clawkit.tools.ToolMetadata("bash", "execute shell command", null, null,
+                    new com.clawkit.tools.ToolBehavior(false, com.clawkit.tools.ToolRiskLevel.MEDIUM,
+                        false, false, false, false, java.util.Set.of()),
+                    com.clawkit.tools.ToolExecutionPolicy.defaults(),
+                    com.clawkit.tools.ToolMetadataProvenance.builtin("bash"));
+            }
+            @Override public com.clawkit.tools.action.ActionDescriptor describeAction(
+                    com.clawkit.tools.ToolExecutionRequest req) {
+                String args = req.arguments() != null ? req.arguments().toString() : "{}";
+                String digest = com.clawkit.tools.action.Digests.sha256Hex(args);
+                return new com.clawkit.tools.action.ActionDescriptor(
+                    "test.bash", "test:bash:" + digest.substring(0, 16), digest,
+                    com.clawkit.tools.ToolRiskLevel.MEDIUM,
+                    com.clawkit.tools.action.Reversibility.REVERSIBLE,
+                    com.clawkit.tools.action.ActionReliability.idempotentSetter(),
+                    com.clawkit.tools.action.VerificationMode.DETERMINISTIC,
+                    java.util.List.of(), java.util.List.of(), "", "");
+            }
+            @Override public com.clawkit.tools.Result<String> execute(String arguments) {
+                return new com.clawkit.tools.Result.Ok<>("ok: bash");
+            }
+        };
+
+        private final Tool globTool = new Tool() {
+            @Override public String name() { return "glob"; }
+            @Override public String description() { return "find files by pattern"; }
+            @Override public String inputSchema() { return "{}"; }
+            @Override public boolean isReadOnly() { return true; }
+            @Override public com.clawkit.tools.Result<String> execute(String arguments) {
+                return new com.clawkit.tools.Result.Ok<>("ok: glob");
+            }
+        };
 
         @Override
         public List<ToolDefinition> getAvailableTools() {
@@ -46,6 +89,8 @@ class PermissionModeTest {
 
         @Override
         public Optional<Tool> lookup(String name) {
+            if ("bash".equals(name)) return Optional.of(bashTool);
+            if ("glob".equals(name)) return Optional.of(globTool);
             return Optional.empty();
         }
 
@@ -82,7 +127,7 @@ class PermissionModeTest {
     void shouldFilterToolsAndBlockWriteInPlanMode() {
         DualToolRegistry registry = new DualToolRegistry();
         PlanBypassProvider provider = new PlanBypassProvider();
-        AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
+        AgentEngine engine = new AgentEngine(provider, registry, workDir.toString());
         engine.setPermissionMode(PermissionMode.PLAN);
 
         String result = engine.run("test");
@@ -112,7 +157,7 @@ class PermissionModeTest {
     void shouldAllowReadToolInPlanMode() {
         DualToolRegistry registry = new DualToolRegistry();
         PlanReadOnlyProvider provider = new PlanReadOnlyProvider();
-        AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
+        AgentEngine engine = new AgentEngine(provider, registry, workDir.toString());
         engine.setPermissionMode(PermissionMode.PLAN);
 
         engine.run("find java files");
@@ -142,7 +187,7 @@ class PermissionModeTest {
     void shouldExecuteWhenUserApprovesInAskMode() {
         DualToolRegistry registry = new DualToolRegistry();
         AskWriteProvider provider = new AskWriteProvider();
-        AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
+        AgentEngine engine = new AgentEngine(provider, registry, workDir.toString());
         engine.setPermissionMode(PermissionMode.ASK);
         engine.setApprovalHandler(req -> new ApprovalResult.Approve());
 
@@ -156,7 +201,7 @@ class PermissionModeTest {
     void shouldBlockWhenUserDeniesInAskMode() {
         DualToolRegistry registry = new DualToolRegistry();
         AskWriteProvider provider = new AskWriteProvider();
-        AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
+        AgentEngine engine = new AgentEngine(provider, registry, workDir.toString());
         engine.setPermissionMode(PermissionMode.ASK);
         engine.setApprovalHandler(req -> new ApprovalResult.Reject("denied"));
 
@@ -190,7 +235,7 @@ class PermissionModeTest {
     void shouldAskOnlyForWriteToolInAskMode() {
         DualToolRegistry registry = new DualToolRegistry();
         AskMixedProvider provider = new AskMixedProvider();
-        AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
+        AgentEngine engine = new AgentEngine(provider, registry, workDir.toString());
         engine.setPermissionMode(PermissionMode.ASK);
 
         List<String> checkedCalls = new ArrayList<>();
@@ -211,7 +256,7 @@ class PermissionModeTest {
     void shouldExecuteAllToolsWithoutChecksInAutoMode() {
         DualToolRegistry registry = new DualToolRegistry();
         AskWriteProvider provider = new AskWriteProvider();
-        AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
+        AgentEngine engine = new AgentEngine(provider, registry, workDir.toString());
         engine.setPermissionMode(PermissionMode.AUTO);
 
         engine.setApprovalHandler(req -> {
@@ -229,7 +274,7 @@ class PermissionModeTest {
     @Test
     void shouldDefaultToAutoMode() {
         DualToolRegistry registry = new DualToolRegistry();
-        AgentEngine engine = new AgentEngine(null, registry, "/tmp/work");
+        AgentEngine engine = new AgentEngine(null, registry, workDir.toString());
 
         assertThat(engine.permissionMode()).isEqualTo(PermissionMode.AUTO);
     }
@@ -258,7 +303,7 @@ class PermissionModeTest {
     void shouldExecuteParallelReadsInAskModeWithoutConfirmation() {
         DualToolRegistry registry = new DualToolRegistry();
         MultiReadProvider provider = new MultiReadProvider();
-        AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
+        AgentEngine engine = new AgentEngine(provider, registry, workDir.toString());
         engine.setPermissionMode(PermissionMode.ASK);
         engine.setApprovalHandler(req -> {
             throw new AssertionError("should not ask for read tools");
@@ -273,7 +318,7 @@ class PermissionModeTest {
     void shouldExecuteParallelReadsInPlanMode() {
         DualToolRegistry registry = new DualToolRegistry();
         MultiReadProvider provider = new MultiReadProvider();
-        AgentEngine engine = new AgentEngine(provider, registry, "/tmp/work");
+        AgentEngine engine = new AgentEngine(provider, registry, workDir.toString());
         engine.setPermissionMode(PermissionMode.PLAN);
 
         engine.run("find all");

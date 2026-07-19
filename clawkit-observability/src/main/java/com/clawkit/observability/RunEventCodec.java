@@ -37,6 +37,7 @@ public final class RunEventCodec {
         TYPE_BY_CLASS.put(ApprovalDecidedPayload.class, RunEventType.APPROVAL_DECIDED);
         TYPE_BY_CLASS.put(CompactTriggeredPayload.class, RunEventType.COMPACT_TRIGGERED);
         TYPE_BY_CLASS.put(CompactCompletedPayload.class, RunEventType.COMPACT_COMPLETED);
+        TYPE_BY_CLASS.put(AttemptTransitionPayload.class, RunEventType.ATTEMPT_TRANSITION);
 
         CLASS_BY_TYPE = new LinkedHashMap<>();
         for (var entry : TYPE_BY_CLASS.entrySet()) {

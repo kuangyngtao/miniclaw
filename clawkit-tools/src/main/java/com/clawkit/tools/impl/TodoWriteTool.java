@@ -76,6 +76,27 @@ public class TodoWriteTool implements Tool {
             + "status: pending（待做）, in_progress（进行中，一次只能一个）, completed（已完成）, failed（失败）, skipped（跳过）。";
     }
 
+    /**
+     * P1-G4：会话级任务清单写入的动作描述符。
+     * 进程内可逆的设置型状态，无外部确定性断言。
+     */
+    @Override
+    public com.clawkit.tools.action.ActionDescriptor describeAction(
+            com.clawkit.tools.ToolExecutionRequest req) {
+        String args = req.arguments() != null ? req.arguments().toString() : "{}";
+        return new com.clawkit.tools.action.ActionDescriptor(
+            "todo.write",
+            com.clawkit.tools.action.ActionTargets.internalTarget("todo-list:"
+                + (req.scope() != null && req.scope().runId() != null ? req.scope().runId() : "session")),
+            com.clawkit.tools.action.Digests.sha256Hex(args),
+            ToolRiskLevel.MEDIUM,
+            com.clawkit.tools.action.Reversibility.REVERSIBLE,
+            com.clawkit.tools.action.ActionReliability.idempotentSetter(),
+            com.clawkit.tools.action.VerificationMode.MANUAL_REQUIRED,
+            java.util.List.of(), java.util.List.of(),
+            "重写任务列表即可恢复", "session todo list");
+    }
+
     @Override
     public String inputSchema() {
         return SCHEMA;

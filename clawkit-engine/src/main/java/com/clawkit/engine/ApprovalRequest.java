@@ -19,16 +19,24 @@ public record ApprovalRequest(
     String parameters,
     String llmIntent,
     // ── V2 字段 ──────────────────────────────────────────────────
-    ToolMetadata metadata
+    ToolMetadata metadata,
+    // ── P1-G 字段：授权必须绑定不可变 Action Contract ──────────
+    String actionFingerprint
 ) {
     /** 从 ToolMetadata 和 ToolCall 构造（V2） */
     public static ApprovalRequest from(ToolMetadata metadata, ToolCall call, Message lastAssistantMsg) {
+        return from(metadata, call, lastAssistantMsg, null);
+    }
+
+    public static ApprovalRequest from(ToolMetadata metadata, ToolCall call,
+                                       Message lastAssistantMsg, String actionFingerprint) {
         String toolName = call.name();
         ToolRiskLevel risk = metadata.riskLevel();
         String riskDesc = describeRisk(metadata);
         String params = formatParams(call.arguments());
         String intent = extractIntent(lastAssistantMsg);
-        return new ApprovalRequest(toolName, risk, riskDesc, params, intent, metadata);
+        return new ApprovalRequest(toolName, risk, riskDesc, params, intent, metadata,
+            actionFingerprint);
     }
 
     /**

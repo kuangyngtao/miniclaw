@@ -227,6 +227,13 @@ public class AgentEngine implements AgentLoop {
     private volatile ApprovalHandler approvalHandler;
     private final ApprovalGrantCache approvalCache = new DefaultApprovalGrantCache();
     private volatile boolean interrupted;
+    // P1-G1：run 级取消/deadline/预算控制
+    private volatile com.clawkit.reliability.CancellationTree currentControl;
+    private volatile com.clawkit.tools.control.ExecutionControl parentControl;
+    private volatile java.time.Duration runDeadline;
+    private volatile Long runTokenBudget;
+    private volatile Long runProviderCallBudget;
+    private volatile Long runToolCallBudget;
     volatile int lastRunTurns;
     volatile boolean enableSubAgents = true;
     private final java.util.concurrent.atomic.AtomicBoolean busy = new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -234,6 +241,8 @@ public class AgentEngine implements AgentLoop {
     private volatile String currentRunId;
     private volatile String parentRunId;
     private final ToolCallExecutor toolCallExecutor;
+    // P1-G4：唯一 Side Effect Gate（Attempt 生命周期 + 幂等 + 目标互斥）
+    private final com.clawkit.reliability.gate.SideEffectGate sideEffectGate;
     private final InternalToolRouter internalToolRouter = new InternalToolRouter();
     private final SubAgentRunner subAgentRunner;
     private final InternalToolSuite internalTools;
@@ -283,7 +292,8 @@ public class AgentEngine implements AgentLoop {
             deps.contextPipeline(), this::summarizeForCompact);
         this.thinkingMode = thinkingMode;
         this.l5MemoryIndex = memoryIndex != null ? memoryIndex : "";
-        this.toolCallExecutor = new ToolCallExecutor(registry);
+        this.sideEffectGate = createSideEffectGate(workDir, deps);
+        this.toolCallExecutor = new ToolCallExecutor(registry, sideEffectGate);
         this.events = new EngineEventHub(deps.runRecorder());
         this.subAgentRunner = new SubAgentRunner(
             registry, providerGateway, context, workDir, events);
@@ -321,7 +331,8 @@ public class AgentEngine implements AgentLoop {
         events.onReasoning(onReasoning);
         events.setToken(onToken);
         this.l5MemoryIndex = memoryIndex != null ? memoryIndex : "";
-        this.toolCallExecutor = new ToolCallExecutor(registry);
+        this.sideEffectGate = createSideEffectGate(workDir, null);
+        this.toolCallExecutor = new ToolCallExecutor(registry, sideEffectGate);
         // Compatibility constructors still use the same gateway and context pipeline.
         this.providerGateway = new com.clawkit.engine.impl.ObservingProviderGateway(
             provider, new com.clawkit.observability.CompositeRunRecorder());
@@ -338,11 +349,25 @@ public class AgentEngine implements AgentLoop {
         log.info("[Engine] 引擎启动，锁定工作区: {}, 思考模式: {}, 执行模式: {}",
             workDir, thinkingMode, executionMode);
 
+        // P1-G1：每次 run 建立控制根（SubAgent 从父控制派生，共享预算并级联取消）
+        com.clawkit.reliability.CancellationTree control = createRunControl();
+        this.currentControl = control;
+        if (interrupted) {
+            control.cancel();
+        }
+
         if (executionMode == ExecutionMode.PLAN_EXECUTE) {
             String runId = generateRunId();
             this.currentRunId = runId;
-            return planCoordinator.run(userPrompt, runId, parentRunId,
-                permissionMode, thinkingMode, approvalHandler, onPlanReady);
+            try {
+                return planCoordinator.run(userPrompt, runId, parentRunId,
+                    permissionMode, thinkingMode, approvalHandler, onPlanReady, control);
+            } finally {
+                interrupted = false;
+                if (currentControl == control) {
+                    currentControl = null;
+                }
+            }
         }
 
         String currentRunId = generateRunId();
@@ -366,7 +391,7 @@ public class AgentEngine implements AgentLoop {
 
         try {
         while (true) {
-            if (interrupted) {
+            if (interrupted || control.isCancelled()) {
                 interrupted = false;
                 fireState(AgentState.INTERRUPTED, turnCount);
                 log.info("[Engine] 被用户中断，退出循环");
@@ -592,10 +617,26 @@ public class AgentEngine implements AgentLoop {
                 (p, rid, prid, tn, t) -> {
                     events.record(p, rid, prid, tn, t);
                 },
-                internalToolRouter, approvalCache);
+                internalToolRouter, approvalCache, control);
             var batchResult = toolCallExecutor.executeBatch(calls, execCtx);
             for (ToolExecutionResult result : batchResult.results()) {
                 fireToolEnd(result);
+            }
+            // P1-G2：结果未知/部分执行不是"确定失败"——注入结构化安全警告（ephemeral）
+            for (ToolExecutionResult result : batchResult.results()) {
+                var certainty = result.effectCertainty();
+                if (certainty == com.clawkit.tools.action.EffectCertainty.EFFECT_UNKNOWN) {
+                    ephemeralContext.runtime().add(Message.system(
+                        "[Runtime] 工具 " + result.toolName() + " 的执行结果未知（"
+                        + (result.failureClass() != null ? result.failureClass() : "UNCLASSIFIED")
+                        + "）。副作用可能已发生、可能未发生、也可能仍在进行。"
+                        + "不要假设该调用已失败或已成功；只允许重新采证（读取状态确认），"
+                        + "不得自动重复执行同一动作。"));
+                } else if (certainty == com.clawkit.tools.action.EffectCertainty.PARTIAL_EFFECT) {
+                    ephemeralContext.runtime().add(Message.system(
+                        "[Runtime] 工具 " + result.toolName() + " 明确部分执行。"
+                        + "必须先核实已生效的部分，再决定补偿或继续；不得直接重复执行同一动作。"));
+                }
             }
             for (Message msg : batchResult.toolResultMessages()) {
                 contextHistory.add(msg);
@@ -618,6 +659,28 @@ public class AgentEngine implements AgentLoop {
             }
             session.replace(filterPersistable(contextHistory));
         } // end while
+        } catch (com.clawkit.tools.control.ExecutionHaltedException halted) {
+            // P1-G1：控制面停止（取消/deadline/预算）不是普通错误
+            switch (halted.reason()) {
+                case CANCELLED -> {
+                    interrupted = false;
+                    fireState(AgentState.INTERRUPTED, turnCount);
+                    log.info("[Engine] 控制面取消，停止发起新调用");
+                    completeRun(RunStatus.INTERRUPTED, null, null);
+                    return "[A-001] 已被用户中断。";
+                }
+                case DEADLINE_EXCEEDED -> {
+                    log.warn("[Engine] 超过 run deadline: {}", halted.getMessage());
+                    completeRun(RunStatus.DEADLINE_EXCEEDED, "A-006", halted.getMessage());
+                    return "[A-006] 运行超过 deadline，已停止发起新的模型和工具调用。";
+                }
+                case BUDGET_EXHAUSTED -> {
+                    log.warn("[Engine] token 预算耗尽: {}", halted.getMessage());
+                    completeRun(RunStatus.BUDGET_EXHAUSTED, "A-007", halted.getMessage());
+                    return "[A-007] token 预算已耗尽，已停止发起新的模型调用。";
+                }
+            }
+            throw new IllegalStateException("unreachable halt reason", halted);
         } catch (Exception e) {
             log.error("[Engine] 未捕获异常，强制发送 RunCompleted", e);
             completeRun(RunStatus.UNKNOWN_ERROR, "UNEXPECTED",
@@ -625,12 +688,23 @@ public class AgentEngine implements AgentLoop {
             throw e;
         } finally {
             if (permissionMode != PermissionMode.PLAN) {
-                var memoryResult = memoryHooks.afterRun(new MemoryHooks.MemoryExtractionRequest(
-                    session.messages(), turnCount, memoryScope(turnCount), false, 3));
-                if (memoryResult.saved() > 0) setMemoryIndex(memoryHooks.memoryIndex());
+                try {
+                    // 取消后不再发起记忆提取的模型调用；预算/deadline 停止也在此兜底
+                    if (!control.isCancelled()) {
+                        var memoryResult = memoryHooks.afterRun(new MemoryHooks.MemoryExtractionRequest(
+                            session.messages(), turnCount, memoryScope(turnCount), false, 3));
+                        if (memoryResult.saved() > 0) setMemoryIndex(memoryHooks.memoryIndex());
+                    }
+                } catch (com.clawkit.tools.control.ExecutionHaltedException haltedInFinally) {
+                    log.info("[Engine] 记忆提取被控制面停止: {}", haltedInFinally.reason());
+                }
             }
             completeRun(RunStatus.UNKNOWN_ERROR, null,
                 "No RunCompleted emitted (UNEXPECTED)");
+            interrupted = false;
+            if (currentControl == control) {
+                currentControl = null;
+            }
         }
     }
 
@@ -659,6 +733,10 @@ public class AgentEngine implements AgentLoop {
     @Override
     public void interrupt() {
         this.interrupted = true;
+        var control = this.currentControl;
+        if (control != null) {
+            control.cancel(); // 级联取消 Provider / Tool / SubAgent / Plan
+        }
         log.info("[Engine] 收到中断信号");
     }
 
@@ -750,10 +828,107 @@ public class AgentEngine implements AgentLoop {
     private Message callProvider(List<Message> messages, List<ToolDefinition> tools,
                                   int turn, RunPhase phase) {
         var req = ModelRequest.of(messages, tools);
-        var scope = new RunScope(currentRunId, parentRunId, turn, phase, executionMode);
+        var scope = new RunScope(currentRunId, parentRunId, turn, phase, executionMode,
+            activeControl());
         var resp = providerGateway.generate(req, scope);
         if (resp.hasToolCalls()) return Message.assistantWithTools(resp.toolCalls());
         return Message.assistant(resp.content() != null ? resp.content() : "");
+    }
+
+    // ── P1-G1：run 级 ExecutionControl ───────────────────────────────
+
+    /** 当前 run 的控制句柄；run 外调用返回 none()。 */
+    private com.clawkit.tools.control.ExecutionControl activeControl() {
+        var control = currentControl;
+        return control != null ? control : com.clawkit.tools.control.ExecutionControl.none();
+    }
+
+    /** 创建本次 run 的控制根：SubAgent 从父控制派生（共享预算 + 级联取消）。 */
+    private com.clawkit.reliability.CancellationTree createRunControl() {
+        var parent = parentControl;
+        if (parent != null) {
+            return com.clawkit.reliability.CancellationTree.childOf(parent);
+        }
+        java.time.Instant deadline = runDeadline != null
+            ? java.time.Instant.now().plus(runDeadline) : null;
+        com.clawkit.tools.control.TokenBudget budget = runTokenBudget != null
+            ? com.clawkit.reliability.BudgetLedger.of(runTokenBudget) : null;
+        com.clawkit.tools.control.WorkBudget workBudget =
+            runProviderCallBudget != null || runToolCallBudget != null
+                ? com.clawkit.reliability.WorkBudgetLedger.of(
+                    runProviderCallBudget != null ? runProviderCallBudget : Long.MAX_VALUE,
+                    runToolCallBudget != null ? runToolCallBudget : Long.MAX_VALUE)
+                : null;
+        return com.clawkit.reliability.CancellationTree.root(deadline, budget, workBudget);
+    }
+
+    /**
+     * P1-G4：装配 Side Effect Gate。
+     * Reliability Journal 位于 workDir/.clawkit/reliability；journal 不可写时
+     * store 构造失败，副作用能力 fail closed（引擎无法启动）。
+     * attempt 迁移事件投影到 RunRecorder；投影失败不影响控制面。
+     */
+    private com.clawkit.reliability.gate.SideEffectGate createSideEffectGate(
+            String workDir, com.clawkit.engine.AgentRuntimeDependencies runtimeDeps) {
+        var store = new com.clawkit.reliability.attempt.FileActionAttemptStore(
+            Path.of(workDir, ".clawkit", "reliability"));
+        var coordinator = new com.clawkit.reliability.attempt.ActionAttemptCoordinator(
+            store,
+            com.clawkit.reliability.attempt.ActionAttemptCoordinator.AttemptPolicy.defaults(),
+            (attempt, reason) -> {
+                String trimmed = reason != null && reason.length() > 160
+                    ? reason.substring(0, 160) : reason;
+                events.record(new com.clawkit.observability.AttemptTransitionPayload(
+                        attempt.attemptId(), attempt.descriptor().actionCode(),
+                        attempt.targetKey(), attempt.state().name(),
+                        attempt.purpose(), attempt.relatedAttemptId(), trimmed),
+                    attempt.runId() != null ? attempt.runId() : currentRunId,
+                    parentRunId, null, Instant.now());
+            });
+        if (runtimeDeps == null) {
+            return new com.clawkit.reliability.gate.SideEffectGate(coordinator);
+        }
+        var launcher = new VerificationRunLauncher(runtimeDeps, workDir);
+        return new com.clawkit.reliability.gate.SideEffectGate(coordinator, attempt -> {
+            var result = launcher.verify(attempt);
+            String evidence = result.deterministicDetail()
+                + "; independent model review: " + result.modelConclusion();
+            return new com.clawkit.reliability.gate.SideEffectGate.VerificationOutcome(
+                result.deterministicPassed(), evidence);
+        });
+    }
+
+    /** SubAgent：绑定父控制，子 run 级联取消并共享父预算账本。 */
+    void attachParentControl(com.clawkit.tools.control.ExecutionControl parent) {
+        this.parentControl = parent;
+    }
+
+    /**
+     * P1-G5：进程启动恢复扫描。由 composition root 在应用启动时调用一次；
+     * 崩溃遗留的 DISPATCH_INTENT 按结果未知处理并 reconcile，
+     * 未派发状态确认无副作用后关闭。
+     */
+    public com.clawkit.reliability.gate.RecoveryScanner.RecoveryReport recoverPendingAttempts() {
+        var report = com.clawkit.reliability.gate.RecoveryScanner.scan(
+            sideEffectGate.coordinator().store());
+        sideEffectGate.verifyPendingAttempts();
+        return report;
+    }
+
+    /** 配置 run 级 deadline 与 token 预算；null 表示无限制。 */
+    public void setRunLimits(java.time.Duration deadline, Long tokenBudget) {
+        setRunLimits(deadline, tokenBudget, null, null);
+    }
+
+    /** Configure hard time/token/Provider-call/Tool-call budgets for each run. */
+    public void setRunLimits(java.time.Duration deadline, Long tokenBudget,
+                             Long providerCalls, Long toolCalls) {
+        this.runDeadline = deadline;
+        this.runTokenBudget = tokenBudget;
+        this.runProviderCallBudget = providerCalls;
+        this.runToolCallBudget = toolCalls;
+        log.info("[Engine] run limits: deadline={}, tokenBudget={}, providerCalls={}, toolCalls={}",
+            deadline, tokenBudget, providerCalls, toolCalls);
     }
 
     private RunScope memoryScope(int turn) {

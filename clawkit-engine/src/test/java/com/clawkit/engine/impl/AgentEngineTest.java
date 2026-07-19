@@ -445,6 +445,20 @@ class AgentEngineTest {
     }
 
     @Test
+    void interruptedPlanRunDoesNotPoisonNextRun() throws Exception {
+        Path workDir = Files.createTempDirectory("clawkit-plan-cancel");
+        MockProvider provider = new MockProvider();
+        AgentEngine engine = new AgentEngine(provider, new MockRegistry(), workDir.toString());
+        engine.setExecutionMode(com.clawkit.engine.ExecutionMode.PLAN_EXECUTE);
+        engine.interrupt();
+
+        assertThat(engine.run("cancelled plan")).contains("[A-001]");
+
+        engine.setExecutionMode(com.clawkit.engine.ExecutionMode.REACT);
+        assertThat(engine.run("next run")).doesNotContain("[A-001]");
+    }
+
+    @Test
     void shouldNotAutoSaveWhenSessionEmpty() throws Exception {
         Path tempDir = Files.createTempDirectory("clawkit-test-sessions");
         try {
