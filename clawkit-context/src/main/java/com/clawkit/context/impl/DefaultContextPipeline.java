@@ -91,13 +91,15 @@ public class DefaultContextPipeline implements ContextPipeline {
             return new CompactionResult(
                 cr.messages(), beforeReport, afterReport,
                 cr.retainedConstraints(), cr.appliedRules(),
-                beforeMessages, cr.messages().size(), true);
+                beforeMessages, cr.messages().size(), true,
+                CompactionAudit.EMPTY);
         }
 
         // no compact needed
         return new CompactionResult(
             messages, beforeReport, beforeReport, List.of(), List.of(),
-            beforeMessages, messages.size(), false);
+            beforeMessages, messages.size(), false,
+            CompactionAudit.EMPTY);
     }
 
     // ── fragment collection ───────────────────────────────────────────

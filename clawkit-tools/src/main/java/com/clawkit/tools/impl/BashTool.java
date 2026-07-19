@@ -197,10 +197,22 @@ public class BashTool implements Tool {
             long duration = System.currentTimeMillis() - start;
 
             String output = formatOutput(presult);
-            ToolOutputStats stats = new ToolOutputStats(
-                presult.totalOutputBytes(), presult.totalOutputBytes(), presult.truncated());
             com.clawkit.tools.OutputEnvelope envelope =
                 combineEnvelopes(presult.stdoutEnvelope(), presult.stderrEnvelope());
+
+            // P0-4：stats 从 envelope 唯一派生，消除双写漂移
+            byte[] outputBytes = output.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            ToolOutputStats stats = new ToolOutputStats(
+                envelope.totalBytes(),           // totalBytes — 观察到的源 bytes
+                outputBytes.length,              // returnedBytes — 模型实际看到的
+                envelope.returnedBytes(),        // retainedSourceBytes — reducer 选取的源 bytes
+                -1,                              // totalLines unknown
+                -1,                              // returnedLines unknown
+                envelope.truncated(),            // truncated
+                envelope.truncationReason(),     // truncationReason
+                "LEGACY_V0",                     // retentionPolicy
+                true                             // inputComplete — Bash 读完
+            );
 
             if (presult.cancelled()) {
                 // 派发前取消 → 确认无副作用；进程已启动后取消 → 结果未知

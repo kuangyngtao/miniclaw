@@ -13,11 +13,23 @@ import java.util.List;
 public record CompactionRequest(
     List<Message> modelContext,
     int toolDefTokens,
-    int turnCount
+    int turnCount,
+    // ── P1-A6 ────────────────────────────────────────────────────────
+    CompactionHint hint
 ) {
+    /** 旧构造器兼容：默认 GENERAL */
+    public CompactionRequest(
+        List<Message> modelContext,
+        int toolDefTokens,
+        int turnCount
+    ) {
+        this(modelContext, toolDefTokens, turnCount, CompactionHint.GENERAL);
+    }
+
     public CompactionRequest {
         if (modelContext == null) throw new IllegalArgumentException("modelContext is required");
         if (toolDefTokens < 0) throw new IllegalArgumentException("toolDefTokens must be >= 0");
         if (turnCount < 0) throw new IllegalArgumentException("turnCount must be >= 0");
+        if (hint == null) hint = CompactionHint.GENERAL;
     }
 }

@@ -252,4 +252,42 @@ class FileRunRecorderTest {
         assertThat(summary.taskSummary()).hasSize(160);
         assertThat(summary.taskSummary()).endsWith("...");
     }
+
+    // ── P0-1: retry 事件持久化不抛异常 ───────────────────────────────
+
+    @Test
+    void shouldPersistRetryScheduledEvent() throws Exception {
+        startRun("run-retry");
+
+        record(new ToolInvokedPayload("call-1", "grep", "pattern=error",
+            false, true, ToolRiskLevel.LOW, false, false),
+            "run-retry", 1, T0.plusSeconds(1));
+
+        // 失败 → 调度重试
+        record(new ToolRetryScheduledPayload("call-1", "grep", 2, 3, 150,
+            "LOCAL_ERROR_NO_EFFECT", "TRANSIENT_READ_FAILURE"),
+            "run-retry", 1, T0.plusSeconds(2));
+
+        // 最终成功
+        record(new ToolCompletedPayload("call-1", "grep", true, 200, 512,
+            false, false, null, null, null),
+            "run-retry", 1, T0.plusSeconds(2));
+
+        completeRun("run-retry", RunStatus.COMPLETED);
+
+        var events = reader.readEvents("run-retry").value();
+        assertThat(events).hasSize(5); // start + invoked + retry_scheduled + completed + completed(run)
+
+        var retryEvents = events.stream()
+            .filter(e -> RunEventType.TOOL_RETRY_SCHEDULED.equals(e.eventType()))
+            .toList();
+        assertThat(retryEvents).hasSize(1);
+        var p = (ToolRetryScheduledPayload) retryEvents.get(0).payload();
+        assertThat(p.toolCallId()).isEqualTo("call-1");
+        assertThat(p.attemptNumber()).isEqualTo(2);
+
+        // 验证 recorder 未抛异常
+        Path eventsFile = tempDir.resolve("runs").resolve("run-retry").resolve("events.jsonl");
+        assertThat(Files.exists(eventsFile)).isTrue();
+    }
 }

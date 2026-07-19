@@ -7,7 +7,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.clawkit.provider.LLMConfig;
 import com.clawkit.provider.LLMException;
 import com.clawkit.provider.LLMProvider;
+import com.clawkit.provider.ModelRequest;
+import com.clawkit.provider.ModelResponse;
 import com.clawkit.provider.ProviderError;
+import com.clawkit.provider.ProviderResponseMetadata;
+import com.clawkit.provider.TokenUsage;
 import com.clawkit.tools.control.CancelRegistration;
 import com.clawkit.tools.control.ExecutionControl;
 import com.clawkit.tools.control.ExecutionHaltedException;
@@ -56,6 +60,12 @@ public class OpenAIProvider implements LLMProvider {
     // 熔断器状态（CLOSED → OPEN → HALF_OPEN）
     private int consecutiveFailures;
     private long circuitOpenUntil;
+
+    /** P1-A3：sendWithRetry 内部返回类型 */
+    private record SendResult(byte[] body, int retryCount, String model, String id) {}
+
+    /** P0-3：内部 generate 返回类型，metadata 沿返回值传递保证并发安全 */
+    private record GenerateResult(Message message, ProviderResponseMetadata metadata) {}
 
     public OpenAIProvider(LLMConfig config) {
         this(config, Thread::sleep, System::currentTimeMillis);
@@ -118,9 +128,28 @@ public class OpenAIProvider implements LLMProvider {
         return generate(messages, availableTools, ExecutionControl.none());
     }
 
+    /** P0-3：V2 generate(ModelRequest) 返回沿调用链传递的真实 metadata */
+    @Override
+    public ModelResponse generate(ModelRequest request) {
+        var gr = generateInternal(request.messages(), request.tools(), request.control());
+        var msg = gr.message();
+        var toolCalls = msg.toolCalls();
+        var reason = toolCalls != null && !toolCalls.isEmpty()
+            ? com.clawkit.provider.FinishReason.TOOL_CALLS : com.clawkit.provider.FinishReason.STOP;
+        return new ModelResponse(msg.content(), toolCalls, reason,
+            TokenUsage.EMPTY, gr.metadata());
+    }
+
     @Override
     public Message generate(List<Message> messages, List<ToolDefinition> availableTools,
                             ExecutionControl control) {
+        return generateInternal(messages, availableTools, control).message();
+    }
+
+    /** P0-3：内部 generate，metadata 沿返回值传递，消除共享可变状态 */
+    private GenerateResult generateInternal(List<Message> messages,
+                                             List<ToolDefinition> availableTools,
+                                             ExecutionControl control) {
         control.checkpoint();
         checkCircuit();
 
@@ -140,16 +169,17 @@ public class OpenAIProvider implements LLMProvider {
         long startMs = System.currentTimeMillis();
 
         try {
-            byte[] responseBody = sendWithRetry(requestBody, control);
+            SendResult sendResult = sendWithRetry(requestBody, control);
             OpenAIResponse response;
             try {
-                response = objectMapper.readValue(responseBody, OpenAIResponse.class);
+                response = objectMapper.readValue(sendResult.body(), OpenAIResponse.class);
             } catch (IOException e) {
                 throw new LLMException("解析 LLM 响应失败: " + e.getMessage(), e);
             }
 
             if (log.isDebugEnabled()) {
-                log.debug("OpenAI response model={} id={}", response.model(), response.id());
+                log.debug("OpenAI response model={} id={} retries={}",
+                    sendResult.model(), sendResult.id(), sendResult.retryCount());
             }
 
             Message result = toMessage(response);
@@ -159,15 +189,14 @@ public class OpenAIProvider implements LLMProvider {
                 result.content() != null ? result.content().length() : 0,
                 result.toolCalls() != null ? " + " + result.toolCalls().size() + " tool calls" : "");
             recordSuccess();
-            return result;
+            return new GenerateResult(result,
+                new ProviderResponseMetadata(sendResult.model(), sendResult.id(), sendResult.retryCount()));
         } catch (LLMException e) {
             long elapsed = System.currentTimeMillis() - startMs;
             log.warn("[LLM] {} {}ms, {} msgs → FAILED: {}", config.model(), elapsed, messages.size(), e.getMessage());
             recordFailure();
             throw e;
         }
-        // ExecutionHaltedException（取消/deadline/预算）直接向上传播，
-        // 不计入熔断失败——控制面停止不是 Provider 故障。
     }
 
     @Override
@@ -470,24 +499,34 @@ public class OpenAIProvider implements LLMProvider {
      * 中断后请求仍可能已送达服务端并开始处理，因此取消不等于"无副作用失败"，
      * 由上层按 EFFECT_UNKNOWN 语义处理。
      */
-    private byte[] sendWithRetry(byte[] requestBody, ExecutionControl control) {
+    private SendResult sendWithRetry(byte[] requestBody, ExecutionControl control) {
         Thread caller = Thread.currentThread();
         try (CancelRegistration reg = control.onCancel(caller::interrupt)) {
             return sendWithRetryInner(requestBody, control);
         } finally {
             if (control.isCancelled()) {
-                Thread.interrupted(); // 清除控制面注入的中断标志
+                Thread.interrupted();
             }
         }
     }
 
-    private byte[] sendWithRetryInner(byte[] requestBody, ExecutionControl control) {
+    private SendResult sendWithRetryInner(byte[] requestBody, ExecutionControl control) {
         LLMException lastException = null;
+        int retries = 0;
 
+        Long retryAfterMs = null; // P0-3: Retry-After 优先
         for (int attempt = 0; attempt <= config.maxRetries(); attempt++) {
-            control.checkpoint(); // 每次尝试前检查取消 / deadline / 预算
+            control.checkpoint();
             if (attempt > 0) {
-                long delayMs = (long) Math.pow(2, attempt) * 1000; // 2s, 4s, 8s
+                retries++;
+                long delayMs;
+                if (retryAfterMs != null) {
+                    delayMs = Math.min(retryAfterMs, 60000); // P0-3: Retry-After 优先，上限 60s
+                    retryAfterMs = null;
+                } else {
+                    long cap = Math.min(2000L * (1L << (attempt - 1)), 16000L);
+                    delayMs = cap > 0 ? (long) (Math.random() * (cap + 1)) : 0;
+                }
                 log.warn("LLM 调用重试 {}/{}，等待 {}ms", attempt, config.maxRetries(), delayMs);
                 try {
                     retrySleeper.sleep(delayMs);
@@ -498,9 +537,9 @@ public class OpenAIProvider implements LLMProvider {
                     }
                     Thread.currentThread().interrupt();
                     throw new LLMException("DeepSeek retry was interrupted", e,
-                        new ProviderError.Cancelled());
+                        new ProviderError.Cancelled(), retries);
                 }
-                control.checkpoint(); // 退避后再检查一次
+                control.checkpoint();
             }
 
             HttpRequest httpRequest = buildHttpRequest(requestBody, effectiveTimeout(control));
@@ -512,7 +551,19 @@ public class OpenAIProvider implements LLMProvider {
                 byte[] body = response.body();
 
                 if (statusCode == 200) {
-                    return body;
+                    String model = config.model();
+                    String id = "";
+                    try {
+                        JsonNode tree = objectMapper.readTree(body);
+                        if (tree.has("model")) model = tree.get("model").asText();
+                        if (tree.has("id")) id = tree.get("id").asText();
+                    } catch (Exception ignored) {}
+                    return new SendResult(body, retries, model, id);
+                }
+
+                // P0-3: 429 时解析 Retry-After header
+                if (statusCode == 429) {
+                    retryAfterMs = parseRetryAfter(response);
                 }
 
                 String errorMsg = parseErrorMessage(body, statusCode);
@@ -520,14 +571,13 @@ public class OpenAIProvider implements LLMProvider {
                     statusCode, attempt + 1, config.maxRetries() + 1, errorMsg);
 
                 if (!shouldRetry(statusCode)) {
-                    throw classifiedHttpError(statusCode, errorMsg);
+                    throw classifiedHttpError(statusCode, errorMsg, retries);
                 }
 
                 lastException = classifiedHttpError(statusCode,
-                    "attempt " + (attempt + 1) + ": " + errorMsg);
+                    "attempt " + (attempt + 1) + ": " + errorMsg, retries);
 
             } catch (LLMException e) {
-                // 不可重试错误直接抛
                 throw e;
             } catch (IOException e) {
                 if (control.isCancelled()) {
@@ -539,24 +589,24 @@ public class OpenAIProvider implements LLMProvider {
                 ProviderError error = e instanceof java.net.http.HttpTimeoutException
                     ? new ProviderError.Timeout("DeepSeek request timed out")
                     : new ProviderError.Network("Cannot reach DeepSeek");
-                lastException = new LLMException(errorMessage(error), e, error);
+                lastException = new LLMException(errorMessage(error), e, error, retries);
             } catch (InterruptedException e) {
                 if (control.isCancelled()) {
                     throw new ExecutionHaltedException(
                         ExecutionHaltedException.Reason.CANCELLED, "请求已被取消");
                 }
                 Thread.currentThread().interrupt();
-                throw new LLMException("请求被中断", e);
+                throw new LLMException("请求被中断", e, null, retries);
             }
         }
 
         throw new LLMException(
             "LLM 调用失败，已重试 " + config.maxRetries() + " 次。最后错误: " +
             (lastException != null ? lastException.getMessage() : "unknown"),
-            lastException, lastException != null ? lastException.providerError() : null);
+            lastException, lastException != null ? lastException.providerError() : null, retries);
     }
 
-    private LLMException classifiedHttpError(int statusCode, String detail) {
+    private LLMException classifiedHttpError(int statusCode, String detail, int retryCount) {
         String lower = detail == null ? "" : detail.toLowerCase();
         ProviderError error = switch (statusCode) {
             case 401, 403 -> new ProviderError.Authentication("DeepSeek authentication failed");
@@ -567,7 +617,15 @@ public class OpenAIProvider implements LLMProvider {
                     ? new ProviderError.Protocol("DeepSeek rejected the request")
                     : new ProviderError.Server("DeepSeek service error", statusCode);
         };
-        return new LLMException("HTTP " + statusCode + ": " + sanitize(detail), error);
+        return new LLMException("HTTP " + statusCode + ": " + sanitize(detail), null, error, retryCount);
+    }
+
+    /** P0-3：解析 Retry-After header（秒数或 HTTP-date）。返回毫秒，失败返回 null。 */
+    private static Long parseRetryAfter(HttpResponse<?> response) {
+        return response.headers().firstValue("Retry-After")
+            .map(val -> {
+                try { return Long.parseLong(val.trim()) * 1000; } catch (NumberFormatException e) { return null; }
+            }).orElse(null);
     }
 
     private static String errorMessage(ProviderError error) {

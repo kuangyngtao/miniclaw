@@ -20,7 +20,9 @@ public record OutputEnvelope(
     String sha256,
     List<String> evidenceRefs,
     boolean redactionApplied,
-    String encoding
+    String encoding,
+    // ── P1-A4 ────────────────────────────────────────────────────────
+    boolean inputComplete
 ) {
     public OutputEnvelope {
         if (head == null) head = "";
@@ -37,9 +39,20 @@ public record OutputEnvelope(
         }
     }
 
-    /** 是否发生截断。 */
+    /** 旧构造器兼容：inputComplete=true */
+    public OutputEnvelope(
+        String head, String tail, List<String> errorExcerpts,
+        long totalBytes, long returnedBytes, long omittedBytes,
+        String truncationReason, String sha256, List<String> evidenceRefs,
+        boolean redactionApplied, String encoding
+    ) {
+        this(head, tail, errorExcerpts, totalBytes, returnedBytes, omittedBytes,
+            truncationReason, sha256, evidenceRefs, redactionApplied, encoding, true);
+    }
+
+    /** P1-A4：截断 = omittedBytes > 0 || !inputComplete */
     public boolean truncated() {
-        return omittedBytes > 0;
+        return omittedBytes > 0 || !inputComplete;
     }
 
     /** 未截断的完整输出信封。 */
@@ -47,6 +60,7 @@ public record OutputEnvelope(
         String text = output != null ? output : "";
         byte[] bytes = text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
         return new OutputEnvelope(text, "", List.of(), bytes.length, bytes.length, 0,
-            null, com.clawkit.tools.action.Digests.sha256Hex(bytes), List.of(), false, "UTF-8");
+            null, com.clawkit.tools.action.Digests.sha256Hex(bytes), List.of(), false, "UTF-8",
+            true);
     }
 }

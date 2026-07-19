@@ -34,6 +34,7 @@ public final class RunEventCodec {
         TYPE_BY_CLASS.put(ProviderCallCompletedPayload.class, RunEventType.PROVIDER_CALL_COMPLETED);
         TYPE_BY_CLASS.put(ToolInvokedPayload.class, RunEventType.TOOL_INVOKED);
         TYPE_BY_CLASS.put(ToolCompletedPayload.class, RunEventType.TOOL_COMPLETED);
+        TYPE_BY_CLASS.put(ToolRetryScheduledPayload.class, RunEventType.TOOL_RETRY_SCHEDULED); // P0-1
         TYPE_BY_CLASS.put(ApprovalDecidedPayload.class, RunEventType.APPROVAL_DECIDED);
         TYPE_BY_CLASS.put(CompactTriggeredPayload.class, RunEventType.COMPACT_TRIGGERED);
         TYPE_BY_CLASS.put(CompactCompletedPayload.class, RunEventType.COMPACT_COMPLETED);

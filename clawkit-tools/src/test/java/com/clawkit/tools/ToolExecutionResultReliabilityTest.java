@@ -111,4 +111,48 @@ class ToolExecutionResultReliabilityTest {
             .withOutputEnvelope(complete);
         assertEquals(complete, r.outputEnvelope());
     }
+
+    // ── P1-A1：halted(...) 工厂 ──────────────────────────────────────
+
+    @Test
+    void haltedCancelledMapsToBeforeDispatch() {
+        var r = ToolExecutionResult.halted("id", "grep",
+            com.clawkit.tools.control.ExecutionHaltedException.Reason.CANCELLED,
+            0, READ_META);
+        assertEquals(ToolExecutionStatus.CANCELLED, r.status());
+        assertEquals(FailureClass.CANCELLED_BEFORE_DISPATCH, r.failureClass());
+        assertEquals(EffectCertainty.NOT_DISPATCHED, r.effectCertainty());
+    }
+
+    @Test
+    void haltedDeadlineExceededMapsToNewFailureClass() {
+        var r = ToolExecutionResult.halted("id", "grep",
+            com.clawkit.tools.control.ExecutionHaltedException.Reason.DEADLINE_EXCEEDED,
+            0, READ_META);
+        assertEquals(ToolExecutionStatus.CANCELLED, r.status());
+        assertEquals(FailureClass.DEADLINE_EXCEEDED_BEFORE_DISPATCH, r.failureClass());
+        assertEquals(EffectCertainty.NOT_DISPATCHED, r.effectCertainty());
+    }
+
+    @Test
+    void haltedBudgetExhaustedMapsCorrectly() {
+        var r = ToolExecutionResult.halted("id", "grep",
+            com.clawkit.tools.control.ExecutionHaltedException.Reason.BUDGET_EXHAUSTED,
+            0, READ_META);
+        assertEquals(ToolExecutionStatus.CANCELLED, r.status());
+        assertEquals(FailureClass.BUDGET_EXHAUSTED, r.failureClass());
+        assertEquals(EffectCertainty.NOT_DISPATCHED, r.effectCertainty());
+    }
+
+    @Test
+    void haltedNotPermissionBlocked() {
+        // 三种 control-halt Reason 都不应产生 PERMISSION_BLOCKED
+        for (var reason : com.clawkit.tools.control.ExecutionHaltedException.Reason.values()) {
+            var r = ToolExecutionResult.halted("id", "read", reason, 0, READ_META);
+            assertNotEquals(FailureClass.PERMISSION_BLOCKED, r.failureClass(),
+                reason + " must not map to PERMISSION_BLOCKED");
+            assertEquals(EffectCertainty.NOT_DISPATCHED, r.effectCertainty(),
+                reason + " must have NOT_DISPATCHED certainty");
+        }
+    }
 }

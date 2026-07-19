@@ -232,4 +232,114 @@ class RunEventCodecTest {
             .isEqualTo(CompactCompletedPayload.class);
         assertThat(RunEventCodec.payloadClassFor("nonexistent")).isNull();
     }
+
+    // ── P0-1: ToolRetryScheduledPayload codec ─────────────────────────
+
+    @Test
+    void shouldEncodeAndDecodeToolRetryScheduledRoundTrip() throws Exception {
+        var payload = new ToolRetryScheduledPayload(
+            "call-1", "grep", 2, 3, 150, "LOCAL_ERROR_NO_EFFECT", "TRANSIENT_READ_FAILURE");
+        var envelope = codec.encode(payload, RUN_ID, null, 3, 5, NOW);
+
+        String json = codec.serialize(envelope);
+        var decoded = codec.deserialize(json);
+
+        assertThat(decoded.eventType()).isEqualTo(RunEventType.TOOL_RETRY_SCHEDULED);
+        assertThat(decoded.payload()).isInstanceOf(ToolRetryScheduledPayload.class);
+
+        var p = (ToolRetryScheduledPayload) decoded.payload();
+        assertThat(p.toolCallId()).isEqualTo("call-1");
+        assertThat(p.toolName()).isEqualTo("grep");
+        assertThat(p.attemptNumber()).isEqualTo(2);
+        assertThat(p.maxAttempts()).isEqualTo(3);
+        assertThat(p.delayMs()).isEqualTo(150);
+        assertThat(p.failureClass()).isEqualTo("LOCAL_ERROR_NO_EFFECT");
+        assertThat(p.retryReason()).isEqualTo("TRANSIENT_READ_FAILURE");
+    }
+
+    @Test
+    void toolRetryScheduledRegisteredInTypeMap() {
+        assertThat(RunEventCodec.eventTypeFor(ToolRetryScheduledPayload.class))
+            .isEqualTo(RunEventType.TOOL_RETRY_SCHEDULED);
+        assertThat(RunEventCodec.payloadClassFor(RunEventType.TOOL_RETRY_SCHEDULED))
+            .isEqualTo(ToolRetryScheduledPayload.class);
+    }
+
+    // ── P0-2: 旧 JSON event 反序列化兼容 ─────────────────────────────
+
+    @Test
+    void shouldDeserializeOldToolCompletedWithDefaults() throws Exception {
+        // 旧 JSON：没有 attemptCount、failureClassName 等新字段
+        String oldJson = """
+            {
+              "schemaVersion": 1,
+              "eventId": "evt-old",
+              "eventType": "tool_completed",
+              "sequence": 1,
+              "occurredAt": "2026-07-11T10:00:00Z",
+              "recordedAt": "2026-07-11T10:00:01Z",
+              "runId": "run-001",
+              "parentRunId": null,
+              "turnNumber": 1,
+              "payload": {
+                "toolCallId": "call-1",
+                "toolName": "read",
+                "success": true,
+                "durationMs": 50,
+                "outputBytes": 1024,
+                "truncated": false,
+                "timedOut": false,
+                "exitCode": null,
+                "errorCode": null,
+                "errorMessage": null
+              }
+            }""";
+
+        var decoded = codec.deserialize(oldJson);
+        assertThat(decoded.payload()).isInstanceOf(ToolCompletedPayload.class);
+
+        var p = (ToolCompletedPayload) decoded.payload();
+        assertThat(p.toolCallId()).isEqualTo("call-1");
+        assertThat(p.attemptCount()).isEqualTo(0);  // Jackson default for absent int
+        assertThat(p.failureClassName()).isNull();
+        assertThat(p.inputComplete()).isFalse();     // Jackson default for absent boolean
+    }
+
+    @Test
+    void shouldDeserializeOldCompactCompletedWithDefaults() throws Exception {
+        String oldJson = """
+            {
+              "schemaVersion": 1,
+              "eventId": "evt-old",
+              "eventType": "compact_completed",
+              "sequence": 1,
+              "occurredAt": "2026-07-11T10:00:00Z",
+              "recordedAt": "2026-07-11T10:00:01Z",
+              "runId": "run-001",
+              "parentRunId": null,
+              "turnNumber": null,
+              "payload": {
+                "beforeMessages": 20,
+                "afterMessages": 10,
+                "beforeTokens": 5000,
+                "afterTokens": 2500,
+                "beforeStatus": "WARN",
+                "afterStatus": "OK",
+                "sectionsBefore": {},
+                "sectionsAfter": {},
+                "evictedGroups": 2,
+                "appliedRules": ["evict_old"],
+                "durationMs": 300,
+                "failed": false,
+                "errorCode": null
+              }
+            }""";
+
+        var decoded = codec.deserialize(oldJson);
+        assertThat(decoded.payload()).isInstanceOf(CompactCompletedPayload.class);
+
+        var p = (CompactCompletedPayload) decoded.payload();
+        assertThat(p.beforeMessages()).isEqualTo(20);
+        assertThat(p.profile()).isNull();  // P1-A6 字段缺失 → Jackson default null
+    }
 }

@@ -6,6 +6,7 @@ import com.clawkit.observability.ProviderCallCompletedPayload;
 import com.clawkit.observability.ProviderCallStartedPayload;
 import com.clawkit.observability.RunEventPayload;
 import com.clawkit.observability.RunRecorder;
+import com.clawkit.provider.LLMException;
 import com.clawkit.provider.LLMProvider;
 import com.clawkit.provider.ModelRequest;
 import com.clawkit.provider.ModelResponse;
@@ -57,15 +58,18 @@ public class ObservingProviderGateway implements ProviderGateway {
             long actual = response.usage() != null && response.usage().totalTokens() > 0
                 ? response.usage().totalTokens() : reserved;
             budget.settle(reserved, actual);
+            int retryCount = response.metadata() != null ? response.metadata().retryCount() : 0;
             record(new ProviderCallCompletedPayload(scope.runId(), scope.phase().name(),
-                false, in, out, true, ms, 0, false, null, null), scope);
+                false, in, out, true, ms, retryCount, false, null, null), scope);
             return response;
         } catch (Exception e) {
-            // 失败调用无法确认服务端是否计费，保守不退还预留
             budget.settle(reserved, reserved);
             long ms = Duration.between(start, Instant.now()).toMillis();
+            int retryCount = (e instanceof LLMException le) ? le.retryCount() : 0;
+            String errorCode = (e instanceof LLMException le && le.providerError() != null)
+                ? le.providerError().getClass().getSimpleName() : null;
             record(new ProviderCallCompletedPayload(scope.runId(), scope.phase().name(),
-                false, 0, 0, false, ms, 0, true, null, e.getMessage()), scope);
+                false, 0, 0, false, ms, retryCount, true, errorCode, e.getMessage()), scope);
             throw e;
         }
     }
@@ -136,8 +140,9 @@ public class ObservingProviderGateway implements ProviderGateway {
                 int out = response.usage() != null ? response.usage().completionTokens() : 0;
                 budget.settle(reserved, response.usage() != null && response.usage().totalTokens() > 0
                     ? response.usage().totalTokens() : reserved);
+                int r = response.metadata() != null ? response.metadata().retryCount() : 0;
                 record(new ProviderCallCompletedPayload(scope.runId(),
-                    scope.phase().name(), true, in, out, true, ms, 0,
+                    scope.phase().name(), true, in, out, true, ms, r,
                     false, null, null), scope);
             }
             return response;
@@ -145,9 +150,12 @@ public class ObservingProviderGateway implements ProviderGateway {
             if (terminalSent.compareAndSet(false, true)) {
                 long ms = Duration.between(start, Instant.now()).toMillis();
                 budget.settle(reserved, reserved);
+                int r = (e instanceof LLMException le) ? le.retryCount() : 0;
+                String ec = (e instanceof LLMException le && le.providerError() != null)
+                    ? le.providerError().getClass().getSimpleName() : null;
                 record(new ProviderCallCompletedPayload(scope.runId(),
-                    scope.phase().name(), true, 0, 0, false, ms, 0,
-                    true, null, e.getMessage()), scope);
+                    scope.phase().name(), true, 0, 0, false, ms, r,
+                    true, ec, e.getMessage()), scope);
             }
             throw e;
         }

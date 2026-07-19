@@ -26,9 +26,12 @@ public final class BoundedOutputCollector {
 
     private static final Pattern ERROR_LINE = Pattern.compile(
         "(?i)\\b(error|exception|fatal|failed|failure|panic|traceback|caused by)\\b");
+    private static final Pattern WARN_LINE = Pattern.compile(
+        "(?i)\\b(warn|warning)\\b");
     private static final Pattern SECRET = Pattern.compile(
         "(?i)(bearer\\s+|sk-|api[_-]?key\\s*[=:]\\s*)[A-Za-z0-9._-]{8,}");
     private static final int MAX_ERROR_EXCERPTS = 8;
+    private static final int MAX_WARN_EXCERPTS = 8;
     private static final int MAX_EXCERPT_CHARS = 300;
     private static final int MAX_LINE_TRACK_CHARS = 1000;
 
@@ -37,10 +40,12 @@ public final class BoundedOutputCollector {
     private final ByteArrayOutputStream head = new ByteArrayOutputStream();
     private final MessageDigest digest;
     private final List<String> errorExcerpts = new ArrayList<>();
+    private final List<String> warnExcerpts = new ArrayList<>();     // P1-A5
     private final StringBuilder currentLine = new StringBuilder();
 
     private long totalBytes;
     private long tailWritten; // 写入 tail ring 的累计字节数
+    private long lineCount;    // P1-A5: 已观察的源行数
 
     public BoundedOutputCollector(long headCap, long tailCap) {
         if (headCap < 0 || tailCap < 0) throw new IllegalArgumentException("caps must be >= 0");
@@ -86,17 +91,37 @@ public final class BoundedOutputCollector {
         }
     }
 
+    /** P1-A5：按行捕获 ERROR 和 WARN 摘录，同时计数行号。 */
     private void captureErrorLine() {
-        if (errorExcerpts.size() >= MAX_ERROR_EXCERPTS) return;
+        lineCount++;
         String line = currentLine.toString();
-        if (!line.isBlank() && ERROR_LINE.matcher(line).find()) {
+        if (line.isBlank()) return;
+        // 检查 ERROR 模式
+        if (errorExcerpts.size() < MAX_ERROR_EXCERPTS && ERROR_LINE.matcher(line).find()) {
             errorExcerpts.add(line.length() > MAX_EXCERPT_CHARS
+                ? line.substring(0, MAX_EXCERPT_CHARS) + "…" : line.strip());
+        }
+        // 检查 WARN 模式（不与 ERROR 重复统计）
+        if (warnExcerpts.size() < MAX_WARN_EXCERPTS
+            && errorExcerpts.stream().noneMatch(e -> e.equals(line.strip()))
+            && WARN_LINE.matcher(line).find()) {
+            warnExcerpts.add(line.length() > MAX_EXCERPT_CHARS
                 ? line.substring(0, MAX_EXCERPT_CHARS) + "…" : line.strip());
         }
     }
 
     public long totalBytes() {
         return totalBytes;
+    }
+
+    /** P1-A5：已观察的源行数。 */
+    public long lineCount() {
+        return lineCount;
+    }
+
+    /** P1-A5：返回 WARN 摘录列表（测试验证用） */
+    public List<String> warnExcerpts() {
+        return List.copyOf(warnExcerpts);
     }
 
     /** head + tail 是否仍无法覆盖全部输出。 */

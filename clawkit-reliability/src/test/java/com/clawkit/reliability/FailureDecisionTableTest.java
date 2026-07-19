@@ -64,6 +64,26 @@ class FailureDecisionTableTest {
     }
 
     @Test
+    void invalidArgumentsRequiresRepairNotRetry() {
+        assertEquals(RecoveryDirective.REPAIR_INPUT,
+            FailureDecisionTable.directiveFor(FailureClass.INVALID_ARGUMENTS));
+        assertFalse(FailureDecisionTable.autoRetryAllowed(
+            FailureClass.INVALID_ARGUMENTS, ActionReliability.none()),
+            "INVALID_ARGUMENTS must not allow same-input auto-retry");
+    }
+
+    @Test
+    void deadlineExceededBeforeDispatchAborts() {
+        assertEquals(RecoveryDirective.ABORT,
+            FailureDecisionTable.directiveFor(FailureClass.DEADLINE_EXCEEDED_BEFORE_DISPATCH));
+        assertEquals(EffectCertainty.NOT_DISPATCHED,
+            FailureClass.DEADLINE_EXCEEDED_BEFORE_DISPATCH.certainty());
+        assertFalse(FailureDecisionTable.autoRetryAllowed(
+            FailureClass.DEADLINE_EXCEEDED_BEFORE_DISPATCH, null),
+            "DEADLINE_EXCEEDED_BEFORE_DISPATCH must not auto-retry");
+    }
+
+    @Test
     void terminalDecisionsMatchDesign() {
         assertEquals(RecoveryDirective.ABORT,
             FailureDecisionTable.directiveFor(FailureClass.BUDGET_EXHAUSTED));

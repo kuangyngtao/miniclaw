@@ -30,6 +30,9 @@ class FailureClassTest {
         assertEquals(EffectCertainty.NOT_DISPATCHED, FailureClass.INVALID_ARGUMENTS.certainty());
         assertEquals(EffectCertainty.NOT_DISPATCHED, FailureClass.APPROVAL_REJECTED.certainty());
         assertEquals(EffectCertainty.NOT_DISPATCHED, FailureClass.BUDGET_EXHAUSTED.certainty());
+        // deadline 超限 → NOT_DISPATCHED
+        assertEquals(EffectCertainty.NOT_DISPATCHED,
+            FailureClass.DEADLINE_EXCEEDED_BEFORE_DISPATCH.certainty());
         // 服务端执行前拒绝 → NO_EFFECT_CONFIRMED
         assertEquals(EffectCertainty.NO_EFFECT_CONFIRMED,
             FailureClass.SERVER_REJECTED_BEFORE_EXECUTION.certainty());

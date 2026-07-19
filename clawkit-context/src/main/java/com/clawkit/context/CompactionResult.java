@@ -21,7 +21,9 @@ public record CompactionResult(
     // ── PR-1: 扩展统计字段 ───────────────────────────────────────
     int beforeMessages,
     int afterMessages,
-    boolean compacted
+    boolean compacted,
+    // ── P1-A6 ────────────────────────────────────────────────────────
+    CompactionAudit audit
 ) {
     /** 兼容构造器（旧调用方） */
     public CompactionResult(
@@ -32,6 +34,6 @@ public record CompactionResult(
         List<String> appliedRules
     ) {
         this(messages, beforeReport, afterReport, retainedConstraints, appliedRules,
-            messages.size(), messages.size(), false);
+            messages.size(), messages.size(), false, CompactionAudit.EMPTY);
     }
 }

@@ -25,12 +25,13 @@ public final class FailureDecisionTable {
 
     static {
         TABLE.put(FailureClass.NONE, RecoveryDirective.VERIFY);
-        TABLE.put(FailureClass.INVALID_ARGUMENTS, RecoveryDirective.RETRY_ALLOWED);
+        TABLE.put(FailureClass.INVALID_ARGUMENTS, RecoveryDirective.REPAIR_INPUT);
         TABLE.put(FailureClass.PRECONDITION_FAILED, RecoveryDirective.RECOLLECT);
         TABLE.put(FailureClass.APPROVAL_REJECTED, RecoveryDirective.USER_INPUT);
         TABLE.put(FailureClass.PERMISSION_BLOCKED, RecoveryDirective.USER_INPUT);
         TABLE.put(FailureClass.BUDGET_EXHAUSTED, RecoveryDirective.ABORT);
         TABLE.put(FailureClass.CANCELLED_BEFORE_DISPATCH, RecoveryDirective.ABORT);
+        TABLE.put(FailureClass.DEADLINE_EXCEEDED_BEFORE_DISPATCH, RecoveryDirective.ABORT);
         TABLE.put(FailureClass.SERVER_REJECTED_BEFORE_EXECUTION, RecoveryDirective.RETRY_ALLOWED);
         TABLE.put(FailureClass.LOCAL_ERROR_NO_EFFECT, RecoveryDirective.RETRY_ALLOWED);
         TABLE.put(FailureClass.TIMEOUT_OUTCOME_UNKNOWN, RecoveryDirective.RECOLLECT);

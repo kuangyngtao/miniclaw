@@ -14,6 +14,7 @@ public sealed interface RunEventPayload
             ProviderCallCompletedPayload,
             ToolInvokedPayload,
             ToolCompletedPayload,
+            ToolRetryScheduledPayload,
             ApprovalDecidedPayload,
             CompactTriggeredPayload,
             CompactCompletedPayload,

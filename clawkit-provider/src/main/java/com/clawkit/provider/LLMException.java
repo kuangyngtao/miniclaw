@@ -6,23 +6,33 @@ package com.clawkit.provider;
  */
 public class LLMException extends RuntimeException {
     private final ProviderError providerError;
+    private final int retryCount;
 
     public LLMException(String message) {
-        this(message, null, null);
+        this(message, null, null, 0);
     }
 
     public LLMException(String message, Throwable cause) {
-        this(message, cause, null);
+        this(message, cause, null, 0);
     }
 
     public LLMException(String message, ProviderError providerError) {
-        this(message, null, providerError);
+        this(message, null, providerError, 0);
     }
 
     public LLMException(String message, Throwable cause, ProviderError providerError) {
+        this(message, cause, providerError, 0);
+    }
+
+    /** P1-A3：携带真实 retryCount */
+    public LLMException(String message, Throwable cause, ProviderError providerError, int retryCount) {
         super(message, cause);
         this.providerError = providerError;
+        this.retryCount = retryCount;
     }
 
     public ProviderError providerError() { return providerError; }
+
+    /** P1-A3：实际已发生的 Provider transport 重试次数 */
+    public int retryCount() { return retryCount; }
 }

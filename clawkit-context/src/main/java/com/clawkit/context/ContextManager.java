@@ -22,19 +22,27 @@ public interface ContextManager {
      * 预算驱动的压缩。engine 根据 ContextBudgetReport 决定触发时机。
      *
      * @param messages           待压缩消息
-     * @param maxTokens          目标 token 上限（期望值，compact 尽力但不保证）
-     * @param evictedTurnGroups  MessageMasker 驱逐的 T3 轮次组，供 Map-Reduce 摘要
+     * @param maxTokens          目标 token 上限
+     * @param options            compact 选项（profile + 驱逐组）
      * @return CompactionResult  含压缩后消息 + 前后分区报告
      */
     default CompactionResult compact(List<Message> messages, int maxTokens,
-                                     List<TurnGroup> evictedTurnGroups) {
+                                     CompactionOptions options) {
         int beforeTokens = estimateTokens(messages);
-        List<Message> result = compact(messages, maxTokens); // 委托旧方法
+        List<Message> result = compact(messages, maxTokens);
         int afterTokens = estimateTokens(result);
         return new CompactionResult(result,
-            null, // beforeReport - 调用方自行补充
-            null, // afterReport
-            List.of(), List.of("legacy"));
+            null, null, List.of(), List.of("legacy"));
+    }
+
+    /**
+     * @deprecated 使用 compact(messages, maxTokens, CompactionOptions) 替代
+     */
+    @Deprecated
+    default CompactionResult compact(List<Message> messages, int maxTokens,
+                                     List<TurnGroup> evictedTurnGroups) {
+        return compact(messages, maxTokens,
+            new CompactionOptions(CompactionProfile.GENERAL, evictedTurnGroups));
     }
 
     /**

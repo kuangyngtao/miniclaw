@@ -248,8 +248,9 @@ class ExecutionControlThreadingTest {
             ctx(control));
 
         assertThat(probe.executed).isFalse();
-        assertThat(batch.results().get(0).status()).isEqualTo(ToolExecutionStatus.BLOCKED);
-        assertThat(batch.results().get(0).output()).contains("BUDGET_EXHAUSTED");
+        // P1-A1：budget exhausted 通过 halted(...) 正确映射为 CANCELLED + BUDGET_EXHAUSTED
+        assertThat(batch.results().get(0).status()).isEqualTo(ToolExecutionStatus.CANCELLED);
+        assertThat(batch.results().get(0).output()).contains("预算已耗尽");
     }
 
     @Test

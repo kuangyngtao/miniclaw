@@ -1,5 +1,6 @@
 package com.clawkit.engine.impl;
 
+import com.clawkit.context.CompactionHint;
 import com.clawkit.context.CompactionRequest;
 import com.clawkit.context.CompactionResult;
 import com.clawkit.context.ContextBudgetAnalyzer;
@@ -49,7 +50,14 @@ final class EngineContextCoordinator {
     }
 
     CompactionResult compact(List<Message> messages, int toolTokens, int turn) {
-        CompactionResult result = pipeline.compact(new CompactionRequest(messages, toolTokens, turn));
+        return compact(messages, toolTokens, turn, CompactionHint.GENERAL);
+    }
+
+    /** P1-A7：hint-aware compact */
+    CompactionResult compact(List<Message> messages, int toolTokens, int turn,
+                             CompactionHint hint) {
+        CompactionResult result = pipeline.compact(
+            new CompactionRequest(messages, toolTokens, turn, hint));
         lastReport = result.afterReport() != null ? result.afterReport() : result.beforeReport();
         if (result.compacted()) {
             lastCompaction = new CompactionStatus(result.beforeMessages(), result.afterMessages(),

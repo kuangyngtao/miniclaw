@@ -9,6 +9,9 @@ public enum RecoveryDirective {
     /** 允许在次数/冷却/预算约束内自动重试（仅限确认无副作用的失败）。 */
     RETRY_ALLOWED,
 
+    /** 修复参数后重新发起调用：参数错误必须修正输入，不能原样重放。 */
+    REPAIR_INPUT,
+
     /** 重新采证：结果未知，先收集新证据，不重复执行动作。 */
     RECOLLECT,
 

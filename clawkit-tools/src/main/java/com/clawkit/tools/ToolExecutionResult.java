@@ -263,6 +263,44 @@ public record ToolExecutionResult(
         );
     }
 
+    /**
+     * 控制面停止的统一工厂（P1-A1）。
+     * 将 {@link com.clawkit.tools.control.ExecutionHaltedException.Reason} 映射到正确的
+     * FailureClass，保证首次 acquireToolCall 失败不会错归类为 PERMISSION_BLOCKED。
+     *
+     * <p>映射：
+     * <ul>
+     *   <li>CANCELLED → CANCELLED_BEFORE_DISPATCH (NOT_DISPATCHED)</li>
+     *   <li>DEADLINE_EXCEEDED → DEADLINE_EXCEEDED_BEFORE_DISPATCH (NOT_DISPATCHED)</li>
+     *   <li>BUDGET_EXHAUSTED → BUDGET_EXHAUSTED (NOT_DISPATCHED)</li>
+     * </ul>
+     */
+    public static ToolExecutionResult halted(
+            String toolCallId, String toolName,
+            com.clawkit.tools.control.ExecutionHaltedException.Reason reason,
+            long durationMs, ToolMetadata metadata) {
+        FailureClass fc = switch (reason) {
+            case CANCELLED -> FailureClass.CANCELLED_BEFORE_DISPATCH;
+            case DEADLINE_EXCEEDED -> FailureClass.DEADLINE_EXCEEDED_BEFORE_DISPATCH;
+            case BUDGET_EXHAUSTED -> FailureClass.BUDGET_EXHAUSTED;
+        };
+        String message = switch (reason) {
+            case CANCELLED -> "执行已被取消，工具未启动。";
+            case DEADLINE_EXCEEDED -> "执行 deadline 已超，工具未启动。";
+            case BUDGET_EXHAUSTED -> "预算已耗尽，工具未启动。";
+        };
+        return new ToolExecutionResult(
+            toolCallId, toolName, message,
+            ToolExecutionStatus.CANCELLED.isFailure(), fc.name(),
+            durationMs, 0, false, false, null, metadata,
+            ToolExecutionStatus.CANCELLED,
+            ToolError.fatal(fc.name(), message),
+            ToolOutputStats.fromOutput(message, false), null,
+            UUID.randomUUID().toString(),
+            null, fc, null, null
+        );
+    }
+
     /** 替换可靠性维度（executor/attempt coordinator 使用）。 */
     public ToolExecutionResult withReliability(
             EffectCertainty certainty, FailureClass failure, String attempt) {
@@ -275,12 +313,25 @@ public record ToolExecutionResult(
     }
 
     /** 附加输出信封。 */
+    @Deprecated
     public ToolExecutionResult withOutputEnvelope(OutputEnvelope envelope) {
         return new ToolExecutionResult(
             toolCallId, toolName, output, error, errorCode, durationMs,
             outputBytes, truncated, timedOut, exitCode, metadata,
             status, toolError, outputStats, approval, auditId,
             effectCertainty, failureClass, envelope, attemptId
+        );
+    }
+
+    /** P1-A4：原子同步 output/outputBytes/truncated/stats/envelope */
+    public ToolExecutionResult withReducedOutput(ReducedToolOutput rto) {
+        return new ToolExecutionResult(
+            toolCallId, toolName, rto.text(), error, errorCode, durationMs,
+            rto.stats().returnedBytes() > Integer.MAX_VALUE
+                ? Integer.MAX_VALUE : (int) rto.stats().returnedBytes(),
+            rto.stats().truncated(), timedOut, exitCode, metadata,
+            status, toolError, rto.stats(), approval, auditId,
+            effectCertainty, failureClass, rto.envelope(), attemptId
         );
     }
 
@@ -322,8 +373,15 @@ public record ToolExecutionResult(
         };
     }
 
-    /** 只读工具按契约无副作用；其余取失败分类的固有确定性，未知时保守 EFFECT_UNKNOWN。 */
+    /**
+     * 只读工具按契约无副作用；但 NOT_DISPATCHED 优先（工具未启动时不适用 read-only 假设）。
+     * 其余取失败分类的固有确定性，未知时保守 EFFECT_UNKNOWN。
+     */
     private static EffectCertainty deriveCertainty(FailureClass failureClass, ToolMetadata metadata) {
+        // NOT_DISPATCHED 优先：工具确实未派发，无论是否只读
+        if (failureClass != null && failureClass.certainty() == EffectCertainty.NOT_DISPATCHED) {
+            return EffectCertainty.NOT_DISPATCHED;
+        }
         if (metadata != null && metadata.isReadOnly()) {
             return EffectCertainty.NO_EFFECT_CONFIRMED;
         }

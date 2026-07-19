@@ -1,5 +1,6 @@
 package com.clawkit.engine.impl;
 
+import com.clawkit.context.CompactionHintProvider;
 import com.clawkit.context.CompactionResult;
 import com.clawkit.context.ContextBudgetAnalyzer;
 import com.clawkit.context.ContextBudgetReport;
@@ -222,6 +223,7 @@ public class AgentEngine implements AgentLoop {
     private volatile ThinkingMode thinkingMode;
     private volatile ExecutionMode executionMode = ExecutionMode.REACT;
     private volatile PlanRunCoordinator planCoordinator;
+    private volatile CompactionHintProvider hintProvider = CompactionHintProvider.general(); // P1-A7
     private volatile Predicate<ExecutionPlan> onPlanReady;
     private volatile PermissionMode permissionMode = PermissionMode.AUTO;
     private volatile ApprovalHandler approvalHandler;
@@ -455,12 +457,14 @@ public class AgentEngine implements AgentLoop {
             // Phase 3b: 组装 ModelContext（ContextPipeline 唯一入口）
             var ctx = context.build(buildContextRequest());
             List<Message> modelContext = new ArrayList<>(ctx.messages());
-            // always-on 规则（始终执行，不依赖预算）
-            modelContext = context.applyAlwaysOnRules(modelContext);
+
+            // P1-A7：always-on 由 ContextPipeline 唯一编排，不在 Pipeline 外重复调用
+            // P1-A7：每轮取 hint snapshot 并入 compact
+            var hint = hintProvider.snapshot(currentRunId, turnCount);
 
             // Phase 2: 上下文掩码 + 预算分析 + compact（ContextPipeline 聚合）
             int toolDefTokens = estimateToolTokens();
-            CompactionResult cr = context.compact(modelContext, toolDefTokens, turnCount);
+            CompactionResult cr = context.compact(modelContext, toolDefTokens, turnCount, hint);
             modelContext = cr.messages();
 
             if (cr.compacted()) {
@@ -1062,6 +1066,11 @@ public class AgentEngine implements AgentLoop {
         this.providerGateway = java.util.Objects.requireNonNull(gateway, "gateway required");
         this.subAgentRunner.setGateway(this.providerGateway);
         this.planCoordinator = createPlanCoordinator();
+    }
+
+    /** P1-A7：注入 CompactionHintProvider（OPS workflow 通过此接口提供 anchors） */
+    public void setCompactionHintProvider(CompactionHintProvider provider) {
+        this.hintProvider = java.util.Objects.requireNonNull(provider, "hintProvider required");
     }
 
     private PlanRunCoordinator createPlanCoordinator() {

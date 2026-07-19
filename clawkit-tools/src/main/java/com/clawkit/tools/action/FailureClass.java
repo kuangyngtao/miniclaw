@@ -29,6 +29,9 @@ public enum FailureClass {
     /** 派发前取消，未派发。 */
     CANCELLED_BEFORE_DISPATCH(EffectCertainty.NOT_DISPATCHED),
 
+    /** 派发前 deadline 超限，未派发。 */
+    DEADLINE_EXCEEDED_BEFORE_DISPATCH(EffectCertainty.NOT_DISPATCHED),
+
     /** 服务端在执行前明确拒绝，确认无副作用。 */
     SERVER_REJECTED_BEFORE_EXECUTION(EffectCertainty.NO_EFFECT_CONFIRMED),
 

@@ -24,8 +24,3 @@ public record ModelResponse(
         return new ModelResponse(content, List.of(), FinishReason.STOP, usage, ProviderResponseMetadata.EMPTY);
     }
 }
-
-/** Provider 响应元数据。 */
-record ProviderResponseMetadata(String model, String id, int retryCount) {
-    static final ProviderResponseMetadata EMPTY = new ProviderResponseMetadata("", "", 0);
-}

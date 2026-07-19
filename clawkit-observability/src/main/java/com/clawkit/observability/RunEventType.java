@@ -21,6 +21,7 @@ public final class RunEventType {
 
     public static final String TOOL_INVOKED = "tool_invoked";
     public static final String TOOL_COMPLETED = "tool_completed";
+    public static final String TOOL_RETRY_SCHEDULED = "tool_retry_scheduled"; // P0-1
 
     public static final String APPROVAL_DECIDED = "approval_decided";
 
