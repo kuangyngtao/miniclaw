@@ -23,6 +23,8 @@
         <module>clawkit-observability</module>
         <module>clawkit-im</module>
         <module>clawkit-evaluation</module>
+        <module>extensions/clawkit-ops-mcp</module>
+        <module>extensions/clawkit-ops-loop</module>
     </modules>
 
     <properties>

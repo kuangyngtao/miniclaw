@@ -141,14 +141,18 @@ Metadata
 
 Docker Desktop 镜像和自动 smoke 已通过。由于当前自动化终端不能提供 Windows ConPTY，真实 `docker run --rm -it` 仍需在 Windows Terminal 手工执行；无 TTY 失败路径已经验证为 `C-007`、退出码 2。
 
-### 5.3 Ops Loop 尚未实现
+### 5.3 Ops Loop 已完成 OPS-0A
+
+已完成的本地只读工程冒烟：
+
+- nginx → demo-api 的本地可重复 Fixture、容器停止注入和幂等清理。
+- 仅含 5 个固定只读工具的独立 `clawkit-ops-mcp`。
+- Incident 状态机、Evidence Bundle、Diagnosis 以及 JSON/Markdown 报告。
+- 隐藏 Ground Truth Evaluator 和一票否决项；真实 Docker 连续 10 次门禁通过。
 
 以下能力仍是路线，不是完成事实：
 
-- 本地可重复 Incident Fixture。
-- 独立 `clawkit-ops-mcp`。
-- Incident 状态机和 Evidence Bundle。
-- 隐藏 Ground Truth Evaluator。
+- PostgreSQL 锁等待黄金诊断与对抗变体。
 - 远程只读 SSH。
 - Typed Ops Runner、独立验证和回滚/补偿。
 
@@ -168,7 +172,7 @@ D0 P0-D 外部证据收口
 路线不按固定周数承诺，而以可重复、可评分、可清理的退出门禁推进。当前唯一优先级：
 
 1. 整理提交，跑通真实 CI、Docker smoke 和首个 Release。
-2. 用 App Down 打通 Fixture、Evidence、Incident、Diagnosis、Evaluator 和 Cleanup。
+2. 用 PostgreSQL 锁等待建立黄金诊断、对抗变体和组合 benchmark。
 3. 用 PostgreSQL 锁等待验证多源采证、反证和隐藏答案评分。
 4. 本地门禁通过后进入远程只读。
 5. 可靠性门禁满足后才开放类型化审批写。

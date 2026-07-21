@@ -380,24 +380,20 @@ ops-fixtures/
 
 ### OPS-0A：App Down 本地只读纵向切片
 
-- **[ ] Case / Evidence / Evaluation Contract**（ops-fixtures / evaluation）
-  先定义隐藏 Ground Truth、必要证据、允许/禁止能力、诊断 schema、确定性断言和一票否决项。
-  验收：Clawkit 不可读取 Case ID、注入脚本结果或 Ground Truth；评分不依赖 Agent 自评。
+- **[x] Case / Evidence / Evaluation Contract**（ops-fixtures / evaluation）
+  已落地隐藏 Ground Truth、必要证据类型、Diagnosis schema、确定性断言和禁用工具/Ground Truth 泄漏/假修复声明一票否决；Evaluator 在报告完成后才读取临时控制目录中的答案。
 
-- **[ ] App Down Fixture**（ops-fixtures）
-  使用最小 Docker Compose 构造 nginx → demo-api，提供正常态、容器退出注入、幂等清理和外部 HTTP 阈值。
-  验收：从全新目录可一条命令建立、注入、评分和清理；连续 10 次初始状态与清理结果一致。
+- **[x] App Down Fixture**（ops-fixtures）
+  已使用 Docker Compose 构造 nginx gateway → demo-api，具备 healthcheck + `service_healthy` 正常态门禁、容器停止注入、外部 HTTP 判定、动态宿主端口和 finally 幂等清理。
 
-- **[ ] 独立只读 `clawkit-ops-mcp`**（extensions / tools）
-  首批只提供 service/container status、ports、HTTP probe 和带时间窗口的有界 logs。
-  验收：不存在 `shell_exec` / `ssh_exec(command)`；每个工具声明 schema、readOnly、riskLevel、timeout、output limit 和 audit fields。
+- **[x] 独立只读 `clawkit-ops-mcp`**（extensions / tools）
+  已仅提供 `service_status`、`container_status`、`ports`、`http_probe` 和绝对时间窗有界 `logs`；service/port/endpoint 均为 allowlist，无通用命令入口，工具声明 input/output schema、只读注解、LOW 风险、timeout、output limit 和 audit fields。
 
-- **[ ] 只读 Incident 与报告**（clawkit-ops-loop）
-  状态先覆盖 DISCOVERED、COLLECTING、EVIDENCE_READY、DIAGNOSED、INCONCLUSIVE、READ_ONLY_COMPLETE、ESCALATED。
-  验收：Evidence 区分事实/推测、observedAt/collectedAt、当前/历史；输出 JSON 与 Markdown，并关联 clawkit runId。
+- **[x] 只读 Incident 与报告**（clawkit-ops-loop）
+  已覆盖 DISCOVERED、COLLECTING、EVIDENCE_READY、DIAGNOSED、INCONCLUSIVE、READ_ONLY_COMPLETE、ESCALATED 及合法迁移；Evidence 区分事实/推测、observedAt/collectedAt、当前/历史，并输出关联 RunEvent 引用的 JSON 与 Markdown。
 
-- **[ ] App Down 纵向门禁**（ops / evaluation）
-  验收：必要证据覆盖、根因命中和报告生成由 Evaluator 判断；越权、Ground Truth 泄漏和假修复声明均为 0。
+- **[x] App Down 纵向门禁**（ops / evaluation）
+  `ops-fixtures/run-ops0a.ps1` / `.sh` 可一键构建、建立、注入、采证、诊断、评分和清理。2026-07-20 本机 Docker 连续 10 次真实验证为 10/10 通过，初始态与清理态一致，必要证据覆盖、根因命中和报告生成均通过，越权、Ground Truth 泄漏和假修复声明为 0。
 
 ### OPS-0B：PostgreSQL 锁等待黄金诊断
 

@@ -1,8 +1,8 @@
 # Clawkit Ops Loop 架构与演进路线
 
-> 修订日期：2026-07-17
+> 修订日期：2026-07-20
 >
-> 状态：目标架构，尚未实现
+> 状态：OPS-0A 本地只读纵向切片已实现；OPS-0B 及后续仍为目标架构
 >
 > 当前工程事实：[project-highlights-and-ops-loop-roadmap.md](project-highlights-and-ops-loop-roadmap.md)
 
