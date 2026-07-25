@@ -2,25 +2,25 @@
 
 [![CodeQL](https://github.com/kuangyngtao/clawkit/actions/workflows/codeql.yml/badge.svg)](https://github.com/kuangyngtao/clawkit/actions/workflows/codeql.yml)
 
-> Java 本地 AI 编程 Agent，面向代码仓库的 CLI 编程助手
+> Java 21 本地 Agent Runtime，以 Evidence-gated Ops Loop 验证安全执行、失败恢复与独立验收
 
-clawkit 是一个基于 Java 的本地编程 Agent。它将 LLM Provider、工具调用、权限模式、上下文管理、记忆、会话和 MCP 扩展组合成一个 CLI 运行时，用于探索 AI Agent 在本地代码仓库中的执行流程。
+clawkit 将 LLM Provider、工具调用、权限模式、上下文管理、记忆、会话、可靠性门禁和 MCP 扩展组合成一个本地 Agent Runtime。编程助手是基础入口；当前旗舰应用是 Agentic SRE：在可丢弃环境中完成故障发现、受限采证、结构化诊断、审批动作和独立验证。
 
-当前项目处于原型开发和底层工程化阶段，重点建设 Agent harness 的基本能力：上下文管理、工具系统、执行编排、状态记忆、评估观测、权限约束和失败恢复。
+项目仍处于工程化原型阶段。当前重点不是扩展更多通用抽象，而是用 Ops Arena 证明 Runtime 在证据缺失、远程失败和危险副作用下仍然可控、可恢复、可评测。
 
 ## 项目概览
 
 | 维度 | 说明 |
 | --- | --- |
-| 项目类型 | Java 多模块 AI Agent / CLI 编程助手 |
+| 项目类型 | Java 多模块 Agent Runtime / Agentic SRE 应用 |
 | 运行方式 | 本地 CLI |
-| 核心目标 | 在本地代码仓库中完成代码分析、文件搜索、工具调用、代码修改和任务执行 |
-| 关键机制 | ReAct、Plan-and-Execute、权限模式、MCP、上下文压缩、会话记忆 |
-| 当前阶段 | 原型开发中，重点建设底层 Agent harness |
+| 核心目标 | 让 Agent 在工具副作用、部分失败和证据不确定条件下安全完成任务 |
+| 关键机制 | ReAct、Plan-and-Execute、MCP、Evidence、Side Effect Gate、独立 Verification、Benchmark |
+| 当前阶段 | OPS-0 本地诊断工程完成；OPS-1 远程只读 Discovery 待完成 |
 
 ## 项目目标
 
-clawkit 关注的是编程 Agent 的底层运行能力，而不是单次对话效果。项目目标包括：
+clawkit 关注 Agent 的底层运行能力和可验证闭环，而不是单次对话效果。项目目标包括：
 
 - **本地优先**：围绕本地仓库运行，支持指定项目目录作为 Agent 工作空间。
 - **工具可控**：通过统一工具层执行读文件、搜索、编辑、命令运行等操作。
@@ -28,6 +28,8 @@ clawkit 关注的是编程 Agent 的底层运行能力，而不是单次对话�
 - **上下文可管理**：跟踪上下文使用情况，支持压缩、会话和磁盘记忆。
 - **扩展可插拔**：通过 MCP 接入外部工具，通过 IM 模块接入消息通道。
 - **基座通用**：核心运行时保持通用，垂类能力放在上层扩展。
+- **证据优先**：事实、推测、时效和采集失败可区分；证据不足时允许 `INCONCLUSIVE`。
+- **独立验收**：执行者不能自证成功，确定性断言和独立上下文重新采证优先。
 
 ## 核心能力
 
@@ -40,6 +42,8 @@ clawkit 关注的是编程 Agent 的底层运行能力，而不是单次对话�
 | 记忆系统 | 基于磁盘文件的长期记忆，用于跨任务复用上下文 |
 | Provider 适配 | LLM Provider 抽象、超时、重试、熔断 |
 | IM 通道 | 抽象消息通道，预留飞书、微信等入口 |
+| 可靠性门禁 | 取消、预算、Attempt journal、结果未知、幂等、目标互斥和恢复扫描 |
+| Ops 扩展 | 白名单只读采证、Incident、Evidence、Diagnosis、Flight Recorder 和隐藏答案评测 |
 
 ## 工程状态
 
@@ -88,7 +92,7 @@ API Key 只能通过环境变量提供，禁止写入 `config.yaml`。非敏感�
 
 ```powershell
 .\clawkit.cmd --root C:\path\to\project
-.\clawkit.cmd -m deepseek-chat
+.\clawkit.cmd -m deepseek-v4-flash
 .\clawkit.cmd --thinking
 .\clawkit.cmd --im=feishu
 ```
@@ -185,7 +189,12 @@ Built-in Tools / MCP Tools / Safety Interceptors
 | `clawkit-provider` | LLM Provider 抽象、超时、重试、熔断 |
 | `clawkit-context` | 上下文统计、消息脱敏、上下文压缩 |
 | `clawkit-memory` | 磁盘记忆、YAML frontmatter 存储 |
+| `clawkit-reliability` | 取消、预算、Attempt、Side Effect Gate、恢复与独立验证 |
+| `clawkit-observability` | RunEvent 事实源、指标投影、Trace 与报告读取 |
+| `clawkit-evaluation` | 固定 Case、Baseline、Scorer 与回归比较 |
 | `clawkit-im` | IM 通道抽象、消息桥接，属于扩展入口 |
+| `extensions/clawkit-ops-mcp` | 结构化、白名单、可审计的运维能力层 |
+| `extensions/clawkit-ops-loop` | Incident、采证、诊断、评测和后续修复编排 |
 
 ## 技术栈
 
@@ -204,19 +213,18 @@ Built-in Tools / MCP Tools / Safety Interceptors
 - [CLAUDE.md](./CLAUDE.md)：AI 协作入口、项目边界和强约束
 - [DESIGN.md](./DESIGN.md)：架构原则、类设计、接口设计、解耦、测试和代码审查规范
 - [TODO.md](./TODO.md)：当前路线图和重构待办
-- [docs/project-highlights-and-ops-loop-roadmap.md](docs/project-highlights-and-ops-loop-roadmap.md)：项目现状、技术亮点、工程证据和对外表述
 - [docs/ops-loop.md](docs/ops-loop.md)：Ops Loop 架构、安全模型、Case 和门禁式演进路线
+- [docs/project-highlights-and-ops-loop-roadmap.md](docs/project-highlights-and-ops-loop-roadmap.md)：2026-07-17 阶段性历史快照，不作为当前状态来源
 - [SECURITY.md](./SECURITY.md)：安全策略和漏洞报告方式
 
 ## 演进方向
 
-P0-O、P0-S 和 P0-R 已完成；P0-D 已完成本地实现，正在收口真实 CI、Docker smoke 和首个 Release。后续顺序以 [TODO.md](./TODO.md) 为准：
+P0 Runtime 安全、观测和可靠性主链已经建立；OPS-0A/0B 工程实现完成，OPS-1 已完成 SSH 后端和远程只读账号。后续顺序以 [TODO.md](./TODO.md) 为准：
 
-1. 收口 P0-D 外部交付证据。
-2. 用 App Down 完成本地只读 Ops 纵向切片。
-3. 用 PostgreSQL 锁等待完成黄金诊断、对抗 Case 和隐藏答案评测。
-4. 本地门禁通过后进入远程只读靶机。
-5. 可靠性门禁满足后，再开放类型化审批修复和有限自动化。
+1. 收口未提交改动、CI、Docker smoke 和首个 Release。
+2. 完成 OPS-1 远程只读 Discovery Loop 与异常分类。
+3. 以单个 allowlisted `restart_service` 动作完成 OPS-2A 审批、Precheck、独立 Verification 和补偿闭环。
+4. 再补 Incident 去重、调度、Playbook State 和通知，形成最小持续 Loop。
 
 更详细的待办见 [TODO.md](./TODO.md)。
 

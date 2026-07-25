@@ -30,6 +30,7 @@
 强规则：
 
 - 先核对代码事实，再写方案或修改完成状态；文档记录不能替代代码验证。
+- 默认不为技术调研、执行提示词、阶段报告或完成报告单独创建 `docs/` 文件；临时过程留在任务上下文，当前状态写入 `TODO.md`。只有需要长期维护的设计、契约、用户说明或运维手册才新增文档。
 - 核心重构必须先确认 `TODO.md` 中对应主链和前置条件。
 - 公共契约、模块边界、权限模型或路线变化，必须同步更新对应文档。
 - 重构默认不改变外部行为；需要改变时，先写清验收标准和回归测试。
@@ -38,7 +39,7 @@
 
 ## 项目定位
 
-clawkit 是 Java 21 实现的本地 AI 编程 Agent 底座，主要运行形态是 CLI，也支持 IM 通道镜像。
+clawkit 是 Java 21 实现的本地 Agent Runtime，主要运行形态是 CLI，也支持 IM 通道镜像。编程助手是基础交互入口；Evidence-gated Ops Loop 是当前用于验证 Runtime 可靠性、安全性和可评测性的旗舰垂直应用。
 
 核心价值不是某个垂类效果，而是提供通用、可控、可测、可靠、可观测、可扩展的 Agent runtime：
 
@@ -47,6 +48,16 @@ clawkit 是 Java 21 实现的本地 AI 编程 Agent 底座，主要运行形态�
 - 内置工具与 MCP 工具的统一契约、权限和审计。
 - 上下文预算、压缩、会话、记忆和 Skill 注入。
 - OpenAI-compatible Provider 的适配、重试、熔断和流式解析。
+
+项目按三层表达：
+
+```text
+Clawkit Agent Runtime
+  -> Safe Ops Capability Layer（clawkit-ops-mcp / clawkit-ops-loop）
+  -> Ops Arena（Fixture / Hidden Ground Truth / Evaluator）
+```
+
+Runtime 是通用底座，Ops Loop 是上层 Agentic SRE 应用，Ops Arena 是可重复、可评分、可清理的验证环境。Ops 的领域逻辑不得反向进入核心引擎。
 
 ## 产品边界
 

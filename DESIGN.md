@@ -190,8 +190,14 @@ Session 只保存真实对话事实：用户输入、助手响应、工具调用
 ### Compact
 
 - 触发阈值来自明确的模型窗口和预算策略。
+- 决策使用 projected prompt、预留输出、required anchor、安全余量和剩余 run token 预算；
+  逐级选择 L0 无动作、L1 确定性清理、L2 抽取式压缩、L3 生成式摘要或 L4 结构化失败。
+- L3 只有在预计后续 cache-miss token 节省覆盖摘要调用成本，或模型硬限制要求时才允许执行；
+  run token 预算不足仍由 ExecutionControl 返回预算终态，不能伪装成 compact 失败。
 - compact 前后都记录分区 token、保留约束和丢弃内容摘要。
 - 必须保留用户约束、文件路径、错误证据、未完成 todo 和审批边界。
+- required anchors 使用 canonical snapshot、hash 和内部 ID sidecar 验证；只在进入破坏性压缩层时
+  注入模型上下文，短上下文不得重复注入已有证据。
 - compact 后重新预算；超过硬限制时结构化失败，不继续盲目调用模型。
 
 ### Memory
@@ -263,7 +269,15 @@ RunEvent 是运行时与持久化的边界。业务代码只发事件，不直�
 | Component | ToolCallExecutor、ContextPipeline、RunRecorder、parser |
 | Integration | 各执行模式跨模块链路、权限和持久化 |
 | Manual | 真实模型、网络、IM 和外部 MCP |
-| Benchmark | 固定任务完成率、轮次、耗时、工具失败率 |
+| Benchmark | 分层验证工程管道、模型诊断能力和闭环执行，不用单一通过率混合三种结论 |
+
+Benchmark 固定分为三类：
+
+1. **Pipeline Benchmark**：验证 Fixture、采证、权限、协议、报告、Evaluator 和 Cleanup。允许确定性信号与结果校准；结论只能表述为工程管道可靠，不能外推为模型诊断准确率。
+2. **Diagnosis Benchmark**：验证模型在证据完整、缺失、冲突、过期、未知根因和未见组合下的判断。确定性代码可以校验 schema、证据引用和安全边界，但不得改写 `rootCauseCode`、置信度或当前状态后再计为模型通过。
+3. **Closed-loop Benchmark**：验证 Discovery、诊断、审批、Precheck、类型化动作、独立 Verification、补偿和人工升级。必须报告假修复、越权、结果未知、人工介入、MTTD、MTTR 和单 Incident 成本。
+
+三类结果分别报告 requested、completed、evaluable、passed 和失败原因；禁止用 Pipeline Benchmark 的高通过率宣传未知问题诊断能力或自动修复能力。
 
 硬性要求：
 
