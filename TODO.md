@@ -38,8 +38,8 @@
 
 1. **D0 / P0-D 外部证据收口**：Windows `-it` 人工 smoke 和首个 Release（含 P1-G 变更的收口提交与真实 CI）。
 2. **P1-A 可靠性基础阶段冻结**：PA-1 主链已接入；PA-2/PA-3 完成通用契约和部分组件，剩余实现由 OPS fixture 驱动，不继续扩展空泛 Runtime 抽象。
-3. **OPS-0A**：App Down 本地只读纵向切片，打通 Fixture、Evidence、Incident、Diagnosis、Evaluator 和 Cleanup，并为 P1-A 的 Log reducer、task-aware compact 和组合 benchmark 提供真实输入。
-4. **OPS-0B**：PostgreSQL 锁等待黄金诊断及相同症状不同根因、旧证据、自恢复和 `INCONCLUSIVE` 对抗 Case。
+3. **[x] OPS-0A**：App Down 本地只读纵向切片已完成，Fixture、Evidence、Incident、Diagnosis、Evaluator 和 Cleanup 已打通。
+4. **[x] OPS-0B**：PostgreSQL 黄金诊断工程实现与真实模型参与的 Pipeline Benchmark 已完成；该结果不等同于模型对未知故障的独立诊断准确率。
 5. **OPS-1**：本地门禁通过后启用远程只读靶机（P1-G 已通过）。
 6. **OPS-2A**：审批修复（OPS-1 稳定后）；Ops 写工具注册必须满足 [docs/p1-g-design.md](docs/p1-g-design.md) 硬约束。
 7. **P2**：成本与效率（OPS-0B 基线数据驱动排序）。
@@ -318,22 +318,25 @@ P1-A 的前三项（失败分类、智能截断、任务感知 compact）直接�
 
 ### P1-A：一般可靠性与完成率（优先项）
 
-当前代码事实、验证证据、冻结边界和恢复顺序见 [docs/p1-a-implementation-status.md](docs/p1-a-implementation-status.md)；需求分析见 [docs/p1-a-requirements-and-technical-research.md](docs/p1-a-requirements-and-technical-research.md)；定版方案及反方评审见 [docs/p1-a-design.md](docs/p1-a-design.md)；历史 DeepSeek 执行 runbook 见 [docs/p1-a-deepseek-execution-prompts.md](docs/p1-a-deepseek-execution-prompts.md)。
+定版方案及反方评审见 [docs/p1-a-design.md](docs/p1-a-design.md)；当前代码事实、冻结边界和恢复条件只在本节维护。
 
 - **[~] PA-1 失败分类与恢复策略**（engine / provider / tools）
   主链已落地：`REPAIR_INPUT`、窄 `ToolRetryPolicy`、只读/可信/确认无效果的有界重试、真实 attempt/stopReason 事件、重试事件持久化和 Provider metadata 返回值传递。副作用执行仍只经过 P1-G。
-  已验证：同输入总 attempts 有界；INVALID_ARGUMENTS 不原样重试；取消/deadline/预算可终止退避；串行和并行结果顺序不变。
-  收尾待办：旧 ToolCompleted JSON 的 `attemptCount/inputComplete` 默认值 normalization；Provider jitter 可注入、HTTP-date `Retry-After` 和解析失败 retryCount 测试。
+  已验证：同输入总 attempts 有界；INVALID_ARGUMENTS 不原样重试；取消/deadline/预算可终止退避；串行和并行结果顺序不变；旧 ToolCompleted/CompactCompleted JSON 在 codec 边界恢复兼容默认值。
+  收尾待办：Provider jitter 可注入、HTTP-date `Retry-After` 和解析失败 retryCount 测试。
 
 - **[~] PA-2 工具结果智能截断**（tools）
   已落地：`ReducedToolOutput` 契约、扩展统计与事件字段、Bash stats 从 envelope 派生、BoundedOutputCollector 行数/WARN 采集。
   剩余：`ReducedToolOutput` 尚未成为生产唯一事实源；Grep streaming + before/after context、WARN 最终保留、Log/Relation reducer 与 fixture 未完成。日志/PostgreSQL 实际 adapter 随 OPS-0A/0B 接入。
   验收门禁保持：Bash/Grep/Log/Relation 截断后关键内容不丢失，且 stats、envelope、模型可见文本和事件一致。
 
-- **[~] PA-3 任务感知 compact**（context / engine）
-  已落地：通用 hint/anchor/profile/audit/options 契约、`CompactionHintProvider` 注入链和带 canonical render/hash verify 的 `AnchorSnapshot` 组件。
-  剩余：`DefaultContextPipeline` 尚未接入 snapshot、legacy constraint 转 anchor、verify/reinsert/re-budget 和 fail-closed；生产 `CompactionAudit` 仍为空。
-  `OPS_DIAGNOSIS` 暂不可作为产品能力启用；待 OPS fixture 驱动完整 pipeline 和 20+ turn 组合 benchmark 后验收。
+- **[x] PA-3 任务感知 compact**（context / engine / ops）
+  `DefaultContextPipeline` 已接入原始上下文 legacy constraint 提取、bounded canonical anchor snapshot、
+  ID/hash verify、单次 reinsert、re-budget 和 fail-closed；生产 `CompactionAudit` 记录 profile、anchor、
+  discard range、层级、原因、耗时与失败码。OPS 入口从 Incident/Evidence/DiagnosticSignals 生成真实
+  `OPS_DIAGNOSIS` hint；短上下文不重复注入 anchors，26-turn 组件测试覆盖摘要遗漏、同 ID 更新、
+  required over-budget 和补回后硬超限，Engine 测试断言失败后 Provider 调用为 0。
+  ✅ 2026-07-22 — PA-3 安全链和生产 producer 完成；真实模型成本收益归 P2 自适应 compact 门禁。
 
 ### P1-A：一般可靠性与完成率（延后项）
 
@@ -345,7 +348,11 @@ P1-A 的前三项（失败分类、智能截断、任务感知 compact）直接�
 
 前置：Benchmark 能证明没有牺牲可靠性和完成率。
 
-- **[ ] 自适应分层 compact**。
+- **[~] 自适应分层 compact**。
+  已落地 L0 无动作、L1 确定性去重、L2 抽取式 mask/pressure、L3 带边际 token 收益门禁的
+  生成式 map-reduce、L4 结构化失败；决策计入输出预留、安全余量、required anchor 和剩余 run
+  token 预算，事件可回放 level/reason/duration/discard ranges。剩余门禁：用真实 20+ turn workload
+  冻结完成率、cache-miss token、摘要调用成本和 P95 对比；在此之前不宣称成本收益。
 - **[ ] 多模型路由**。
 - **[ ] Prompt caching**。
 - **[ ] 可重置的 Bash session 复用**。
@@ -397,32 +404,35 @@ ops-fixtures/
 
 ### OPS-0B：PostgreSQL 锁等待黄金诊断
 
-- **[ ] 订单业务 Fixture 与 k6 断言**（ops-fixtures）
-  构造 nginx → order-api → PostgreSQL，使用固定种子合成订单；k6 验证创建、查询、金额、重复订单、成功率和 P95。
-  验收：正常态和清理确定；不用生产数据；业务断言失败时测试返回非零。
+- **[x] 订单业务 Fixture 与 k6 断言**（ops-fixtures）
+  已构造 nginx → order-api → PostgreSQL，使用固定种子合成订单；k6 覆盖创建、查询、金额、重复订单、成功率和 P95，正常态、故障注入与 finally 清理均由 runner 检查，业务断言失败返回非零。
 
-- **[ ] 锁与数据库只读证据**（clawkit-ops-mcp）
-  提供 PostgreSQL 活动会话、锁、阻塞链和连接统计只读视图，不提供自由 SQL。
-  验收：能形成带时间的阻塞链 Evidence Bundle；凭据和连接串不进入模型或报告。
+- **[x] 锁与数据库只读证据**（clawkit-ops-mcp）
+  已提供 PostgreSQL 活动会话、锁图、连接统计及业务/资源/日志等 allowlist 只读视图，不提供自由 SQL；Evidence v2 记录时间窗、采集状态、有效期和 Run 引用，凭据与连接串不进入模型或报告。
 
-- **[ ] 黄金 Case 与对抗变体**（ops-fixtures / evaluation）
-  依次覆盖明确锁等待、相同延迟但不同根因、旧日志、自恢复和未知根因。
-  验收：Diagnosis 包含支持证据、反证、候选根因和缺失证据；未知根因返回 `INCONCLUSIVE`；每个 Case 至少 20 次盲测并报告原始计数。
+- **[x] 黄金 Case 与对抗变体**（ops-fixtures / evaluation）
+  已覆盖 `DB_LOCK_WAIT`、`CPU_PRESSURE`、`CONNECTION_EXHAUSTION`、`STALE_LOCK_LOG`、`SELF_RECOVERED` 和 `UNKNOWN`。Diagnosis v2 包含支持证据、反证、候选根因、缺失证据、当前状态和恢复归因；确定性 Evaluator 检查证据引用、时效、禁用工具、Ground Truth 泄漏和假修复声明。
+  2026-07-22 完整 6×20 真实模型盲测共 120 次：118 次可评估且 118/118 通过，2 次因 Provider 网络失败和额外 MCP 参数协议错误未完成；两个补测均通过。随后将基线采证与模型判断分离、只暴露 `submit_diagnosis`、注入完整受限证据并增加 Provider 重试，针对原失败场景真实模型冒烟 4/4 通过。最新优化版尚未重跑完整 6×20，因此不得表述为“最新版本端到端 120/120”。
 
-- **[ ] Incident Flight Recorder**（ops / observability）
-  按时间线展示症状、证据、假设、排除理由、权限门禁和 Evaluator 结果。
-  验收：不复制 Runtime 工具审计事实，以 run/event 引用关联。
+- **[x] Incident Flight Recorder**（ops / observability）
+  已按时间线记录权限边界、证据、假设、排除理由和最终诊断，并通过 run/event 引用关联 Runtime 工具审计事实；报告同时输出结构化 JSON、Markdown、证据与诊断信号。
+
+- **[~] 最新优化版完整盲测证据收口**（benchmark，非功能阻塞）
+  如需对外宣称最新构建完整验收通过，重新执行 6 个 Case × 20 次真实模型盲测，并分别报告 requested、completed、evaluable、passed、Provider/协议失败和 fixture cleanup 原始计数。
+
+- **[~] Benchmark 口径拆分**（evaluation，非功能阻塞）
+  现有 6×20 数据归入 Pipeline Benchmark：允许 `DiagnosticSignals` 和 `DiagnosisReconciler` 参与，用于证明采证、协议、权限、报告、评测与清理链路。新增 Diagnosis Benchmark 时，确定性代码只能校验或否决，不能改写模型的根因、置信度和当前状态；Case 必须覆盖证据缺失、证据冲突、过期证据、未知根因和未见故障组合。OPS-2A 后再新增 Closed-loop Benchmark，验证审批、Precheck、动作、独立 Verification、补偿和人工升级。
 
 ### OPS-1：真实只读 SSH 运维
 
 进入条件：OPS-0A/0B 本地门禁通过，Fixture 可幂等重建和清理，D0 的 Docker/Release 可用。
 
-- **[ ] SSH 执行后端**（clawkit-ops-mcp）
-  支持主机配置、密钥认证、known_hosts 严格校验、连接/命令 timeout、并发限制、输出截断和结构化错误。
-  验收：私钥不进入模型、日志或仓库；测试使用 fake SSH Server/transport；目标主机和命令模板均为 allowlist。
+- **[x] SSH 执行后端**（clawkit-ops-mcp）
+  新增 `SshTargetConfig`（host/port/user/auth/known_hosts/ControlMaster）和 `SshCommandExecutor`（实现 `CommandExecutor`，通过系统 `ssh` CLI 远程执行命令；连接复用、并发限制、输出截断；分类 CONNECTION_FAILED/AUTH_FAILED/HOST_KEY_REJECTED/COMMAND_NOT_FOUND）。`OpsMcpMain` 和 `OpsMcpHttpMain` 检测 `CLAWKIT_OPS_SSH_HOST` 后自动切换 `SshCommandExecutor` + `DockerOpsBackend`；`DockerOpsBackend` 接口不变。密码认证通过 `sshpass -e` 支持但不推荐。
+  验收：19 项 SSH 测试全部通过（fake transport 验证命令构造、错误分类、shell 转义、并发边界、配置校验）；私钥路径通过环境变量传入，不进模型/日志/仓库；目标主机和命令模板均为 allowlist（`SshCommandExecutor` 不改变 `DockerOpsBackend` 的命令模板和参数校验链）。
 
-- **[ ] 云服务器只读运维账号**（ops / infrastructure）
-  使用非 root、无 sudo 的专用账号，只开放所需日志、状态和健康检查权限；首个远程环境仅运行 fixture/演示服务。
+- **[x] 云服务器只读运维账号**（ops / infrastructure）
+  `ops-fixtures/remote/setup-opsro.sh` 已执行：腾讯云 Lighthouse `lhins-1d23zpu6`（122.51.51.118，4核4G Ubuntu）上 `opsro` 用户已创建（无 sudo、口令锁定、仅密钥认证、docker 组成员），SSH 已加固（禁止密码/PTY/端口转发/环境变量注入）。本地通过 `ssh -i id_ed25519_clawkit opsro@122.51.51.118 docker version` 验证免密连接成功。
   验收：Agent 无法写文件、重启服务或执行任意命令；越权尝试被工具层和主机权限双重拒绝并审计。
 
 - **[ ] 远程 Discovery Loop**（clawkit-ops-loop）
@@ -491,6 +501,8 @@ ops-fixtures/
 
 ## 验证记录
 
+- 2026-07-22：**OPS-1 SSH 执行后端 + 远程靶机完成** — 新增 `SshTargetConfig` + `SshCommandExecutor`，`OpsMcpMain`/`OpsMcpHttpMain` 自动切换远程后端，19 项 SSH 测试通过。腾讯云 Lighthouse（122.51.51.118，4C4G Ubuntu）`opsro` 只读账号已就绪：SSH 密钥免密连接 + docker 可用 + 无 sudo + SSH 加固。OPS-1 剩余远程 Discovery Loop 和 Fixture 部署待推进。
+- 2026-07-22：**OPS-0A/0B 工程实现完成** — OPS-0A App Down 本地只读纵向切片已具备 10/10 Docker 验证；OPS-0B 建立 PostgreSQL 六类盲测 Case、确定性基线采证、Evidence v2、DiagnosticSignals、Diagnosis v2 结构化提交与校准、Flight Recorder、自动评分和幂等清理。完整 6×20 真实 DeepSeek 盲测 120 次中 118 次可评估且全部通过，两个不可评估样本补测通过；针对失败模式收敛模型工具面并将 Provider 重试增至 2 后，`CONNECTION_EXHAUSTION` 与 `SELF_RECOVERED` 冒烟 4/4 通过。相关 Reactor 测试 550 项、0 失败/错误/跳过，`git diff --check` 通过，残留 OPS 容器为 0。最新优化版完整 6×20 重跑仍是 benchmark 证据收口项，不作为功能完成阻塞项。
 - 2026-07-18：**P1-G 写操作前强制门禁完成（P1-G0..G6）** — 新增 `clawkit-reliability` 模块与 `com.clawkit.tools.control/action` 契约族；取消/deadline/预算贯穿 ReAct、Plan、SubAgent、Provider、Tool、ProcessRunner；ToolCallExecutor 成为唯一 Side Effect Gate（无 ActionDescriptor fail closed）；CRC journal + `force(true)` + 跨进程文件锁 + 幂等索引 + 目标互斥；结果未知 sticky 禁止自动重复写；MANUAL_REQUIRED 永不自动 VERIFIED_SUCCESS；Bootstrap 启动恢复扫描 + 确定性 reconcile；独立 Verification Run 隔离。新增 68 项可靠性/门禁测试（含真实双 JVM 目标互斥、强杀窗口、journal 尾部/中段损坏、未来 schema、迟到响应 CAS 拒绝）。全量 `mvn -B -ntp clean verify`：11 模块、575 测试、0 失败；ArchUnit 10/10；`git diff --check` 通过；fat JAR 含 reliability 类且 `--version` smoke 通过；Dockerfile 补齐 reliability 模块。定版设计见 [docs/p1-g-design.md](docs/p1-g-design.md)。
 
 - 2026-07-18：路线重排 — P1-G 提至 OPS 之前作为写操作强制门禁，展开为 4 个可执行子任务（PG-1 取消贯穿、PG-2 结果未知模型、PG-3 Attempt 幂等、PG-4 独立 Verification）。P1-A 拆分为优先项（PA-1 失败分类、PA-2 智能截断、PA-3 任务感知 compact）和延后项（session 缓存、Provider fallback、流式早停）。OPS-1 进入条件增加 P1-G 通过。
