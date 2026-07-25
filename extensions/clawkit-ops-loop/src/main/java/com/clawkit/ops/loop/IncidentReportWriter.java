@@ -26,7 +26,13 @@ public final class IncidentReportWriter {
         md.append("# OPS Incident ").append(report.incidentId()).append("\n\n");
         md.append("- State: `").append(report.state()).append("`\n");
         md.append("- Run: `").append(report.runId()).append("`\n");
+        md.append("- Schema: `").append(report.schemaVersion()).append("`\n");
+        md.append("- Capability profile: `").append(report.capabilityProfile()).append("`\n");
+        md.append("- Model: `").append(report.model()).append("`\n");
+        md.append("- Prompt: `").append(report.promptVersion()).append("`\n");
         md.append("- Root cause: `").append(report.diagnosis().rootCauseCode()).append("`\n");
+        md.append("- Diagnosis status: `").append(report.diagnosis().diagnosisStatus()).append("`\n");
+        md.append("- Current condition: `").append(report.diagnosis().currentCondition()).append("`\n");
         md.append("- Confidence: ").append(report.diagnosis().confidence()).append("\n");
         md.append("- Claimed resolved: ").append(report.diagnosis().claimedResolved()).append("\n\n");
         md.append("## Evidence\n\n");

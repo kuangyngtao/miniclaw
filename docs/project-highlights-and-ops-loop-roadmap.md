@@ -2,7 +2,7 @@
 
 > 修订日期：2026-07-17
 >
-> 当前阶段：P0-R 已完成；P0-D 已完成本地实现，等待真实 CI、Docker 和 Release 证据
+> 文档性质：阶段性历史快照。当前状态、完成记录和实施顺序以 [TODO.md](../TODO.md) 为准；稳定项目定位以 [CLAUDE.md](../CLAUDE.md) 为准。
 >
 > 详细 Ops 架构与门禁路线：[ops-loop.md](ops-loop.md)
 

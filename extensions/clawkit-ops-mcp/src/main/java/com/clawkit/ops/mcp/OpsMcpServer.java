@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -24,11 +25,18 @@ public final class OpsMcpServer {
         "service_status", "container_status", "ports", "http_probe", "logs");
 
     private final OpsBackend backend;
+    private final OpsCapabilityProfile profile;
     private final ObjectMapper mapper;
 
     public OpsMcpServer(OpsBackend backend) {
+        this(backend, OpsCapabilityProfile.APP_DOWN_V1);
+    }
+
+    public OpsMcpServer(OpsBackend backend, OpsCapabilityProfile profile) {
         this.backend = backend;
-        this.mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        this.profile = profile;
+        this.mapper = new ObjectMapper().registerModule(new JavaTimeModule())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
     }
 
     public void serve(InputStream input, OutputStream output) throws IOException {
@@ -104,6 +112,20 @@ public final class OpsMcpServer {
                 "windowSeconds", integerProperty("Window length in seconds", 1, 900),
                 "tail", integerProperty("Maximum returned log lines", 1, 200))),
             required("service", "windowSeconds", "tail")));
+        if (profile == OpsCapabilityProfile.POSTGRES_DIAGNOSIS_V1) {
+            tools.add(tool("container_resources", "Read one bounded container resource snapshot.",
+                properties(Map.of("service", stringProperty("Allowlisted service name"))),
+                required("service")));
+            tools.add(tool("business_metrics", "Read sanitized order API metrics.",
+                properties(Map.of("endpoint", stringProperty("Allowlisted metrics endpoint"))),
+                required("endpoint")));
+            tools.add(tool("db_activity", "Read bounded PostgreSQL session activity without SQL text.",
+                properties(Map.of()), required()));
+            tools.add(tool("db_lock_graph", "Read the current PostgreSQL blocker graph.",
+                properties(Map.of()), required()));
+            tools.add(tool("db_connection_stats", "Read aggregate PostgreSQL connection usage.",
+                properties(Map.of()), required()));
+        }
         ObjectNode result = mapper.createObjectNode();
         result.set("tools", tools);
         return success(id, result);
@@ -111,7 +133,7 @@ public final class OpsMcpServer {
 
     private ObjectNode callTool(JsonNode id, JsonNode params) {
         String name = requiredText(params, "name");
-        if (!TOOL_NAMES.contains(name)) {
+        if (!profile.toolNames().contains(name)) {
             return error(id, -32602, "unknown or prohibited tool: " + name);
         }
         JsonNode args = params.path("arguments");
@@ -124,6 +146,11 @@ public final class OpsMcpServer {
             case "logs" -> backend.logs(requiredText(args, "service"),
                 Duration.ofSeconds(requiredInt(args, "windowSeconds")),
                 requiredInt(args, "tail"));
+            case "container_resources" -> backend.containerResources(requiredText(args, "service"));
+            case "business_metrics" -> backend.businessMetrics(requiredText(args, "endpoint"));
+            case "db_activity" -> backend.dbActivity();
+            case "db_lock_graph" -> backend.dbLockGraph();
+            case "db_connection_stats" -> backend.dbConnectionStats();
             default -> throw new IllegalStateException("unreachable");
         };
         JsonNode structured = mapper.valueToTree(result);

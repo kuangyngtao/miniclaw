@@ -1,10 +1,9 @@
 # P1-A 前三项技术方案与反方评审
 
-状态：设计定版（2026-07-19）；已完成阶段性实施，当前代码事实与剩余项见
-[P1-A 实施状态与阶段冻结说明](p1-a-implementation-status.md)。
+状态：设计定版（2026-07-19）；当前实施状态和剩余项以
+[`TODO.md`](../TODO.md) 的 P1-A 章节为准。
 
-依据：[P1-A 前三项需求分析与技术调研](p1-a-requirements-and-technical-research.md)、
-[P1-G 写操作前强制门禁](p1-g-design.md) 与当前代码事实。
+依据：[P1-G 写操作前强制门禁](p1-g-design.md) 与当前代码事实。
 
 ## 1. 方案结论
 

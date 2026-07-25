@@ -71,7 +71,27 @@ class OpsMcpServerTest {
         assertThat(response.path("result").path("structuredContent")
             .path("tool").asText()).isEqualTo("service_status");
         assertThat(response.path("result").path("structuredContent")
+            .path("observedAt").isTextual()).isTrue();
+        assertThat(response.path("result").path("structuredContent")
             .path("audit").path("timeoutMs").asInt()).isEqualTo(1000);
+    }
+
+    @Test
+    void postgresProfileAddsOnlyTheFiveReviewedReadOnlyTools() {
+        var server = new OpsMcpServer(new StubBackend(),
+            OpsCapabilityProfile.POSTGRES_DIAGNOSIS_V1);
+        ObjectNode response = server.handle(MAPPER.getNodeFactory().numberNode(4),
+            "tools/list", MAPPER.createObjectNode());
+
+        JsonNode tools = response.path("result").path("tools");
+        assertThat(tools).hasSize(10);
+        assertThat(tools.findValuesAsText("name"))
+            .containsExactlyInAnyOrderElementsOf(
+                OpsCapabilityProfile.POSTGRES_DIAGNOSIS_V1.toolNames());
+        for (JsonNode tool : tools) {
+            assertThat(tool.path("annotations").path("readOnlyHint").asBoolean()).isTrue();
+            assertThat(tool.path("annotations").path("destructiveHint").asBoolean()).isFalse();
+        }
     }
 
     private static final class StubBackend implements OpsBackend {

@@ -174,6 +174,85 @@ public final class DockerOpsBackend implements OpsBackend {
     }
 
     @Override
+    public OpsToolResult containerResources(String service) {
+        config.requireService(service);
+        Instant observedAt = clock.instant();
+        long startNanos = System.nanoTime();
+        CommandResult idResult = commands.execute(
+            compose("ps", "--all", "-q", service), environment,
+            config.commandTimeout(), config.maxOutputBytes());
+        if (!idResult.success()) {
+            return failed("container_resources", service, observedAt, startNanos,
+                idResult, "DOCKER_PS_FAILED");
+        }
+        String containerId = idResult.stdout().lines().findFirst().orElse("").trim();
+        if (containerId.isBlank()) {
+            return failed("container_resources", service, observedAt, startNanos,
+                idResult, "CONTAINER_NOT_FOUND");
+        }
+        return commandResult("container_resources", service,
+            List.of("docker", "container", "stats", "--no-stream", "--format",
+                "{{json .}}", containerId), output -> {
+                JsonNode raw = MAPPER.readTree(output.trim());
+                ObjectNode data = MAPPER.createObjectNode();
+                data.put("service", service);
+                data.put("containerId", shortId(containerId));
+                copyText(raw, data, "CPUPerc");
+                copyText(raw, data, "MemUsage");
+                copyText(raw, data, "MemPerc");
+                copyText(raw, data, "NetIO");
+                copyText(raw, data, "BlockIO");
+                copyText(raw, data, "PIDs");
+                return data;
+            });
+    }
+
+    @Override
+    public OpsToolResult businessMetrics(String endpoint) {
+        var uri = config.endpoint(endpoint);
+        Instant observedAt = clock.instant();
+        long startNanos = System.nanoTime();
+        try {
+            HttpResponse<byte[]> response = http.send(HttpRequest.newBuilder(uri)
+                .timeout(config.commandTimeout()).header("Accept", "application/json")
+                .GET().build(), HttpResponse.BodyHandlers.ofByteArray());
+            byte[] body = response.body() == null ? new byte[0] : response.body();
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                return result("business_metrics", endpoint, observedAt, false,
+                    MAPPER.createObjectNode(), "METRICS_HTTP_ERROR",
+                    "metrics endpoint returned HTTP " + response.statusCode(),
+                    "java-http-client", startNanos, body.length, 0, false);
+            }
+            JsonNode raw = MAPPER.readTree(body);
+            ObjectNode data = MAPPER.createObjectNode();
+            for (String field : List.of("windowSeconds", "requestCount", "successCount",
+                "errorCount", "duplicateCount", "p95LatencyMs")) {
+                JsonNode value = raw.get(field);
+                if (value != null && value.isNumber()) data.set(field, value);
+            }
+            JsonNode rawPool = raw.path("pool");
+            if (rawPool.isObject()) {
+                ObjectNode pool = data.putObject("pool");
+                for (String field : List.of("active", "idle", "pending", "max")) {
+                    JsonNode value = rawPool.get(field);
+                    if (value != null && value.isNumber()) pool.set(field, value);
+                }
+            }
+            int returned = MAPPER.writeValueAsBytes(data).length;
+            return result("business_metrics", endpoint, observedAt, true, data,
+                null, null, "java-http-client", startNanos, body.length,
+                returned, body.length > returned);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return exception("business_metrics", endpoint, observedAt, startNanos,
+                "METRICS_INTERRUPTED", e);
+        } catch (Exception e) {
+            return exception("business_metrics", endpoint, observedAt, startNanos,
+                "METRICS_FAILED", e);
+        }
+    }
+
+    @Override
     public OpsToolResult logs(String service, Duration window, int tail) {
         config.requireService(service);
         if (window == null || window.isZero() || window.isNegative()

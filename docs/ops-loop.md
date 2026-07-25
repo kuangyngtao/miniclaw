@@ -1,10 +1,10 @@
 # Clawkit Ops Loop 架构与演进路线
 
-> 修订日期：2026-07-20
+> 修订日期：2026-07-25
 >
-> 状态：OPS-0A 本地只读纵向切片已实现；OPS-0B 及后续仍为目标架构
+> 状态：OPS-0A/0B 工程实现完成；OPS-1 已完成 SSH 后端与远程只读账号，远程 Discovery Loop 待完成
 >
-> 当前工程事实：[project-highlights-and-ops-loop-roadmap.md](project-highlights-and-ops-loop-roadmap.md)
+> 当前工程事实与实施顺序：[TODO.md](../TODO.md)
 
 ## 1. 目标与非目标
 
@@ -17,6 +17,16 @@ Ops Loop 用真实但可丢弃的运维环境验证 Agent Runtime 是否能够�
 5. 由独立上下文重新验证业务、性能和数据状态。
 6. 失败时执行预定义回滚或补偿，并可靠升级人工。
 7. 由隐藏 Ground Truth Evaluator 确定性评分。
+
+当前定位不是建设通用 AIOps 平台，而是用一个 Evidence-gated Agentic SRE 应用验证 Runtime。OPS-0B 仍属于受限诊断工作流；只有补齐自动发现、持久状态、调度以及至少一个审批修复与独立验证闭环后，才可称为持续 Ops Loop。
+
+### 1.1 Benchmark 口径
+
+- **Pipeline Benchmark**：允许确定性采证、信号提取和结果校准，验证工程链路是否可靠；现有 OPS-0B 6×20 属于此类。
+- **Diagnosis Benchmark**：测模型能否处理完整、缺失、冲突、过期和未知证据；确定性代码不得改写模型结论后计为通过。
+- **Closed-loop Benchmark**：测 Discovery、审批、动作、独立 Verification、补偿和人工升级；在 OPS-2A 落地后启用。
+
+三类报告不得互相替代。Pipeline 高通过率不能表述为未知故障诊断准确率，也不能表述为自动修复成功率。
 
 非目标：
 
