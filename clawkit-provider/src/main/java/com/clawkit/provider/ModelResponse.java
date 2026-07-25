@@ -9,8 +9,14 @@ public record ModelResponse(
     List<ToolCall> toolCalls,
     FinishReason finishReason,
     TokenUsage usage,
-    ProviderResponseMetadata metadata
+    ProviderResponseMetadata metadata,
+    String reasoningContent
 ) {
+    public ModelResponse(String content, List<ToolCall> toolCalls, FinishReason finishReason,
+                         TokenUsage usage, ProviderResponseMetadata metadata) {
+        this(content, toolCalls, finishReason, usage, metadata, null);
+    }
+
     public ModelResponse {
         if (finishReason == null) finishReason = FinishReason.UNKNOWN;
         if (usage == null) usage = TokenUsage.EMPTY;

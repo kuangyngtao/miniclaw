@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -153,9 +154,89 @@ public final class RunEventCodec {
             return new UnknownEventPayload(eventType, node);
         }
         try {
-            return mapper.treeToValue(node, clazz);
+            return mapper.treeToValue(normalizeLegacyPayload(eventType, node), clazz);
         } catch (JsonProcessingException e) {
             return new UnknownEventPayload(eventType, node);
+        }
+    }
+
+    /**
+     * 为 additive event 字段补旧版语义默认值。
+     *
+     * <p>Jackson 对 record 中缺失的 primitive 字段会使用 0/false，且不会调用兼容
+     * 构造器。兼容默认值必须在 codec 边界补齐；显式存在的字段一律不覆盖。
+     */
+    private JsonNode normalizeLegacyPayload(String eventType, JsonNode node) {
+        if (!node.isObject()) {
+            return node;
+        }
+
+        ObjectNode normalized = ((ObjectNode) node).deepCopy();
+        if (RunEventType.PROVIDER_CALL_COMPLETED.equals(eventType)) {
+            putIfMissing(normalized, "promptCacheHitTokens", 0);
+            putIfMissing(normalized, "promptCacheMissTokens", 0);
+            putIfMissing(normalized, "reasoningTokens", 0);
+            if (!normalized.has("usageSource")) {
+                normalized.put("usageSource", "UNAVAILABLE");
+            }
+        } else if (RunEventType.TOOL_COMPLETED.equals(eventType)) {
+            int outputBytes = normalized.path("outputBytes").asInt(0);
+            boolean truncated = normalized.path("truncated").asBoolean(false);
+
+            putIfMissing(normalized, "attemptCount", 1);
+            putIfMissing(normalized, "totalSourceBytes", outputBytes);
+            putIfMissing(normalized, "retainedSourceBytes", outputBytes);
+            putIfMissing(normalized, "returnedOutputBytes", outputBytes);
+            putIfMissing(normalized, "totalLines", -1L);
+            putIfMissing(normalized, "returnedLines", -1L);
+            if (!normalized.has("truncationReason") && truncated) {
+                normalized.put("truncationReason", "MAX_OUTPUT_BYTES");
+            }
+            if (!normalized.has("retentionPolicy")) {
+                normalized.put("retentionPolicy", "LEGACY_V0");
+            }
+            if (!normalized.has("inputComplete")) {
+                normalized.put("inputComplete", !truncated);
+            }
+        } else if (RunEventType.COMPACT_COMPLETED.equals(eventType)) {
+            if (!normalized.has("profile")) {
+                normalized.put("profile", "GENERAL");
+            }
+            putEmptyArrayIfMissing(normalized, "retainedAnchorIds");
+            putEmptyArrayIfMissing(normalized, "lostRequiredAnchorIds");
+            putEmptyArrayIfMissing(normalized, "discardedRangeSummaries");
+            if (!normalized.has("level")) {
+                normalized.put("level", normalized.path("failed").asBoolean(false)
+                    ? "L4_FAILED" : "L0_NONE");
+            }
+            if (!normalized.has("decisionReason")) {
+                if (normalized.hasNonNull("failureCode")) {
+                    normalized.put("decisionReason", normalized.path("failureCode").asText());
+                } else if (normalized.hasNonNull("errorCode")) {
+                    normalized.put("decisionReason", normalized.path("errorCode").asText());
+                } else {
+                    normalized.put("decisionReason", "legacy-event");
+                }
+            }
+        }
+        return normalized;
+    }
+
+    private static void putIfMissing(ObjectNode node, String field, int value) {
+        if (!node.has(field)) {
+            node.put(field, value);
+        }
+    }
+
+    private static void putIfMissing(ObjectNode node, String field, long value) {
+        if (!node.has(field)) {
+            node.put(field, value);
+        }
+    }
+
+    private static void putEmptyArrayIfMissing(ObjectNode node, String field) {
+        if (!node.has(field)) {
+            node.putArray(field);
         }
     }
 

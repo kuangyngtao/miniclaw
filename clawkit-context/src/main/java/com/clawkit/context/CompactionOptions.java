@@ -9,13 +9,19 @@ import java.util.List;
  */
 public record CompactionOptions(
     CompactionProfile profile,
-    List<TurnGroup> evictedTurnGroups
+    List<TurnGroup> evictedTurnGroups,
+    CompactionLevel maxLevel
 ) {
     public static final CompactionOptions GENERAL = new CompactionOptions(
-        CompactionProfile.GENERAL, List.of());
+        CompactionProfile.GENERAL, List.of(), CompactionLevel.L3_GENERATIVE);
+
+    public CompactionOptions(CompactionProfile profile, List<TurnGroup> evictedTurnGroups) {
+        this(profile, evictedTurnGroups, CompactionLevel.L3_GENERATIVE);
+    }
 
     public CompactionOptions {
         if (profile == null) profile = CompactionProfile.GENERAL;
         if (evictedTurnGroups == null) evictedTurnGroups = List.of();
+        if (maxLevel == null) maxLevel = CompactionLevel.L3_GENERATIVE;
     }
 }

@@ -1,6 +1,7 @@
 package com.clawkit.evaluation.baseline;
 
 import com.clawkit.evaluation.BenchmarkReport;
+import com.clawkit.evaluation.pricing.PricingSnapshot;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
 import java.time.Instant;
@@ -18,6 +19,8 @@ public record BaselineData(
     String executionProfile,
     String caseSetHash,
     String scriptSetHash,
+    String pricingSnapshotVersion,
+    String pricingSnapshotHash,
     Instant createdAt,
     String clawkitVersion,
     String gitCommit,
@@ -62,9 +65,14 @@ public record BaselineData(
         String status
     ) {}
 
-    public static final int CURRENT_SCHEMA_VERSION = 1;
+    public static final int CURRENT_SCHEMA_VERSION = 2;
 
     public static BaselineData from(BenchmarkReport report, String gitCommit) {
+        return from(report, gitCommit, null);
+    }
+
+    public static BaselineData from(BenchmarkReport report, String gitCommit,
+                                    PricingSnapshot pricingSnapshot) {
         var cases = new java.util.LinkedHashMap<String, CaseEntry>();
         for (var r : report.results()) {
             var s = r.summary();
@@ -87,10 +95,12 @@ public record BaselineData(
             CURRENT_SCHEMA_VERSION,
             "clawkit-runtime-regression",
             "1.0",
-            1,
+            2,
             "default",
             hashCases(report),
             hashScripts(report),
+            pricingSnapshot != null ? pricingSnapshot.version() : null,
+            pricingSnapshot != null ? pricingSnapshot.hash() : null,
             Instant.now(),
             report.clawkitVersion(),
             gitCommit,

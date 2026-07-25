@@ -34,7 +34,10 @@ public final class DefaultSkillRuntime implements SkillRuntime {
     }
 
     @Override public List<Message> activeContext() {
-        return active.values().stream().map(Message::system).toList();
+        return active.entrySet().stream()
+            .sorted(Map.Entry.comparingByKey())
+            .map(entry -> Message.system(entry.getValue()))
+            .toList();
     }
 
     @Override public boolean isLoaded(String name) { return active.containsKey(name); }

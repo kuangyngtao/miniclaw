@@ -1,8 +1,9 @@
 package com.clawkit.context.impl;
 
 import com.clawkit.context.CompactionResult;
-import com.clawkit.context.Constraint;
-import com.clawkit.context.ConstraintExtractor;
+import com.clawkit.context.CompactionLevel;
+import com.clawkit.context.CompactionOptions;
+import com.clawkit.context.CompactionProfile;
 import com.clawkit.context.ContextBudgetAnalyzer;
 import com.clawkit.context.ContextBudgetPolicy;
 import com.clawkit.context.ContextManager;
@@ -100,15 +101,21 @@ public class LadderedCompactor implements ContextManager {
     @Override
     @Deprecated
     public List<Message> compact(List<Message> messages, int maxTokens) {
-        return compact(messages, maxTokens, List.of()).messages();
+        return compact(messages, maxTokens, CompactionOptions.GENERAL).messages();
+    }
+
+    @Override
+    @Deprecated
+    public CompactionResult compact(List<Message> messages, int maxTokens,
+                                     List<TurnGroup> evictedTurnGroups) {
+        return compact(messages, maxTokens,
+            new CompactionOptions(CompactionProfile.GENERAL, evictedTurnGroups));
     }
 
     @Override
     public CompactionResult compact(List<Message> messages, int maxTokens,
-                                     List<TurnGroup> evictedTurnGroups) {
-        // Phase 5: pre-compaction constraint extraction
-        var extractor = new ConstraintExtractor();
-        var extractedConstraints = extractor.extract(messages);
+                                     CompactionOptions options) {
+        if (options == null) options = CompactionOptions.GENERAL;
 
         var beforeReport = budgetAnalyzer.analyze(messages, 0, Map.of());
         var appliedRules = new ArrayList<String>();
@@ -121,47 +128,38 @@ public class LadderedCompactor implements ContextManager {
         // always-on 规则（始终执行）
         result = applyAlwaysOnRulesImpl(result, boundary, toolNameIndex);
 
-        // 压力规则（始终执行 — 触发决策由 engine 根据 budget 做）
-        result = applyPressureRules(result, boundary);
-        appliedRules.add("pressure");
+        // L2: deterministic extractive pressure rules.
+        if (options.maxLevel().atLeast(CompactionLevel.L2_EXTRACTIVE)) {
+            result = applyPressureRules(result, boundary);
+            appliedRules.add("l2-extractive");
+        }
 
-        // L3（如有 summarizer 且有驱逐组，始终尝试）
-        if (summarizer != null && !evictedTurnGroups.isEmpty()) {
-            var l3Result = compactL3WithMapReduce(result, boundary, evictedTurnGroups);
+        // L3: generative summarization is explicitly enabled by the pipeline policy.
+        if (options.maxLevel().atLeast(CompactionLevel.L3_GENERATIVE)
+            && summarizer != null && !options.evictedTurnGroups().isEmpty()) {
+            var l3Result = compactL3WithMapReduce(result, boundary,
+                options.evictedTurnGroups(), options.profile());
             if (l3Result != null) {
                 appliedRules.add("l3-map-reduce");
                 result = l3Result;
             }
-        } else if (summarizer != null) {
-            var l3Result = compactL3(result, boundary);
+        } else if (options.maxLevel().atLeast(CompactionLevel.L3_GENERATIVE)
+            && summarizer != null) {
+            var l3Result = compactL3(result, boundary, options.profile());
             if (l3Result != null) {
                 appliedRules.add("l3");
                 result = l3Result;
             }
         }
 
-        // Phase 5: post-compaction constraint verification
-        var lostConstraints = extractor.verify(extractedConstraints, result);
-        var retained = new ArrayList<>(extractedConstraints);
-        retained.removeAll(lostConstraints);
-        var retainedTexts = retained.stream().map(Constraint::text).toList();
-
-        if (!lostConstraints.isEmpty()) {
-            var sb = new StringBuilder("[Preserved Constraints]\n以下约束在压缩中保留，请继续关注:\n");
-            retained.forEach(c -> sb.append("- ").append(c.text()).append("\n"));
-            sb.append("\n注意: 以下约束可能在压缩中丢失:\n");
-            lostConstraints.forEach(c -> sb.append("- ").append(c.text()).append("\n"));
-            result.add(0, Message.system(sb.toString()));
-            log.info("[Compactor] 约束验证: {}/{} 保留, {} 丢失",
-                retained.size(), extractedConstraints.size(), lostConstraints.size());
-        }
-
         var afterReport = budgetAnalyzer.analyze(result, 0, Map.of());
         log.info("[Compactor] compact 完成: {} → {} tokens, 规则: {}",
             beforeReport.totalTokens(), afterReport.totalTokens(), appliedRules);
         return new CompactionResult(result, beforeReport, afterReport,
-                                     retainedTexts, appliedRules);
+                                     List.of(), appliedRules);
     }
+
+    public boolean hasSummarizer() { return summarizer != null; }
 
     // === 工具名索引：toolCallId → toolName ===
 
@@ -253,9 +251,11 @@ public class LadderedCompactor implements ContextManager {
 
         String resultStr = sb.toString().stripTrailing();
         if (resultStr.isEmpty()) {
-            return new Message(msg.role(), "[empty after compression]", msg.toolCalls(), msg.toolCallId());
+            return new Message(msg.role(), "[empty after compression]", msg.toolCalls(),
+                msg.toolCallId(), msg.reasoningContent());
         }
-        return new Message(msg.role(), resultStr, msg.toolCalls(), msg.toolCallId());
+        return new Message(msg.role(), resultStr, msg.toolCalls(), msg.toolCallId(),
+            msg.reasoningContent());
     }
 
     // === 掩码与截断 ===
@@ -264,7 +264,7 @@ public class LadderedCompactor implements ContextManager {
         int len = msg.content() != null ? msg.content().length() : 0;
         return new Message(Role.TOOL,
             "[tool:" + toolName + " output — " + len + " bytes]",
-            null, msg.toolCallId());
+            null, msg.toolCallId(), msg.reasoningContent());
     }
 
     private Message headTailTruncate(Message msg) {
@@ -275,7 +275,7 @@ public class LadderedCompactor implements ContextManager {
         String newContent = content.substring(0, HEAD_TAIL_KEEP)
             + "\n…[truncated " + truncated + " bytes]…\n"
             + content.substring(len - HEAD_TAIL_KEEP);
-        return new Message(Role.TOOL, newContent, null, msg.toolCallId());
+        return new Message(Role.TOOL, newContent, null, msg.toolCallId(), msg.reasoningContent());
     }
 
     // === 保护区边界 ===
@@ -295,7 +295,8 @@ public class LadderedCompactor implements ContextManager {
 
     // === L3: LLM 摘要 ===
 
-    private List<Message> compactL3(List<Message> messages, int recentBoundary) {
+    private List<Message> compactL3(List<Message> messages, int recentBoundary,
+                                    CompactionProfile profile) {
         if (recentBoundary == 0) return null;
 
         List<Message> oldMessages = new ArrayList<>();
@@ -307,11 +308,7 @@ public class LadderedCompactor implements ContextManager {
         if (oldMessages.isEmpty()) return null;
 
         List<Message> summarizationContext = new ArrayList<>();
-        summarizationContext.add(Message.system(
-            "你是一个对话摘要器。请将以下 AI 编程助手与用户的对话压缩为一段中文摘要（200-400字）。\n"
-            + "保留：关键决策、重要发现、错误和修复、文件路径、函数名、技术细节。\n"
-            + "忽略：问候语、重复内容、无意义的输出行。\n"
-            + "只输出摘要文本，不要加任何前缀或后缀。"));
+        summarizationContext.add(Message.system(summaryPrompt(profile)));
         summarizationContext.addAll(oldMessages);
         summarizationContext.add(Message.user("请总结以上对话，只输出摘要。"));
 
@@ -341,11 +338,16 @@ public class LadderedCompactor implements ContextManager {
 
     private List<Message> compactL3WithMapReduce(
             List<Message> messages, int recentBoundary,
-            List<TurnGroup> evictedGroups) {
-        if (recentBoundary == 0 || evictedGroups.isEmpty()) return null;
+            List<TurnGroup> evictedGroups, CompactionProfile profile) {
+        if (recentBoundary == 0) return null;
+
+        List<TurnGroup> groupsToSummarize = new ArrayList<>(evictedGroups);
+        int nextTurn = evictedGroups.stream().mapToInt(TurnGroup::turnNumber).max().orElse(0) + 1;
+        groupsToSummarize.addAll(groupVisibleOldTurns(messages, recentBoundary, nextTurn));
+        if (groupsToSummarize.isEmpty()) return null;
 
         List<String> batchSummaries = new ArrayList<>();
-        List<List<TurnGroup>> batches = partition(evictedGroups, MAP_BATCH_SIZE);
+        List<List<TurnGroup>> batches = partition(groupsToSummarize, MAP_BATCH_SIZE);
 
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             List<Future<String>> futures = new ArrayList<>();
@@ -355,7 +357,9 @@ public class LadderedCompactor implements ContextManager {
                         .flatMap(tg -> tg.messages().stream())
                         .toList();
                     List<Message> ctx = new ArrayList<>();
-                    ctx.add(Message.system(MAP_PROMPT));
+                    ctx.add(Message.system(profile == CompactionProfile.OPS_DIAGNOSIS
+                        ? MAP_PROMPT + "\n区分事实、反证和假设；保留待检查项、审批边界和证据引用。"
+                        : MAP_PROMPT));
                     ctx.add(Message.user(formatBatchMessages(batchMsgs)));
                     return summarizer.summarize(ctx);
                 }));
@@ -392,6 +396,26 @@ public class LadderedCompactor implements ContextManager {
         return result;
     }
 
+    private List<TurnGroup> groupVisibleOldTurns(List<Message> messages, int recentBoundary,
+                                                  int firstTurnNumber) {
+        List<TurnGroup> groups = new ArrayList<>();
+        List<Message> current = new ArrayList<>();
+        int turn = firstTurnNumber - 1;
+        for (int i = 0; i < recentBoundary; i++) {
+            Message message = messages.get(i);
+            if (message.role() == Role.SYSTEM) continue;
+            if (message.role() == Role.USER && !current.isEmpty()) {
+                groups.add(new TurnGroup(turn, List.copyOf(current)));
+                current.clear();
+            }
+            if (message.role() == Role.USER) turn++;
+            current.add(message);
+        }
+        if (!current.isEmpty()) groups.add(new TurnGroup(Math.max(firstTurnNumber, turn),
+            List.copyOf(current)));
+        return groups;
+    }
+
     private String reduceSummaries(List<String> summaries) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < summaries.size(); i++) {
@@ -409,6 +433,18 @@ public class LadderedCompactor implements ContextManager {
             log.warn("[Compactor] Reduce 合并失败: {}", e.getMessage());
             return null;
         }
+    }
+
+    private String summaryPrompt(CompactionProfile profile) {
+        String prompt =
+            "你是一个对话摘要器。请将以下 AI 编程助手与用户的对话压缩为一段中文摘要（200-400字）。\n"
+            + "保留：关键决策、重要发现、错误和修复、文件路径、函数名、技术细节。\n"
+            + "忽略：问候语、重复内容、无意义的输出行。\n";
+        if (profile == CompactionProfile.OPS_DIAGNOSIS) {
+            prompt += "区分事实、反证和假设，不把被反驳的假设写成结论；"
+                + "保留待执行检查、审批边界、事件顺序和证据引用。\n";
+        }
+        return prompt + "只输出摘要文本，不要加任何前缀或后缀。";
     }
 
     private static <T> List<List<T>> partition(List<T> list, int size) {

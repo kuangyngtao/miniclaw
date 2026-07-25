@@ -6,7 +6,9 @@ import com.clawkit.tools.schema.ToolDefinition;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * ContextPipeline 默认实现，编排已有压缩组件。
@@ -30,6 +32,8 @@ public class DefaultContextPipeline implements ContextPipeline {
     private final ContextBudgetAnalyzer analyzer;
     private final Tokenizer tokenizer;
     private final ContextBudgetPolicy budgetPolicy;
+    private final AdaptiveCompactionPolicy adaptivePolicy;
+    private final AnchorSnapshotPlanner anchorPlanner;
 
     public DefaultContextPipeline(
         ContextManager compactor,
@@ -37,10 +41,23 @@ public class DefaultContextPipeline implements ContextPipeline {
         Tokenizer tokenizer,
         ContextBudgetPolicy budgetPolicy
     ) {
+        this(compactor, analyzer, tokenizer, budgetPolicy,
+            AdaptiveCompactionPolicy.defaults(budgetPolicy));
+    }
+
+    public DefaultContextPipeline(
+        ContextManager compactor,
+        ContextBudgetAnalyzer analyzer,
+        Tokenizer tokenizer,
+        ContextBudgetPolicy budgetPolicy,
+        AdaptiveCompactionPolicy adaptivePolicy
+    ) {
         this.compactor = compactor;
         this.analyzer = analyzer;
         this.tokenizer = tokenizer;
         this.budgetPolicy = budgetPolicy;
+        this.adaptivePolicy = adaptivePolicy;
+        this.anchorPlanner = new AnchorSnapshotPlanner(tokenizer, budgetPolicy, adaptivePolicy);
     }
 
     @Override
@@ -59,47 +76,186 @@ public class DefaultContextPipeline implements ContextPipeline {
 
     @Override
     public CompactionResult compact(CompactionRequest request) {
-        List<Message> messages = new ArrayList<>(request.modelContext());
+        long started = System.nanoTime();
+        int originalMessages = request.modelContext().size();
         int toolDefTokens = request.toolDefTokens();
-        int turnCount = request.turnCount();
+        List<Message> raw = removeDerivedAnchorMessages(request.modelContext());
+        List<String> legacyConstraints = new ConstraintExtractor().extract(raw).stream()
+            .map(Constraint::text).toList();
 
-        // 1. always-on rules
-        messages = compactor.applyAlwaysOnRules(messages);
+        // PA-3: snapshot from unmasked input, then inject exactly one canonical sidecar.
+        AnchorSnapshotPlanner.Plan anchorPlan = anchorPlanner.prepare(raw, request.hint());
+        List<Message> messages = new ArrayList<>(raw);
+        var beforeReport = analyzer.analyze(messages, toolDefTokens, java.util.Map.of());
+        var decisionReport = anchorPlan.snapshot().renderedText().isBlank()
+            ? beforeReport
+            : analyzer.analyze(messages, toolDefTokens,
+                java.util.Map.of("anchor-reserve", anchorPlan.snapshot().renderedText()));
+        CompactionLevel selected = adaptivePolicy.initialLevel(decisionReport, budgetPolicy, request);
+        if (selected == CompactionLevel.L0_NONE) {
+            return result(messages, beforeReport, beforeReport, legacyConstraints, List.of(),
+                originalMessages, false, request, anchorPlan, List.of(), selected,
+                null, started);
+        }
 
-        // 2. mask (turn-based)
+        List<String> appliedRules = new ArrayList<>();
+        messages = deterministicCleanup(messages);
+        appliedRules.add("l1-deterministic");
+        ContextBudgetReport currentReport = analyzer.analyze(
+            messages, toolDefTokens, java.util.Map.of());
+        if (selected == CompactionLevel.L1_DETERMINISTIC
+            || adaptivePolicy.withinTarget(currentReport, budgetPolicy, request)) {
+            return result(messages, beforeReport, currentReport, legacyConstraints, appliedRules,
+                originalMessages, true, request, anchorPlan, List.of(),
+                CompactionLevel.L1_DETERMINISTIC, null, started);
+        }
+
+        if (anchorPlan.failed()) {
+            return result(messages, beforeReport, currentReport, legacyConstraints, appliedRules,
+                originalMessages, true, request, anchorPlan, List.of(),
+                CompactionLevel.L4_FAILED, anchorPlan.failureCode(), started);
+        }
+
+        messages = insertCanonicalSnapshot(messages, anchorPlan.snapshot());
+
         List<TurnGroup> evictedGroups = List.of();
-        if (MessageMasker.shouldMask(turnCount)) {
-            var masked = MessageMasker.mask(messages, turnCount);
+        if (MessageMasker.shouldMask(request.turnCount())) {
+            MessageMasker.MaskedContext masked = MessageMasker.mask(messages, request.turnCount());
             messages = masked.messages();
             evictedGroups = masked.evictedTurnGroups();
         }
+        CompactionResult extractive = compactor.compact(messages,
+            adaptivePolicy.targetTokens(budgetPolicy, request),
+            new CompactionOptions(request.hint().profile(), evictedGroups,
+                CompactionLevel.L2_EXTRACTIVE));
+        messages = insertCanonicalSnapshot(extractive.messages(), anchorPlan.snapshot());
+        appliedRules.addAll(extractive.appliedRules());
+        currentReport = analyzer.analyze(messages, toolDefTokens, java.util.Map.of());
+        selected = CompactionLevel.L2_EXTRACTIVE;
 
-        // 3. budget analyze
-        var beforeReport = analyzer.analyze(messages, toolDefTokens, java.util.Map.of());
-
-        int beforeMessages = messages.size();
-
-        // 4. compact if needed
-        var status = beforeReport.status();
-        if (status == ContextBudgetReport.BudgetStatus.COMPACT_REQUIRED
-            || status == ContextBudgetReport.BudgetStatus.HARD_LIMIT) {
-
-            var result = compactor.compact(messages, budgetPolicy.targetTokens(), evictedGroups);
-            CompactionResult cr = (CompactionResult) result;
-            var afterReport = analyzer.analyze(cr.messages(), toolDefTokens, java.util.Map.of());
-
-            return new CompactionResult(
-                cr.messages(), beforeReport, afterReport,
-                cr.retainedConstraints(), cr.appliedRules(),
-                beforeMessages, cr.messages().size(), true,
-                CompactionAudit.EMPTY);
+        int estimatedSummaryInputTokens = tokenizer.countTokens(messages)
+            + evictedGroups.stream().mapToInt(group -> tokenizer.countTokens(group.messages())).sum();
+        if (adaptivePolicy.shouldUseGenerative(currentReport, budgetPolicy, request,
+            estimatedSummaryInputTokens)) {
+            CompactionResult generative = compactor.compact(messages,
+                adaptivePolicy.targetTokens(budgetPolicy, request),
+                new CompactionOptions(request.hint().profile(), evictedGroups,
+                    CompactionLevel.L3_GENERATIVE));
+            if (generative.appliedRules().stream().anyMatch(rule -> rule.startsWith("l3"))) {
+                messages = insertCanonicalSnapshot(generative.messages(), anchorPlan.snapshot());
+                appliedRules.addAll(generative.appliedRules().stream()
+                    .filter(rule -> !appliedRules.contains(rule)).toList());
+                currentReport = analyzer.analyze(messages, toolDefTokens, java.util.Map.of());
+                selected = CompactionLevel.L3_GENERATIVE;
+            }
         }
 
-        // no compact needed
-        return new CompactionResult(
-            messages, beforeReport, beforeReport, List.of(), List.of(),
-            beforeMessages, messages.size(), false,
-            CompactionAudit.EMPTY);
+        String failureCode = verifyFailure(messages, anchorPlan.snapshot(), currentReport, request);
+        CompactionLevel finalLevel = failureCode == null ? selected : CompactionLevel.L4_FAILED;
+        return result(messages, beforeReport, currentReport, legacyConstraints, appliedRules,
+            originalMessages, true, request, anchorPlan, evictedGroups,
+            finalLevel, failureCode, started);
+    }
+
+    private CompactionResult result(
+        List<Message> messages,
+        ContextBudgetReport beforeReport,
+        ContextBudgetReport afterReport,
+        List<String> retainedConstraints,
+        List<String> appliedRules,
+        int beforeMessages,
+        boolean compacted,
+        CompactionRequest request,
+        AnchorSnapshotPlanner.Plan anchorPlan,
+        List<TurnGroup> evictedGroups,
+        CompactionLevel level,
+        String failureCode,
+        long started
+    ) {
+        List<String> lost = failureCode != null && !anchorPlan.snapshot().requiredIds().isEmpty()
+            && !canonicalSnapshotPresent(messages, anchorPlan.snapshot())
+            ? anchorPlan.snapshot().requiredIds() : List.of();
+        long durationMs = Math.max(0L, (System.nanoTime() - started) / 1_000_000L);
+        CompactionAudit audit = new CompactionAudit(
+            request.hint().profile().name(), anchorPlan.retainedIds(), lost,
+            discardedRanges(evictedGroups), evictedGroups.size(), durationMs, failureCode,
+            level, decisionReason(level, failureCode));
+        return new CompactionResult(List.copyOf(messages), beforeReport, afterReport,
+            retainedConstraints, List.copyOf(appliedRules), beforeMessages, messages.size(),
+            compacted, audit);
+    }
+
+    private List<Message> deterministicCleanup(List<Message> messages) {
+        List<Message> normalized = compactor.applyAlwaysOnRules(messages);
+        List<Message> result = new ArrayList<>(normalized.size());
+        Set<String> seenRebuildable = new LinkedHashSet<>();
+        for (Message message : normalized) {
+            String content = message.content();
+            boolean rebuildable = content != null && message.role() == com.clawkit.tools.schema.Role.SYSTEM
+                && (content.startsWith("[Runtime]")
+                    || content.startsWith("[Workspace State]")
+                    || content.startsWith("[Working Memory]")
+                    || content.startsWith("[Related Past Sessions]"));
+            if (!rebuildable || seenRebuildable.add(content)) result.add(message);
+        }
+        return result;
+    }
+
+    private List<Message> removeDerivedAnchorMessages(List<Message> messages) {
+        return messages.stream().filter(message -> {
+            String content = message.content();
+            return content == null
+                || (!content.startsWith("[Runtime][Compaction Anchors]")
+                    && !content.startsWith("[Preserved Constraints]"));
+        }).toList();
+    }
+
+    private List<Message> insertCanonicalSnapshot(List<Message> messages, AnchorSnapshot snapshot) {
+        List<Message> result = new ArrayList<>(removeDerivedAnchorMessages(messages));
+        if (snapshot == null || snapshot.renderedText().isBlank()) return result;
+        int insertAt = 0;
+        while (insertAt < result.size()
+            && result.get(insertAt).role() == com.clawkit.tools.schema.Role.SYSTEM) {
+            insertAt++;
+        }
+        result.add(insertAt, Message.system(snapshot.renderedText()));
+        return result;
+    }
+
+    private boolean canonicalSnapshotPresent(List<Message> messages, AnchorSnapshot snapshot) {
+        if (snapshot == null || snapshot.renderedText().isBlank()) return true;
+        if (!snapshot.verify()) return false;
+        long count = messages.stream()
+            .filter(message -> snapshot.renderedText().equals(message.content()))
+            .count();
+        return count == 1 && snapshot.findMissingRequired().isEmpty();
+    }
+
+    private String verifyFailure(List<Message> messages, AnchorSnapshot snapshot,
+                                 ContextBudgetReport report, CompactionRequest request) {
+        if (!canonicalSnapshotPresent(messages, snapshot)) return "REQUIRED_ANCHOR_LOST";
+        if (adaptivePolicy.exceedsModelHardLimit(report, budgetPolicy, request)) {
+            return "COMPACT_HARD_LIMIT";
+        }
+        return null;
+    }
+
+    private List<DiscardedTurnRange> discardedRanges(List<TurnGroup> groups) {
+        return groups.stream().map(group -> new DiscardedTurnRange(
+            group.turnNumber(), group.turnNumber(), group.messages().size(),
+            group.messages().stream().map(message -> message.role().name()).distinct().toList(),
+            "TIER3_EVICTION")).toList();
+    }
+
+    private String decisionReason(CompactionLevel level, String failureCode) {
+        if (failureCode != null) return failureCode;
+        return switch (level) {
+            case L0_NONE -> "within-warning-threshold";
+            case L1_DETERMINISTIC -> "above-warning-threshold";
+            case L2_EXTRACTIVE -> "above-compact-threshold";
+            case L3_GENERATIVE -> "extractive-result-above-target";
+            case L4_FAILED -> "compact-failed";
+        };
     }
 
     // ── fragment collection ───────────────────────────────────────────

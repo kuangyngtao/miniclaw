@@ -47,7 +47,7 @@ public class ReadToolIntegrationManual {
         LLMConfig config = LLMConfig.builder()
             .apiKey(apiKey)
             .baseUrl("https://api.deepseek.com")
-            .model("deepseek-chat")
+            .model("deepseek-v4-flash")
             .build();
 
         OpenAIProvider provider = new OpenAIProvider(config);

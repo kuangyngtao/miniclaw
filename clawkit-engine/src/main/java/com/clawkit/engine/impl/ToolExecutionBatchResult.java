@@ -10,5 +10,16 @@ import java.util.List;
  */
 public record ToolExecutionBatchResult(
     List<ToolExecutionResult> results,
-    List<Message> toolResultMessages
-) {}
+    List<Message> toolResultMessages,
+    ToolLoopDecision loopDecision,
+    String finalOutput
+) {
+    public ToolExecutionBatchResult(List<ToolExecutionResult> results,
+                                    List<Message> toolResultMessages) {
+        this(results, toolResultMessages, ToolLoopDecision.CONTINUE, null);
+    }
+
+    public ToolExecutionBatchResult {
+        if (loopDecision == null) loopDecision = ToolLoopDecision.CONTINUE;
+    }
+}

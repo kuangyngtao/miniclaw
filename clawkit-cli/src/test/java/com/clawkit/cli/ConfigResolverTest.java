@@ -13,6 +13,15 @@ class ConfigResolverTest {
     @TempDir Path home;
 
     @Test
+    void defaultsToDeepSeekV4Flash() {
+        ResolvedConfiguration resolved = ConfigResolver.resolve(
+            null, null, null, false, null, Map.of(), home);
+
+        assertThat(resolved.effective().model()).isEqualTo("deepseek-v4-flash");
+        assertThat(resolved.effective().sources()).containsEntry("model", "default");
+    }
+
+    @Test
     void resolvesCliThenEnvThenYamlThenDefaults() throws Exception {
         writeConfig("""
             provider:

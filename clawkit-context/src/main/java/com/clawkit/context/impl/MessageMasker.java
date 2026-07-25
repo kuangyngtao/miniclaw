@@ -111,7 +111,7 @@ public final class MessageMasker {
                     content.substring(0, 500)
                     + "\n…[truncated " + (len - 1000) + " bytes]…\n"
                     + content.substring(len - 500),
-                    null, msg.toolCallId());
+                    null, msg.toolCallId(), msg.reasoningContent());
             }
         }
         return msg;
@@ -136,7 +136,7 @@ public final class MessageMasker {
         if (len < TOOL_SMALL_BYTES) return msg; // 小输出全保留
         return new Message(Role.TOOL,
             "[tool output — " + len + " bytes]",
-            null, msg.toolCallId());
+            null, msg.toolCallId(), msg.reasoningContent());
     }
 
     // ── Tier2: 仅保留骨架 ──
@@ -157,7 +157,7 @@ public final class MessageMasker {
         if (content.length() < TOOL_SMALL_BYTES) return msg; // 小输出保留
         return new Message(Role.TOOL,
             "[tool output — elided]",
-            null, msg.toolCallId());
+            null, msg.toolCallId(), msg.reasoningContent());
     }
 
     // ── ASSISTANT 截断 ──
@@ -173,12 +173,14 @@ public final class MessageMasker {
             String prefix = "[tool_calls: " + names + "] ";
 
             if (msg.content() == null || msg.content().isBlank()) {
-                return new Message(msg.role(), prefix, msg.toolCalls(), msg.toolCallId());
+                return new Message(msg.role(), prefix, msg.toolCalls(), msg.toolCallId(),
+                    msg.reasoningContent());
             }
             String truncated = msg.content().length() > cutWithTools
                 ? msg.content().substring(0, cutWithTools) + "..."
                 : msg.content();
-            return new Message(msg.role(), prefix + truncated, msg.toolCalls(), msg.toolCallId());
+            return new Message(msg.role(), prefix + truncated, msg.toolCalls(), msg.toolCallId(),
+                msg.reasoningContent());
         }
 
         // 纯文本 ASSISTANT
@@ -186,7 +188,7 @@ public final class MessageMasker {
         if (msg.content().length() > cutPlain) {
             return new Message(msg.role(),
                 msg.content().substring(0, cutPlain) + "...",
-                null, msg.toolCallId());
+                null, msg.toolCallId(), msg.reasoningContent());
         }
         return msg;
     }

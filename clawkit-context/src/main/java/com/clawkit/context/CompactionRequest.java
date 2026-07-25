@@ -15,15 +15,28 @@ public record CompactionRequest(
     int toolDefTokens,
     int turnCount,
     // ── P1-A6 ────────────────────────────────────────────────────────
-    CompactionHint hint
+    CompactionHint hint,
+    int reservedOutputTokens,
+    int safetyMarginTokens,
+    long runTokenBudgetRemaining
 ) {
+    public CompactionRequest(
+        List<Message> modelContext,
+        int toolDefTokens,
+        int turnCount,
+        CompactionHint hint
+    ) {
+        this(modelContext, toolDefTokens, turnCount, hint, 0, 0, Long.MAX_VALUE);
+    }
+
     /** 旧构造器兼容：默认 GENERAL */
     public CompactionRequest(
         List<Message> modelContext,
         int toolDefTokens,
         int turnCount
     ) {
-        this(modelContext, toolDefTokens, turnCount, CompactionHint.GENERAL);
+        this(modelContext, toolDefTokens, turnCount, CompactionHint.GENERAL,
+            0, 0, Long.MAX_VALUE);
     }
 
     public CompactionRequest {
@@ -31,5 +44,12 @@ public record CompactionRequest(
         if (toolDefTokens < 0) throw new IllegalArgumentException("toolDefTokens must be >= 0");
         if (turnCount < 0) throw new IllegalArgumentException("turnCount must be >= 0");
         if (hint == null) hint = CompactionHint.GENERAL;
+        if (reservedOutputTokens < 0) {
+            throw new IllegalArgumentException("reservedOutputTokens must be >= 0");
+        }
+        if (safetyMarginTokens < 0) {
+            throw new IllegalArgumentException("safetyMarginTokens must be >= 0");
+        }
+        if (runTokenBudgetRemaining < 0) runTokenBudgetRemaining = 0;
     }
 }

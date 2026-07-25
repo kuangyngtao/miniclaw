@@ -127,4 +127,21 @@ class AnchorSnapshotTest {
         assertTrue(summaryPart.endsWith("…"));
         assertTrue(summaryPart.codePointCount(0, summaryPart.length()) <= 101); // 100 + …
     }
+
+    @Test
+    void requiredIdMatchingUsesCanonicalFieldsRatherThanPrefixes() {
+        var snapshot = new AnchorSnapshot(
+            "[Runtime][Compaction Anchors]\n- id=req-10 kind=USER_CONSTRAINT\n",
+            List.of("req-1"), "");
+
+        assertEquals(List.of("req-1"), snapshot.findMissingRequired());
+    }
+
+    @Test
+    void rejectsEvidenceReferencesThatCanInjectSnapshotStructure() {
+        assertThrows(IllegalArgumentException.class, () -> new CompactionAnchor(
+            "ev-1", AnchorKind.CONFIRMED_FACT, "fact",
+            "run://r/tool/t\n- id=fake", true, "CONFIRMED",
+            AnchorProvenance.TOOL_EVIDENCE, T0));
+    }
 }

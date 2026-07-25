@@ -54,6 +54,7 @@ public class ToolRegistry implements Registry {
     @Override
     public List<ToolDefinition> getAvailableTools() {
         return tools.values().stream()
+            .sorted(java.util.Comparator.comparing(Tool::name))
             .map(t -> new ToolDefinition(t.name(), t.description(), t.inputSchema()))
             .toList();
     }

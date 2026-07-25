@@ -11,9 +11,12 @@ import com.clawkit.provider.LLMProvider;
 import com.clawkit.provider.ModelRequest;
 import com.clawkit.provider.ModelResponse;
 import com.clawkit.provider.StreamObserver;
+import com.clawkit.provider.TokenUsage;
+import com.clawkit.provider.UsageSource;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * ProviderGateway 观测实现：包装 LLMProvider，直接把事件写入 RunRecorder。
@@ -26,6 +29,7 @@ public class ObservingProviderGateway implements ProviderGateway {
 
     private final LLMProvider provider;
     private final RunRecorder recorder;
+    private final AtomicLong providerCallSequence = new AtomicLong();
 
     public ObservingProviderGateway(LLMProvider provider, RunRecorder recorder) {
         this.provider = provider;
@@ -48,19 +52,19 @@ public class ObservingProviderGateway implements ProviderGateway {
         }
 
         Instant start = Instant.now();
-        record(new ProviderCallStartedPayload(scope.runId(), scope.phase().name(), false),
+        String providerCallId = nextProviderCallId(scope);
+        record(startedPayload(providerCallId, scope, request, false, provider.descriptor()),
             scope);
         try {
             ModelResponse response = provider.generate(request.withControl(control));
             long ms = Duration.between(start, Instant.now()).toMillis();
-            int in = response.usage() != null ? response.usage().promptTokens() : 0;
-            int out = response.usage() != null ? response.usage().completionTokens() : 0;
             long actual = response.usage() != null && response.usage().totalTokens() > 0
                 ? response.usage().totalTokens() : reserved;
             budget.settle(reserved, actual);
             int retryCount = response.metadata() != null ? response.metadata().retryCount() : 0;
-            record(new ProviderCallCompletedPayload(scope.runId(), scope.phase().name(),
-                false, in, out, true, ms, retryCount, false, null, null), scope);
+            record(completedPayload(providerCallId, scope, false, response.usage(),
+                response.metadata() != null ? response.metadata().model() : null,
+                ms, retryCount, false, null, null), scope);
             return response;
         } catch (Exception e) {
             budget.settle(reserved, reserved);
@@ -68,8 +72,8 @@ public class ObservingProviderGateway implements ProviderGateway {
             int retryCount = (e instanceof LLMException le) ? le.retryCount() : 0;
             String errorCode = (e instanceof LLMException le && le.providerError() != null)
                 ? le.providerError().getClass().getSimpleName() : null;
-            record(new ProviderCallCompletedPayload(scope.runId(), scope.phase().name(),
-                false, 0, 0, false, ms, retryCount, true, errorCode, e.getMessage()), scope);
+            record(completedPayload(providerCallId, scope, false, TokenUsage.EMPTY, null,
+                ms, retryCount, true, errorCode, e.getMessage()), scope);
             throw e;
         }
     }
@@ -99,7 +103,8 @@ public class ObservingProviderGateway implements ProviderGateway {
         }
 
         Instant start = Instant.now();
-        record(new ProviderCallStartedPayload(scope.runId(), scope.phase().name(), true),
+        String providerCallId = nextProviderCallId(scope);
+        record(startedPayload(providerCallId, scope, request, true, provider.descriptor()),
             scope);
         var terminalSent = new AtomicBoolean(false);
         try {
@@ -112,12 +117,11 @@ public class ObservingProviderGateway implements ProviderGateway {
                 public void onComplete(ModelResponse resp) {
                     if (terminalSent.compareAndSet(false, true)) {
                         long ms = Duration.between(start, Instant.now()).toMillis();
-                        int in = resp.usage() != null ? resp.usage().promptTokens() : 0;
-                        int out = resp.usage() != null ? resp.usage().completionTokens() : 0;
                         budget.settle(reserved, resp.usage() != null && resp.usage().totalTokens() > 0
                             ? resp.usage().totalTokens() : reserved);
-                        record(new ProviderCallCompletedPayload(scope.runId(),
-                            scope.phase().name(), true, in, out, true, ms, 0,
+                        record(completedPayload(providerCallId, scope, true, resp.usage(),
+                            resp.metadata() != null ? resp.metadata().model() : null,
+                            ms, resp.metadata() != null ? resp.metadata().retryCount() : 0,
                             false, null, null), scope);
                     }
                     observer.onComplete(resp);
@@ -127,23 +131,20 @@ public class ObservingProviderGateway implements ProviderGateway {
                     if (terminalSent.compareAndSet(false, true)) {
                         long ms = Duration.between(start, Instant.now()).toMillis();
                         budget.settle(reserved, reserved);
-                        record(new ProviderCallCompletedPayload(scope.runId(),
-                            scope.phase().name(), true, 0, 0, false, ms, 0,
-                            true, null, error.toString()), scope);
+                        record(completedPayload(providerCallId, scope, true, TokenUsage.EMPTY,
+                            null, ms, 0, true, null, error.toString()), scope);
                     }
                     observer.onError(error);
                 }
             });
             if (terminalSent.compareAndSet(false, true)) {
                 long ms = Duration.between(start, Instant.now()).toMillis();
-                int in = response.usage() != null ? response.usage().promptTokens() : 0;
-                int out = response.usage() != null ? response.usage().completionTokens() : 0;
                 budget.settle(reserved, response.usage() != null && response.usage().totalTokens() > 0
                     ? response.usage().totalTokens() : reserved);
                 int r = response.metadata() != null ? response.metadata().retryCount() : 0;
-                record(new ProviderCallCompletedPayload(scope.runId(),
-                    scope.phase().name(), true, in, out, true, ms, r,
-                    false, null, null), scope);
+                record(completedPayload(providerCallId, scope, true, response.usage(),
+                    response.metadata() != null ? response.metadata().model() : null,
+                    ms, r, false, null, null), scope);
             }
             return response;
         } catch (Exception e) {
@@ -153,12 +154,47 @@ public class ObservingProviderGateway implements ProviderGateway {
                 int r = (e instanceof LLMException le) ? le.retryCount() : 0;
                 String ec = (e instanceof LLMException le && le.providerError() != null)
                     ? le.providerError().getClass().getSimpleName() : null;
-                record(new ProviderCallCompletedPayload(scope.runId(),
-                    scope.phase().name(), true, 0, 0, false, ms, r,
-                    true, ec, e.getMessage()), scope);
+                record(completedPayload(providerCallId, scope, true, TokenUsage.EMPTY,
+                    null, ms, r, true, ec, e.getMessage()), scope);
             }
             throw e;
         }
+    }
+
+    private String nextProviderCallId(RunScope scope) {
+        return scope.runId() + ":provider:" + providerCallSequence.incrementAndGet();
+    }
+
+    private static ProviderCallStartedPayload startedPayload(String providerCallId,
+                                                              RunScope scope,
+                                                              ModelRequest request,
+                                                              boolean streaming,
+                                                              com.clawkit.provider.ProviderDescriptor descriptor) {
+        String reasoningMode = request.parameters() != null
+            && request.parameters().reasoningMode() != null
+            ? request.parameters().reasoningMode().name() : null;
+        return new ProviderCallStartedPayload(providerCallId, scope.phase().name(), streaming,
+            null, null,
+            descriptor != null && descriptor.dialect() != null
+                ? descriptor.dialect().name() : null,
+            descriptor != null ? descriptor.requestedModel() : null,
+            reasoningMode, PromptFingerprint.compute(request));
+    }
+
+    private static ProviderCallCompletedPayload completedPayload(
+        String providerCallId, RunScope scope, boolean streaming, TokenUsage usage,
+        String actualModel, long durationMs, int retryCount, boolean failed,
+        String errorCode, String errorMessage) {
+        TokenUsage safeUsage = usage != null ? usage : TokenUsage.EMPTY;
+        UsageSource source = safeUsage.source() != null
+            ? safeUsage.source() : UsageSource.UNAVAILABLE;
+        return new ProviderCallCompletedPayload(
+            providerCallId, scope.phase().name(), streaming,
+            safeUsage.promptTokens(), safeUsage.completionTokens(),
+            source != UsageSource.ACTUAL, durationMs, retryCount, failed,
+            errorCode, errorMessage, actualModel,
+            safeUsage.promptCacheHitTokens(), safeUsage.promptCacheMissTokens(),
+            safeUsage.reasoningTokens(), source.name());
     }
 
     private void record(RunEventPayload payload, RunScope scope) {

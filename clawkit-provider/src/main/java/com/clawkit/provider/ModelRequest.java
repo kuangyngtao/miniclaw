@@ -19,6 +19,8 @@ public record ModelRequest(
 ) {
     public ModelRequest {
         if (messages == null) throw new IllegalArgumentException("messages required");
+        if (tools == null) tools = List.of();
+        if (parameters == null) parameters = ModelParameters.DEFAULT;
         if (control == null) control = ExecutionControl.none();
     }
 

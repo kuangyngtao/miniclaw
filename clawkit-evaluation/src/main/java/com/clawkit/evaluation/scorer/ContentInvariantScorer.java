@@ -2,11 +2,16 @@ package com.clawkit.evaluation.scorer;
 
 import com.clawkit.evaluation.BenchmarkResult;
 import com.clawkit.evaluation.BenchmarkSpec;
+import com.clawkit.observability.CompactCompletedPayload;
+import com.clawkit.observability.ProviderCallStartedPayload;
 import com.clawkit.observability.RunEventEnvelope;
 import com.clawkit.observability.RunReader;
+import com.clawkit.observability.ToolCompletedPayload;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * P0-6：内容不变量 scorer — 检查事件内容，不只检查存在性。
@@ -40,7 +45,7 @@ public class ContentInvariantScorer implements BenchmarkScorer {
         var failures = new java.util.ArrayList<String>();
         for (var check : checks) {
             String condition = check.substring("invariant:".length());
-            if (!evaluate(condition, events, result)) {
+            if (!evaluate(condition, events)) {
                 failures.add(condition);
             }
         }
@@ -53,42 +58,73 @@ public class ContentInvariantScorer implements BenchmarkScorer {
             String.join(", ", failures), "content invariants failed");
     }
 
-    private boolean evaluate(String condition, List<RunEventEnvelope> events,
-                             BenchmarkResult result) {
-        // P0-6: NoDuplicateToolResult — metrics check
+    private boolean evaluate(String condition, List<RunEventEnvelope> events) {
+        List<ToolCompletedPayload> toolResults = events.stream()
+            .map(RunEventEnvelope::payload)
+            .filter(ToolCompletedPayload.class::isInstance)
+            .map(ToolCompletedPayload.class::cast)
+            .toList();
+
+        // P0-6: NoDuplicateToolResult — 每个 toolCallId 恰好一个最终结果
         if (condition.equals("NoDuplicateToolResult")) {
-            return result.metrics() != null && result.metrics().tools().calls()
-                == result.metrics().tools().calls(); // 由 metrics 聚合保证
+            if (toolResults.isEmpty()) {
+                return false;
+            }
+            Set<String> ids = toolResults.stream()
+                .map(ToolCompletedPayload::toolCallId)
+                .collect(Collectors.toSet());
+            return ids.size() == toolResults.size();
         }
 
-        // P0-6: MaxAttempts — 通过 metrics 验证重试数不大于上限
+        if (condition.startsWith("NoDuplicateToolResult:")) {
+            String toolCallId = condition.substring("NoDuplicateToolResult:".length());
+            return !toolCallId.isBlank() && toolResults.stream()
+                .filter(p -> toolCallId.equals(p.toolCallId()))
+                .count() == 1;
+        }
+
+        // P0-6: MaxAttempts — 检查最终事件中的真实 attemptCount
         if (condition.startsWith("MaxAttempts:")) {
-            int max = Integer.parseInt(condition.substring("MaxAttempts:".length()));
-            return result.toolFailures() <= max * result.toolCalls();
+            try {
+                int max = Integer.parseInt(condition.substring("MaxAttempts:".length()));
+                return max > 0 && !toolResults.isEmpty() && toolResults.stream()
+                    .allMatch(p -> p.attemptCount() >= 1 && p.attemptCount() <= max);
+            } catch (NumberFormatException e) {
+                return false;
+            }
         }
 
         // P0-6: NoProviderCallAfterCompactFailure
         if (condition.equals("NoProviderCallAfterCompactFailure")) {
-            boolean compactFailed = result.metrics() != null
-                && result.metrics().compact().count() > 0
-                && result.summary() != null
-                && result.summary().status() == com.clawkit.observability.RunStatus.COMPACT_FAILED;
-            if (!compactFailed) return true;
-            return result.providerCalls() == 0;
+            long firstFailureSequence = events.stream()
+                .filter(e -> e.payload() instanceof CompactCompletedPayload p && p.failed())
+                .mapToLong(RunEventEnvelope::sequence)
+                .min()
+                .orElse(Long.MAX_VALUE);
+            if (firstFailureSequence == Long.MAX_VALUE) {
+                return true;
+            }
+            return events.stream().noneMatch(e ->
+                e.sequence() > firstFailureSequence
+                    && e.payload() instanceof ProviderCallStartedPayload);
         }
 
-        // P0-6: ContainsAnchor / ContainsEvidenceRef — 检查事件序列
+        // P0-6: ContainsAnchor — 只接受 compact 审计中的结构化 retained ID
         if (condition.startsWith("ContainsAnchor:")) {
             String id = condition.substring("ContainsAnchor:".length());
-            return events.stream().anyMatch(e -> e.toString().contains(id));
+            return !id.isBlank() && events.stream().anyMatch(e ->
+                e.payload() instanceof CompactCompletedPayload p
+                    && p.retainedAnchorIds() != null
+                    && p.retainedAnchorIds().contains(id));
         }
 
         if (condition.startsWith("ContainsEvidenceRef:")) {
             String ref = condition.substring("ContainsEvidenceRef:".length());
-            return events.stream().anyMatch(e -> e.toString().contains(ref));
+            return !ref.isBlank() && events.stream()
+                .anyMatch(e -> e.payload().toString().contains(ref));
         }
 
-        // fallback
-        return !events.isEmpty();
+        // 未注册 invariant 必须失败，避免拼写错误或未实现检查静默通过。
+        return false;
     }
 }

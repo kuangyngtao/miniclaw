@@ -51,6 +51,11 @@ public interface LLMProvider {
         return new ModelCapabilities(getContextWindow(), getEncoding(), false);
     }
 
+    /** Non-secret configured provider identity for event metadata. */
+    default ProviderDescriptor descriptor() {
+        return ProviderDescriptor.UNKNOWN;
+    }
+
     // ── V1 接口（保持向后兼容） ──────────────────────────────────────
 
     /**

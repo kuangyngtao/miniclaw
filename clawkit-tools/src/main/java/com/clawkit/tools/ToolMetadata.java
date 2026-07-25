@@ -25,10 +25,24 @@ public record ToolMetadata(
     // ── V2 组合对象 ──────────────────────────────────────────────
     ToolBehavior behavior,
     ToolExecutionPolicy executionPolicy,
-    ToolMetadataProvenance provenance
+    ToolMetadataProvenance provenance,
+    ToolControlPolicy controlPolicy
 ) {
+    public ToolMetadata(
+        String name, String description, JsonNode inputSchema, JsonNode outputSchema,
+        boolean readOnly, ToolRiskLevel riskLevel, boolean destructive,
+        boolean requiresApproval, Set<ToolSideEffect> sideEffects,
+        ToolBehavior behavior, ToolExecutionPolicy executionPolicy,
+        ToolMetadataProvenance provenance
+    ) {
+        this(name, description, inputSchema, outputSchema, readOnly, riskLevel,
+            destructive, requiresApproval, sideEffects, behavior, executionPolicy,
+            provenance, ToolControlPolicy.DEFAULT);
+    }
+
     /** compact constructor：验证平铺字段与 ToolBehavior 一致 */
     public ToolMetadata {
+        if (controlPolicy == null) controlPolicy = ToolControlPolicy.DEFAULT;
         if (behavior != null) {
             if (readOnly != behavior.readOnly())
                 throw new IllegalArgumentException(
@@ -65,7 +79,25 @@ public record ToolMetadata(
             behavior.readOnly(), behavior.riskLevel(),
             behavior.destructive(), behavior.requiresApproval(),
             behavior.sideEffects(),
-            behavior, executionPolicy, provenance
+            behavior, executionPolicy, provenance, ToolControlPolicy.DEFAULT
+        );
+    }
+
+    public ToolMetadata(
+        String name,
+        String description,
+        JsonNode inputSchema,
+        JsonNode outputSchema,
+        ToolBehavior behavior,
+        ToolExecutionPolicy executionPolicy,
+        ToolMetadataProvenance provenance,
+        ToolControlPolicy controlPolicy
+    ) {
+        this(
+            name, description, inputSchema, outputSchema,
+            behavior.readOnly(), behavior.riskLevel(),
+            behavior.destructive(), behavior.requiresApproval(),
+            behavior.sideEffects(), behavior, executionPolicy, provenance, controlPolicy
         );
     }
 
@@ -90,7 +122,8 @@ public record ToolMetadata(
             ro, level, dest, reqApproval, fx,
             new ToolBehavior(ro, level, dest, false, false, reqApproval, fx),
             ToolExecutionPolicy.defaults(),
-            ToolMetadataProvenance.builtin(tool.name())
+            ToolMetadataProvenance.builtin(tool.name()),
+            ToolControlPolicy.DEFAULT
         );
     }
 
@@ -106,7 +139,8 @@ public record ToolMetadata(
             readOnly, riskLevel, destructive, requiresApproval, sideEffects,
             new ToolBehavior(readOnly, riskLevel, destructive, false, false, requiresApproval, sideEffects),
             ToolExecutionPolicy.defaults(),
-            ToolMetadataProvenance.conservativeDefault()
+            ToolMetadataProvenance.conservativeDefault(),
+            ToolControlPolicy.DEFAULT
         );
     }
 
@@ -116,7 +150,8 @@ public record ToolMetadata(
             false, ToolRiskLevel.HIGH, true, true, Set.of(),
             ToolBehavior.conservativeDefault(),
             ToolExecutionPolicy.defaults(),
-            ToolMetadataProvenance.conservativeDefault()
+            ToolMetadataProvenance.conservativeDefault(),
+            ToolControlPolicy.DEFAULT
         );
     }
 

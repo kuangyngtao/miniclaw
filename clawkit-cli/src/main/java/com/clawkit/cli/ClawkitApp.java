@@ -43,7 +43,7 @@ public class ClawkitApp implements Runnable {
     private static final Logger log = LoggerFactory.getLogger(ClawkitApp.class);
 
     @Option(names = {"-m", "--model"},
-        description = "Model name (default: deepseek-chat)")
+        description = "Model name (default: deepseek-v4-flash)")
     private String model;
 
     @Option(names = {"--base-url"},

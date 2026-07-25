@@ -300,9 +300,15 @@ class RunEventCodecTest {
 
         var p = (ToolCompletedPayload) decoded.payload();
         assertThat(p.toolCallId()).isEqualTo("call-1");
-        assertThat(p.attemptCount()).isEqualTo(0);  // Jackson default for absent int
+        assertThat(p.attemptCount()).isEqualTo(1);
         assertThat(p.failureClassName()).isNull();
-        assertThat(p.inputComplete()).isFalse();     // Jackson default for absent boolean
+        assertThat(p.totalSourceBytes()).isEqualTo(1024);
+        assertThat(p.retainedSourceBytes()).isEqualTo(1024);
+        assertThat(p.returnedOutputBytes()).isEqualTo(1024);
+        assertThat(p.totalLines()).isEqualTo(-1);
+        assertThat(p.returnedLines()).isEqualTo(-1);
+        assertThat(p.retentionPolicy()).isEqualTo("LEGACY_V0");
+        assertThat(p.inputComplete()).isTrue();
     }
 
     @Test
@@ -340,6 +346,11 @@ class RunEventCodecTest {
 
         var p = (CompactCompletedPayload) decoded.payload();
         assertThat(p.beforeMessages()).isEqualTo(20);
-        assertThat(p.profile()).isNull();  // P1-A6 字段缺失 → Jackson default null
+        assertThat(p.profile()).isEqualTo("GENERAL");
+        assertThat(p.retainedAnchorIds()).isEmpty();
+        assertThat(p.lostRequiredAnchorIds()).isEmpty();
+        assertThat(p.discardedRangeSummaries()).isEmpty();
+        assertThat(p.level()).isEqualTo("L0_NONE");
+        assertThat(p.decisionReason()).isEqualTo("legacy-event");
     }
 }

@@ -19,7 +19,7 @@ public record SkillCatalog(Map<String, String> entries) {
     /** Format entries for system prompt injection. */
     public String toPrompt() {
         StringBuilder sb = new StringBuilder();
-        for (var e : entries.entrySet()) {
+        for (var e : new java.util.TreeMap<>(entries).entrySet()) {
             sb.append("- ").append(e.getKey()).append(": ").append(e.getValue()).append("\n");
         }
         return sb.toString();

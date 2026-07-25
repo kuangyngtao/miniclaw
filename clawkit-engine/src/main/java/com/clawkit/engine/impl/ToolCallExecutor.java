@@ -86,6 +86,26 @@ public class ToolCallExecutor {
         List<ToolExecutionResult> results = new ArrayList<>();
         List<Message> messages = new ArrayList<>();
 
+        List<ToolCall> terminalCalls = calls.stream()
+            .filter(call -> isTrustedLocalTerminal(metadataFor(call.name(), ctx)))
+            .toList();
+        if (!terminalCalls.isEmpty() && (calls.size() != 1 || terminalCalls.size() != 1)) {
+            for (ToolCall call : calls) {
+                ToolMetadata meta = metadataFor(call.name(), ctx);
+                boolean isInternal = ctx.internalTools().isInternal(call.name());
+                fireToolInvoked(call, ctx, meta, isInternal);
+                ToolExecutionResult result = ToolExecutionResult.error(
+                    call.id(), call.name(), "TERMINAL_TOOL_MUST_BE_EXCLUSIVE",
+                    "A terminal tool must be the only call in its batch", 0, meta);
+                ExecutedToolCall executed = singleAttempt(result);
+                results.add(result);
+                messages.add(toMessage(result));
+                fireToolCompleted(call, ctx, executed, isInternal);
+            }
+            return new ToolExecutionBatchResult(results, messages,
+                ToolLoopDecision.CONTINUE, null);
+        }
+
         int n = calls.size();
         boolean allInternal = calls.stream().allMatch(c -> ctx.internalTools().isInternal(c.name()));
         // 并发策略：internal 或 并行安全 的工具可并行
@@ -118,7 +138,33 @@ public class ToolCallExecutor {
             }
         }
 
-        return new ToolExecutionBatchResult(results, messages);
+        if (calls.size() == 1 && results.size() == 1
+            && isTrustedLocalTerminal(metadataFor(calls.get(0).name(), ctx))) {
+            ToolExecutionResult result = results.get(0);
+            var certainty = result.effectCertainty();
+            boolean certaintyKnown = certainty != null
+                && certainty != com.clawkit.tools.action.EffectCertainty.EFFECT_UNKNOWN
+                && certainty != com.clawkit.tools.action.EffectCertainty.PARTIAL_EFFECT;
+            if (result.success() && certaintyKnown) {
+                return new ToolExecutionBatchResult(results, messages,
+                    ToolLoopDecision.COMPLETE, result.output());
+            }
+        }
+
+        return new ToolExecutionBatchResult(results, messages,
+            ToolLoopDecision.CONTINUE, null);
+    }
+
+    private static boolean isTrustedLocalTerminal(ToolMetadata metadata) {
+        if (metadata == null || metadata.controlPolicy() == null
+            || metadata.controlPolicy().loopPolicy()
+                != com.clawkit.tools.ToolLoopPolicy.COMPLETE_RUN_ON_SUCCESS) {
+            return false;
+        }
+        var provenance = metadata.provenance();
+        return provenance != null && provenance.trusted()
+            && provenance.source() != com.clawkit.tools.ToolMetadataProvenance.ToolMetadataSource.MCP_ANNOTATION
+            && provenance.source() != com.clawkit.tools.ToolMetadataProvenance.ToolMetadataSource.CONSERVATIVE_DEFAULT;
     }
 
     // ── 核心单工具执行算法 ────────────────────────────────────────

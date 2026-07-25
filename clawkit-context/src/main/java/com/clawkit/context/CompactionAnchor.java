@@ -25,6 +25,8 @@ public record CompactionAnchor(
     Instant observedAt
 ) {
     private static final String ID_PATTERN = "[a-zA-Z0-9._-]{1,64}";
+    private static final String STATE_PATTERN = "[A-Z][A-Z0-9_-]{0,31}";
+    private static final String EVIDENCE_REF_PATTERN = "(?:evidence|ev|run)://\\S{1,500}";
 
     public CompactionAnchor {
         Objects.requireNonNull(id, "id");
@@ -39,6 +41,14 @@ public record CompactionAnchor(
         }
         if (summary.codePointCount(0, summary.length()) > 512) {
             throw new IllegalArgumentException("summary exceeds 512 code points");
+        }
+        if (!state.matches(STATE_PATTERN)) {
+            throw new IllegalArgumentException("invalid anchor state: " + state);
+        }
+        if (evidenceRef != null && !evidenceRef.isBlank()
+            && (!evidenceRef.matches(EVIDENCE_REF_PATTERN)
+                || evidenceRef.codePoints().anyMatch(Character::isISOControl))) {
+            throw new IllegalArgumentException("unsupported evidenceRef");
         }
         if (provenance != AnchorProvenance.USER
             && (kind == AnchorKind.CONFIRMED_FACT || kind == AnchorKind.COUNTER_EVIDENCE)

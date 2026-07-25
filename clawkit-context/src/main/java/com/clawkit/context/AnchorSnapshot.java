@@ -50,10 +50,7 @@ public record AnchorSnapshot(
             count++;
 
             // canonical escaping: 换行→空格, id= 前缀保护
-            String escaped = a.summary()
-                .replace("\n", " ")
-                .replace("\r", " ")
-                .replace("id=", "id\\=");
+            String escaped = canonicalEscape(a.summary());
             if (escaped.codePointCount(0, escaped.length()) > maxCodePoints) {
                 int end = escaped.offsetByCodePoints(0, maxCodePoints);
                 escaped = escaped.substring(0, end) + "…";
@@ -92,9 +89,25 @@ public record AnchorSnapshot(
     /** 检查所有 required id 都出现在 rendered text 中 */
     public List<String> findMissingRequired() {
         if (requiredIds.isEmpty()) return List.of();
+        var renderedIds = renderedText.lines()
+            .filter(line -> line.startsWith("- id="))
+            .map(line -> {
+                int end = line.indexOf(' ', 5);
+                return end < 0 ? line.substring(5) : line.substring(5, end);
+            })
+            .collect(java.util.stream.Collectors.toUnmodifiableSet());
         return requiredIds.stream()
-            .filter(id -> !renderedText.contains("id=" + id))
+            .filter(id -> !renderedIds.contains(id))
             .toList();
+    }
+
+    private static String canonicalEscape(String input) {
+        StringBuilder escaped = new StringBuilder(input.length());
+        input.codePoints().forEach(codePoint -> {
+            if (Character.isISOControl(codePoint)) escaped.append(' ');
+            else escaped.appendCodePoint(codePoint);
+        });
+        return escaped.toString().replace("id=", "id\\=");
     }
 
     private static String sha256(String input) {

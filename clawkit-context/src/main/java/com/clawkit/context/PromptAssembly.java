@@ -30,9 +30,9 @@ public final class PromptAssembly {
 
         if (activeSkills != null && !activeSkills.isEmpty()) {
             sb.append("\n\n## Loaded Skills\n");
-            for (String prompt : activeSkills.values()) {
-                sb.append("\n").append(prompt);
-            }
+            activeSkills.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(entry -> sb.append("\n").append(entry.getValue()));
         }
 
         sb.append("\n\n").append(l4ModePrompt);

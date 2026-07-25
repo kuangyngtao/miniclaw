@@ -29,6 +29,8 @@ final class EngineContextCoordinator {
     private final ContextBudgetPolicy policy;
     private final ContextBudgetAnalyzer analyzer;
     private final ContextPipeline pipeline;
+    private final int reservedOutputTokens;
+    private final int safetyMarginTokens;
     private volatile ContextBudgetReport lastReport;
     private volatile CompactionStatus lastCompaction;
 
@@ -39,6 +41,8 @@ final class EngineContextCoordinator {
         this.manager = new LadderedCompactor(summarizer, tokenizer);
         this.policy = ContextBudgetPolicy.of(contextWindow);
         this.analyzer = new ContextBudgetAnalyzer(tokenizer, policy);
+        this.reservedOutputTokens = Math.min(8_192, Math.max(64, contextWindow / 100));
+        this.safetyMarginTokens = Math.min(4_096, Math.max(32, contextWindow / 200));
         this.pipeline = supplied != null ? supplied
             : new DefaultContextPipeline(manager, analyzer, tokenizer, policy);
     }
@@ -56,8 +60,14 @@ final class EngineContextCoordinator {
     /** P1-A7：hint-aware compact */
     CompactionResult compact(List<Message> messages, int toolTokens, int turn,
                              CompactionHint hint) {
+        return compact(messages, toolTokens, turn, hint, Long.MAX_VALUE);
+    }
+
+    CompactionResult compact(List<Message> messages, int toolTokens, int turn,
+                             CompactionHint hint, long runTokenBudgetRemaining) {
         CompactionResult result = pipeline.compact(
-            new CompactionRequest(messages, toolTokens, turn, hint));
+            new CompactionRequest(messages, toolTokens, turn, hint,
+                reservedOutputTokens, safetyMarginTokens, runTokenBudgetRemaining));
         lastReport = result.afterReport() != null ? result.afterReport() : result.beforeReport();
         if (result.compacted()) {
             lastCompaction = new CompactionStatus(result.beforeMessages(), result.afterMessages(),

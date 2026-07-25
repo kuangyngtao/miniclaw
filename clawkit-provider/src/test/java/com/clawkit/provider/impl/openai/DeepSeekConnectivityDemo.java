@@ -26,7 +26,7 @@ public class DeepSeekConnectivityDemo {
         LLMConfig config = LLMConfig.builder()
             .apiKey(apiKey)
             .baseUrl("https://api.deepseek.com")
-            .model("deepseek-chat")
+            .model("deepseek-v4-flash")
             .build();
 
         LLMProvider provider = new OpenAIProvider(config);

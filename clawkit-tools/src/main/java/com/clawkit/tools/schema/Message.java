@@ -8,8 +8,13 @@ public record Message(
     Role role,
     String content,
     List<ToolCall> toolCalls,
-    String toolCallId
+    String toolCallId,
+    String reasoningContent
 ) {
+    public Message(Role role, String content, List<ToolCall> toolCalls, String toolCallId) {
+        this(role, content, toolCalls, toolCallId, null);
+    }
+
     public static Message system(String content) {
         return new Message(Role.SYSTEM, content, null, null);
     }
@@ -24,6 +29,11 @@ public record Message(
 
     public static Message assistantWithTools(List<ToolCall> toolCalls) {
         return new Message(Role.ASSISTANT, null, toolCalls, null);
+    }
+
+    public static Message assistantWithTools(String content, List<ToolCall> toolCalls,
+                                             String reasoningContent) {
+        return new Message(Role.ASSISTANT, content, toolCalls, null, reasoningContent);
     }
 
     public static Message toolResult(String toolCallId, String output) {

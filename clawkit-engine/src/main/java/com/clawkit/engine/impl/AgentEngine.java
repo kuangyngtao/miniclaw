@@ -1,6 +1,7 @@
 package com.clawkit.engine.impl;
 
 import com.clawkit.context.CompactionHintProvider;
+import com.clawkit.context.CompactionAudit;
 import com.clawkit.context.CompactionResult;
 import com.clawkit.context.ContextBudgetAnalyzer;
 import com.clawkit.context.ContextBudgetReport;
@@ -464,25 +465,51 @@ public class AgentEngine implements AgentLoop {
 
             // Phase 2: 上下文掩码 + 预算分析 + compact（ContextPipeline 聚合）
             int toolDefTokens = estimateToolTokens();
-            CompactionResult cr = context.compact(modelContext, toolDefTokens, turnCount, hint);
-            modelContext = cr.messages();
+            CompactionResult cr = context.compact(modelContext, toolDefTokens, turnCount, hint,
+                activeControl().tokenBudget().remaining());
+            modelContext = new ArrayList<>(cr.messages());
 
             if (cr.compacted()) {
                 fireEvent(new CompactTriggeredPayload(), turnCount);
+                var audit = cr.audit() != null ? cr.audit() : CompactionAudit.EMPTY;
                 var beforeSections = new java.util.LinkedHashMap<String, Integer>();
                 cr.beforeReport().sections().forEach((k, v) -> beforeSections.put(k.name(), v));
                 var afterSections = new java.util.LinkedHashMap<String, Integer>();
                 cr.afterReport().sections().forEach((k, v) -> afterSections.put(k.name(), v));
+                var discardedRanges = audit.discardedRanges().stream()
+                    .map(range -> range.fromTurn() + "-" + range.toTurn()
+                        + ":messages=" + range.messageCount()
+                        + ":roles=" + String.join(",", range.roles())
+                        + ":reason=" + range.reason())
+                    .toList();
+                boolean compactFailed = audit.failed()
+                    || cr.afterReport().status() == ContextBudgetReport.BudgetStatus.HARD_LIMIT;
+                String compactFailureCode = audit.failureCode() != null
+                    ? audit.failureCode()
+                    : compactFailed ? "COMPACT_HARD_LIMIT" : null;
                 fireEvent(new CompactCompletedPayload(
                     cr.beforeMessages(), cr.afterMessages(),
                     cr.beforeReport().totalTokens(), cr.afterReport().totalTokens(),
                     cr.beforeReport().status().name(), cr.afterReport().status().name(),
                     beforeSections, afterSections,
-                    0, cr.appliedRules(), 0L, false, null), turnCount);
-                session.replace(filterPersistable(modelContext));
+                    audit.evictedGroups(), cr.appliedRules(), audit.durationMs(),
+                    compactFailed, compactFailureCode,
+                    audit.profile(), audit.retainedAnchorIds(),
+                    audit.lostRequiredAnchorIds(), discardedRanges,
+                    compactFailureCode, audit.level().name(), audit.decisionReason()), turnCount);
                 log.info("[Engine] compact: {} → {} msgs, {} → {} tokens",
                     cr.beforeMessages(), cr.afterMessages(),
                     cr.beforeReport().totalTokens(), cr.afterReport().totalTokens());
+                if (compactFailed) {
+                    log.warn("[Engine] compact fail-closed: {}", compactFailureCode);
+                    completeRun(RunStatus.COMPACT_FAILED, compactFailureCode,
+                        "compact failed: " + compactFailureCode);
+                    return String.format(
+                        "上下文压缩失败（%s，%d / %d tokens），未调用主任务模型。",
+                        compactFailureCode, cr.afterReport().totalTokens(),
+                        context.policy().contextWindow());
+                }
+                session.replace(filterPersistable(modelContext));
             }
 
             if (context.lastReport().status() == ContextBudgetReport.BudgetStatus.HARD_LIMIT) {
@@ -662,6 +689,12 @@ public class AgentEngine implements AgentLoop {
                 recentCallSignatures.remove(0);
             }
             session.replace(filterPersistable(contextHistory));
+            if (batchResult.loopDecision() == ToolLoopDecision.COMPLETE) {
+                fireState(AgentState.REPLYING, turnCount);
+                lastRunTurns = turnCount;
+                completeRun(RunStatus.COMPLETED, null, null);
+                return batchResult.finalOutput() != null ? batchResult.finalOutput() : "";
+            }
         } // end while
         } catch (com.clawkit.tools.control.ExecutionHaltedException halted) {
             // P1-G1：控制面停止（取消/deadline/预算）不是普通错误
@@ -831,11 +864,17 @@ public class AgentEngine implements AgentLoop {
     /** Provider 调用唯一入口。 */
     private Message callProvider(List<Message> messages, List<ToolDefinition> tools,
                                   int turn, RunPhase phase) {
-        var req = ModelRequest.of(messages, tools);
+        List<ToolDefinition> stableTools = tools == null ? List.of() : tools.stream()
+            .sorted(java.util.Comparator.comparing(ToolDefinition::name))
+            .toList();
+        var req = ModelRequest.of(messages, stableTools);
         var scope = new RunScope(currentRunId, parentRunId, turn, phase, executionMode,
             activeControl());
         var resp = providerGateway.generate(req, scope);
-        if (resp.hasToolCalls()) return Message.assistantWithTools(resp.toolCalls());
+        if (resp.hasToolCalls()) {
+            return Message.assistantWithTools(resp.content(), resp.toolCalls(),
+                resp.reasoningContent());
+        }
         return Message.assistant(resp.content() != null ? resp.content() : "");
     }
 
@@ -1295,6 +1334,10 @@ public class AgentEngine implements AgentLoop {
             return "session is empty, nothing to compact.";
         }
         CompactionResult cr = context.compact(new ArrayList<>(session.messages()), 0, lastRunTurns);
+        if (cr.audit() != null && cr.audit().failed()) {
+            return "compact failed: " + cr.audit().failureCode()
+                + " (session unchanged)";
+        }
         List<Message> clean = filterPersistable(cr.messages());
         session.replace(clean);
         recentCallSignatures.clear();

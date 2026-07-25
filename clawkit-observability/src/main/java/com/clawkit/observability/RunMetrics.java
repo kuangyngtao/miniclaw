@@ -23,8 +23,20 @@ public record RunMetrics(
         long durationMs,
         long inputTokens,
         long outputTokens,
-        boolean tokensEstimated
-    ) {}
+        boolean tokensEstimated,
+        long promptCacheHitTokens,
+        long promptCacheMissTokens,
+        long reasoningTokens,
+        int actualUsageCalls,
+        int estimatedUsageCalls,
+        int unavailableUsageCalls
+    ) {
+        public ProviderMetrics(int calls, int failures, int retries, long durationMs,
+                               long inputTokens, long outputTokens, boolean tokensEstimated) {
+            this(calls, failures, retries, durationMs, inputTokens, outputTokens,
+                tokensEstimated, 0, 0, 0, 0, 0, Math.max(0, calls - failures));
+        }
+    }
 
     public record ToolMetrics(
         int calls,

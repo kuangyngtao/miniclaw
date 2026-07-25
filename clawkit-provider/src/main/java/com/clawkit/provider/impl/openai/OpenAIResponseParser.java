@@ -51,12 +51,11 @@ public class OpenAIResponseParser {
                 }
                 toolCalls.add(new ToolCall(otc.id(), otc.function().name(), argsNode));
             }
-            return msg.content() != null
-                ? new Message(Role.ASSISTANT, msg.content(), toolCalls, null)
-                : Message.assistantWithTools(toolCalls);
+            return Message.assistantWithTools(msg.content(), toolCalls, msg.reasoningContent());
         }
 
         // 纯文本回复
-        return Message.assistant(msg.content() != null ? msg.content() : "");
+        return new Message(Role.ASSISTANT, msg.content() != null ? msg.content() : "",
+            null, null, msg.reasoningContent());
     }
 }

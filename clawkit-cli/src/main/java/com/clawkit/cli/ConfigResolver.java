@@ -13,7 +13,7 @@ import java.util.Set;
 
 /** Resolves CLI, environment, user YAML and defaults without persisting credentials. */
 final class ConfigResolver {
-    static final String DEFAULT_MODEL = "deepseek-chat";
+    static final String DEFAULT_MODEL = "deepseek-v4-flash";
     static final String DEFAULT_BASE_URL = "https://api.deepseek.com";
     static final String DEFAULT_PROTOCOL = "OPENAI_COMPAT";
     private static final Set<String> SECRET_FIELDS = Set.of(
@@ -114,7 +114,7 @@ final class ConfigResolver {
     private static void validate(String model, String baseUrl, String protocol) {
         if (!model.startsWith("deepseek-")) {
             throw new ConfigurationException("C-004", "Unsupported model: " + model,
-                "the provider was not created", "Use deepseek-chat or deepseek-reasoner.");
+                "the provider was not created", "Use deepseek-v4-flash or deepseek-v4-pro.");
         }
         if (!DEFAULT_PROTOCOL.equalsIgnoreCase(protocol)) {
             throw new ConfigurationException("C-004", "Unsupported protocol: " + protocol,

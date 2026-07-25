@@ -9,5 +9,11 @@ record OpenAIMessage(
     String role,
     String content,
     @JsonProperty("tool_calls") List<OpenAIToolCall> toolCalls,
-    @JsonProperty("tool_call_id") String toolCallId
-) {}
+    @JsonProperty("tool_call_id") String toolCallId,
+    @JsonProperty("reasoning_content") String reasoningContent
+) {
+    OpenAIMessage(String role, String content, List<OpenAIToolCall> toolCalls,
+                  String toolCallId) {
+        this(role, content, toolCalls, toolCallId, null);
+    }
+}

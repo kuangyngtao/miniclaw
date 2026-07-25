@@ -3,7 +3,9 @@ package com.clawkit.observability;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 从 RunEventEnvelope 流式聚合 RunSummary 和 RunMetrics。
@@ -42,6 +44,13 @@ public class RunAccumulator {
     private long inputTokens;
     private long outputTokens;
     private boolean tokensEstimated;
+    private long promptCacheHitTokens;
+    private long promptCacheMissTokens;
+    private long reasoningTokens;
+    private int actualUsageCalls;
+    private int estimatedUsageCalls;
+    private int unavailableUsageCalls;
+    private final Set<String> providerCallIds = new HashSet<>();
 
     private int toolCalls;
     private int toolFailures;
@@ -130,7 +139,25 @@ public class RunAccumulator {
         this.providerDurationMs += p.durationMs();
         this.inputTokens += p.inputTokens();
         this.outputTokens += p.outputTokens();
-        if (p.tokensEstimated()) this.tokensEstimated = true;
+        this.promptCacheHitTokens += p.promptCacheHitTokens();
+        this.promptCacheMissTokens += p.promptCacheMissTokens();
+        this.reasoningTokens += p.reasoningTokens();
+        if (!providerCallIds.add(p.providerCallId())) {
+            addWarning("duplicate providerCallId: " + p.providerCallId());
+        }
+        if ((long) p.promptCacheHitTokens() + p.promptCacheMissTokens() > p.inputTokens()) {
+            addWarning("provider cache token breakdown exceeds input tokens: " + p.providerCallId());
+        }
+        if (!p.failed()) {
+            switch (p.usageSource() != null ? p.usageSource() : "UNAVAILABLE") {
+                case "ACTUAL" -> this.actualUsageCalls++;
+                case "ESTIMATED" -> this.estimatedUsageCalls++;
+                default -> this.unavailableUsageCalls++;
+            }
+        }
+        if (p.tokensEstimated() || (!p.failed() && !"ACTUAL".equals(p.usageSource()))) {
+            this.tokensEstimated = true;
+        }
     }
 
     private void onToolInvoked(ToolInvokedPayload p) {
@@ -236,7 +263,9 @@ public class RunAccumulator {
             s,
             new RunMetrics.ProviderMetrics(
                 providerCalls, providerFailures, providerRetries,
-                providerDurationMs, inputTokens, outputTokens, tokensEstimated),
+                providerDurationMs, inputTokens, outputTokens, tokensEstimated,
+                promptCacheHitTokens, promptCacheMissTokens, reasoningTokens,
+                actualUsageCalls, estimatedUsageCalls, unavailableUsageCalls),
             new RunMetrics.ToolMetrics(
                 toolCalls, toolFailures,
                 lowRiskToolCalls, mediumRiskToolCalls, highRiskToolCalls),

@@ -4,6 +4,15 @@ package com.clawkit.observability;
 public record ProviderCallStartedPayload(
     String providerCallId,
     String phase,
-    boolean streaming
+    boolean streaming,
+    String routeId,
+    String routeReasonCode,
+    String providerDialect,
+    String requestedModel,
+    String reasoningMode,
+    String promptFingerprint
 ) implements RunEventPayload {
+    public ProviderCallStartedPayload(String providerCallId, String phase, boolean streaming) {
+        this(providerCallId, phase, streaming, null, null, null, null, null, null);
+    }
 }

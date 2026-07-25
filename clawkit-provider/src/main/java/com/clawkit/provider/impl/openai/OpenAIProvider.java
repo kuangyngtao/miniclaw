@@ -4,14 +4,22 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.clawkit.provider.LLMConfig;
 import com.clawkit.provider.LLMException;
 import com.clawkit.provider.LLMProvider;
 import com.clawkit.provider.ModelRequest;
+import com.clawkit.provider.ModelParameters;
 import com.clawkit.provider.ModelResponse;
+import com.clawkit.provider.ProviderDialect;
+import com.clawkit.provider.ProviderDescriptor;
 import com.clawkit.provider.ProviderError;
+import com.clawkit.provider.ProviderReasoningMode;
 import com.clawkit.provider.ProviderResponseMetadata;
+import com.clawkit.provider.StreamObserver;
 import com.clawkit.provider.TokenUsage;
+import com.clawkit.provider.UsageSource;
 import com.clawkit.tools.control.CancelRegistration;
 import com.clawkit.tools.control.ExecutionControl;
 import com.clawkit.tools.control.ExecutionHaltedException;
@@ -65,7 +73,10 @@ public class OpenAIProvider implements LLMProvider {
     private record SendResult(byte[] body, int retryCount, String model, String id) {}
 
     /** P0-3：内部 generate 返回类型，metadata 沿返回值传递保证并发安全 */
-    private record GenerateResult(Message message, ProviderResponseMetadata metadata) {}
+    private record GenerateResult(Message message, TokenUsage usage,
+                                  ProviderResponseMetadata metadata) {}
+
+    private record StreamResult(Message message, TokenUsage usage, String model, String id) {}
 
     public OpenAIProvider(LLMConfig config) {
         this(config, Thread::sleep, System::currentTimeMillis);
@@ -73,6 +84,12 @@ public class OpenAIProvider implements LLMProvider {
 
     OpenAIProvider(LLMConfig config, RetrySleeper retrySleeper, LongSupplier clockMillis) {
         this.config = config;
+        if ("deepseek-chat".equals(config.model())
+            || "deepseek-reasoner".equals(config.model())) {
+            log.warn("DeepSeek legacy model alias '{}' is deprecated and will stop working after "
+                + "2026-07-24 15:59 UTC; migrate to deepseek-v4-flash with an explicit reasoning mode",
+                config.model());
+        }
         this.retrySleeper = retrySleeper;
         this.clockMillis = clockMillis;
         this.objectMapper = new ObjectMapper()
@@ -85,6 +102,9 @@ public class OpenAIProvider implements LLMProvider {
 
     @Override public int getContextWindow() { return config.contextWindow(); }
     @Override public String getEncoding()    { return config.encoding(); }
+    @Override public ProviderDescriptor descriptor() {
+        return new ProviderDescriptor(config.dialect(), config.model());
+    }
 
     // === 熔断器 ===
 
@@ -131,29 +151,30 @@ public class OpenAIProvider implements LLMProvider {
     /** P0-3：V2 generate(ModelRequest) 返回沿调用链传递的真实 metadata */
     @Override
     public ModelResponse generate(ModelRequest request) {
-        var gr = generateInternal(request.messages(), request.tools(), request.control());
+        var gr = generateInternal(request.messages(), request.tools(), request.parameters(), request.control());
         var msg = gr.message();
         var toolCalls = msg.toolCalls();
         var reason = toolCalls != null && !toolCalls.isEmpty()
             ? com.clawkit.provider.FinishReason.TOOL_CALLS : com.clawkit.provider.FinishReason.STOP;
         return new ModelResponse(msg.content(), toolCalls, reason,
-            TokenUsage.EMPTY, gr.metadata());
+            gr.usage(), gr.metadata(), msg.reasoningContent());
     }
 
     @Override
     public Message generate(List<Message> messages, List<ToolDefinition> availableTools,
                             ExecutionControl control) {
-        return generateInternal(messages, availableTools, control).message();
+        return generateInternal(messages, availableTools, ModelParameters.DEFAULT, control).message();
     }
 
     /** P0-3：内部 generate，metadata 沿返回值传递，消除共享可变状态 */
     private GenerateResult generateInternal(List<Message> messages,
                                              List<ToolDefinition> availableTools,
+                                             ModelParameters parameters,
                                              ExecutionControl control) {
         control.checkpoint();
         checkCircuit();
 
-        OpenAIRequest request = buildRequest(messages, availableTools, false);
+        OpenAIRequest request = buildRequest(messages, availableTools, parameters, false);
 
         final byte[] requestBody;
         try {
@@ -189,7 +210,7 @@ public class OpenAIProvider implements LLMProvider {
                 result.content() != null ? result.content().length() : 0,
                 result.toolCalls() != null ? " + " + result.toolCalls().size() + " tool calls" : "");
             recordSuccess();
-            return new GenerateResult(result,
+            return new GenerateResult(result, toTokenUsage(response.usage()),
                 new ProviderResponseMetadata(sendResult.model(), sendResult.id(), sendResult.retryCount()));
         } catch (LLMException e) {
             long elapsed = System.currentTimeMillis() - startMs;
@@ -208,10 +229,43 @@ public class OpenAIProvider implements LLMProvider {
     @Override
     public Message generateStream(List<Message> messages, List<ToolDefinition> availableTools,
                                   Consumer<String> onToken, ExecutionControl control) {
+        return generateStreamInternal(messages, availableTools, ModelParameters.DEFAULT,
+            onToken, null, control).message();
+    }
+
+    @Override
+    public ModelResponse generateStream(ModelRequest request, StreamObserver observer) {
+        try {
+            StreamResult sr = generateStreamInternal(request.messages(), request.tools(),
+                request.parameters(), observer::onContent, observer, request.control());
+            Message message = sr.message();
+            var toolCalls = message.toolCalls();
+            var reason = toolCalls != null && !toolCalls.isEmpty()
+                ? com.clawkit.provider.FinishReason.TOOL_CALLS
+                : com.clawkit.provider.FinishReason.STOP;
+            ModelResponse response = new ModelResponse(message.content(), toolCalls, reason,
+                sr.usage(), new ProviderResponseMetadata(sr.model(), sr.id(), 0),
+                message.reasoningContent());
+            observer.onComplete(response);
+            return response;
+        } catch (LLMException e) {
+            ProviderError error = e.providerError() != null
+                ? e.providerError() : new ProviderError.Protocol(e.getMessage());
+            observer.onError(error);
+            throw e;
+        }
+    }
+
+    private StreamResult generateStreamInternal(List<Message> messages,
+                                                List<ToolDefinition> availableTools,
+                                                ModelParameters parameters,
+                                                Consumer<String> onToken,
+                                                StreamObserver observer,
+                                                ExecutionControl control) {
         control.checkpoint();
         checkCircuit();
 
-        OpenAIRequest request = buildRequest(messages, availableTools, true);
+        OpenAIRequest request = buildRequest(messages, availableTools, parameters, true);
 
         final byte[] requestBody;
         try {
@@ -229,7 +283,7 @@ public class OpenAIProvider implements LLMProvider {
         Thread caller = Thread.currentThread();
 
         try {
-            Message result;
+            StreamResult result;
             try (CancelRegistration reg = control.onCancel(caller::interrupt)) {
                 HttpResponse<java.io.InputStream> response = httpClient.send(httpRequest,
                     HttpResponse.BodyHandlers.ofInputStream());
@@ -246,7 +300,7 @@ public class OpenAIProvider implements LLMProvider {
                 try (CancelRegistration streamReg = control.onCancel(() -> {
                     try { body.close(); } catch (IOException ignored) {}
                 })) {
-                    result = parseSSEStream(body, onToken);
+                    result = parseSSEStream(body, onToken, observer);
                 }
             } finally {
                 if (control.isCancelled()) Thread.interrupted(); // 清除控制面注入的中断标志
@@ -255,8 +309,9 @@ public class OpenAIProvider implements LLMProvider {
             long elapsed = System.currentTimeMillis() - startMs;
             log.info("[LLM] {} {}ms stream, {} msgs → {} chars{}",
                 config.model(), elapsed, messages.size(),
-                result.content() != null ? result.content().length() : 0,
-                result.toolCalls() != null ? " + " + result.toolCalls().size() + " tool calls" : "");
+                result.message().content() != null ? result.message().content().length() : 0,
+                result.message().toolCalls() != null
+                    ? " + " + result.message().toolCalls().size() + " tool calls" : "");
             recordSuccess();
             return result;
 
@@ -290,12 +345,17 @@ public class OpenAIProvider implements LLMProvider {
     }
 
     /** 解析 SSE 流，累积完整 Message */
-    private Message parseSSEStream(java.io.InputStream body, Consumer<String> onToken)
+    private StreamResult parseSSEStream(java.io.InputStream body, Consumer<String> onToken,
+                                        StreamObserver observer)
         throws IOException {
 
         StringBuilder contentBuilder = new StringBuilder();
+        StringBuilder reasoningBuilder = new StringBuilder();
         Map<Integer, ToolCallAccum> toolAccum = new HashMap<>();
         String finishReason = null;
+        TokenUsage usage = TokenUsage.EMPTY;
+        String responseModel = config.model();
+        String responseId = "";
 
         try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(body, StandardCharsets.UTF_8))) {
@@ -316,6 +376,10 @@ public class OpenAIProvider implements LLMProvider {
                     continue; // 跳过无法解析的行
                 }
 
+                if (chunk.hasNonNull("model")) responseModel = chunk.get("model").asText();
+                if (chunk.hasNonNull("id")) responseId = chunk.get("id").asText();
+                if (chunk.hasNonNull("usage")) usage = toTokenUsage(chunk.get("usage"));
+
                 JsonNode choices = chunk.get("choices");
                 if (choices == null || choices.isEmpty()) continue;
 
@@ -328,6 +392,11 @@ public class OpenAIProvider implements LLMProvider {
                     String text = contentNode.asText();
                     contentBuilder.append(text);
                     onToken.accept(text);
+                }
+
+                JsonNode reasoningNode = delta.get("reasoning_content");
+                if (reasoningNode != null && !reasoningNode.asText().isEmpty()) {
+                    reasoningBuilder.append(reasoningNode.asText());
                 }
 
                 // 工具调用增量 → 累积
@@ -346,7 +415,11 @@ public class OpenAIProvider implements LLMProvider {
                             JsonNode nameNode = fnNode.get("name");
                             if (nameNode != null) acc.name = nameNode.asText();
                             JsonNode argsNode = fnNode.get("arguments");
-                            if (argsNode != null) acc.args.append(argsNode.asText());
+                            String argsDelta = argsNode != null ? argsNode.asText() : null;
+                            if (argsDelta != null) acc.args.append(argsDelta);
+                            if (observer != null) {
+                                observer.onToolCallDelta(idx, acc.id, acc.name, argsDelta);
+                            }
                         }
                     }
                 }
@@ -374,19 +447,22 @@ public class OpenAIProvider implements LLMProvider {
                 toolCalls.add(new ToolCall(acc.id, acc.name, argsNode));
             }
             String text = !contentBuilder.isEmpty() ? contentBuilder.toString() : null;
-            return text != null
-                ? new Message(com.clawkit.tools.schema.Role.ASSISTANT, text, toolCalls, null)
-                : Message.assistantWithTools(toolCalls);
+            Message message = Message.assistantWithTools(text, toolCalls,
+                !reasoningBuilder.isEmpty() ? reasoningBuilder.toString() : null);
+            return new StreamResult(message, usage, responseModel, responseId);
         }
 
         // 纯文本回复
-        return Message.assistant(!contentBuilder.isEmpty() ? contentBuilder.toString() : "");
+        Message message = new Message(com.clawkit.tools.schema.Role.ASSISTANT,
+            !contentBuilder.isEmpty() ? contentBuilder.toString() : "", null, null,
+            !reasoningBuilder.isEmpty() ? reasoningBuilder.toString() : null);
+        return new StreamResult(message, usage, responseModel, responseId);
     }
 
     // === 请求构建 ===
 
     private OpenAIRequest buildRequest(List<Message> messages, List<ToolDefinition> tools,
-                                       boolean stream) {
+                                       ModelParameters parameters, boolean stream) {
         List<OpenAIMessage> openaiMsgs = new ArrayList<>();
         for (Message msg : messages) {
             openaiMsgs.add(toOpenAIMessage(msg));
@@ -395,13 +471,42 @@ public class OpenAIProvider implements LLMProvider {
         List<OpenAITool> openaiTools = null;
         if (tools != null && !tools.isEmpty()) {
             openaiTools = new ArrayList<>();
-            for (ToolDefinition td : tools) {
+            for (ToolDefinition td : tools.stream()
+                    .sorted(java.util.Comparator.comparing(ToolDefinition::name))
+                    .toList()) {
                 openaiTools.add(new OpenAITool("function",
-                    new OpenAIFunctionDef(td.name(), td.description(), parseSchema(td.inputSchema()))));
+                    new OpenAIFunctionDef(td.name(), td.description(),
+                        canonicalize(parseSchema(td.inputSchema())))));
             }
         }
 
-        return new OpenAIRequest(config.model(), openaiMsgs, openaiTools, stream);
+        ProviderReasoningMode reasoningMode = parameters != null
+            ? parameters.reasoningMode() : ProviderReasoningMode.DISABLED;
+        DeepSeekThinking thinking = null;
+        String reasoningEffort = null;
+        if (config.dialect() == ProviderDialect.DEEPSEEK_V4) {
+            switch (reasoningMode) {
+                case DISABLED -> thinking = new DeepSeekThinking("disabled");
+                case ENABLED_HIGH -> {
+                    thinking = new DeepSeekThinking("enabled");
+                    reasoningEffort = "high";
+                }
+                case ENABLED_MAX -> {
+                    thinking = new DeepSeekThinking("enabled");
+                    reasoningEffort = "max";
+                }
+                case PROVIDER_DEFAULT -> { }
+            }
+        } else if (reasoningMode != ProviderReasoningMode.DISABLED
+                   && reasoningMode != ProviderReasoningMode.PROVIDER_DEFAULT) {
+            throw new LLMException("Reasoning mode requires a provider dialect that supports it");
+        }
+
+        return new OpenAIRequest(config.model(), openaiMsgs, openaiTools, stream,
+            thinking, reasoningEffort,
+            parameters != null ? parameters.temperature() : null,
+            parameters != null ? parameters.maxTokens() : null,
+            stream ? new OpenAIStreamOptions(true) : null);
     }
 
     private HttpRequest buildHttpRequest(byte[] body, Duration timeout) {
@@ -444,16 +549,16 @@ public class OpenAIProvider implements LLMProvider {
                 toolCalls.add(new OpenAIToolCall(tc.id(), "function",
                     new OpenAIFunction(tc.name(), argsStr)));
             }
-            return new OpenAIMessage(role, content, toolCalls, null);
+            return new OpenAIMessage(role, content, toolCalls, null, msg.reasoningContent());
         }
 
         // 工具结果：带 tool_call_id
         if (msg.toolCallId() != null) {
-            return new OpenAIMessage(role, content, null, msg.toolCallId());
+            return new OpenAIMessage(role, content, null, msg.toolCallId(), null);
         }
 
         // 普通消息：system / user / assistant 纯文本
-        return new OpenAIMessage(role, content, null, null);
+        return new OpenAIMessage(role, content, null, null, msg.reasoningContent());
     }
 
     private static String roleToString(com.clawkit.tools.schema.Role role) {
@@ -485,10 +590,62 @@ public class OpenAIProvider implements LLMProvider {
         return schema;
     }
 
+    private JsonNode canonicalize(JsonNode node) {
+        if (node == null) return null;
+        if (node.isObject()) {
+            ObjectNode sorted = objectMapper.createObjectNode();
+            List<String> names = new ArrayList<>();
+            node.fieldNames().forEachRemaining(names::add);
+            names.stream().sorted().forEach(name -> sorted.set(name, canonicalize(node.get(name))));
+            return sorted;
+        }
+        if (node.isArray()) {
+            ArrayNode array = objectMapper.createArrayNode();
+            node.forEach(item -> array.add(canonicalize(item)));
+            return array;
+        }
+        return node;
+    }
+
     // === 响应转换：OpenAI JSON → 内部 Message ===
 
     private Message toMessage(OpenAIResponse response) {
         return responseParser.toMessage(response);
+    }
+
+    private static TokenUsage toTokenUsage(OpenAIUsage usage) {
+        if (usage == null) return TokenUsage.EMPTY;
+        int prompt = valueOrZero(usage.promptTokens());
+        int completion = valueOrZero(usage.completionTokens());
+        int total = usage.totalTokens() != null ? usage.totalTokens() : prompt + completion;
+        int hit = valueOrZero(usage.promptCacheHitTokens());
+        int miss = usage.promptCacheMissTokens() != null
+            ? usage.promptCacheMissTokens() : Math.max(0, prompt - hit);
+        int reasoning = usage.completionTokenDetails() != null
+            ? valueOrZero(usage.completionTokenDetails().reasoningTokens()) : 0;
+        return new TokenUsage(prompt, completion, total, hit, miss, reasoning, UsageSource.ACTUAL);
+    }
+
+    private TokenUsage toTokenUsage(JsonNode usage) {
+        if (usage == null || usage.isNull()) return TokenUsage.EMPTY;
+        int prompt = intValue(usage, "prompt_tokens");
+        int completion = intValue(usage, "completion_tokens");
+        int total = usage.hasNonNull("total_tokens")
+            ? usage.get("total_tokens").asInt() : prompt + completion;
+        int hit = intValue(usage, "prompt_cache_hit_tokens");
+        int miss = usage.hasNonNull("prompt_cache_miss_tokens")
+            ? usage.get("prompt_cache_miss_tokens").asInt() : Math.max(0, prompt - hit);
+        JsonNode details = usage.get("completion_tokens_details");
+        int reasoning = details != null ? intValue(details, "reasoning_tokens") : 0;
+        return new TokenUsage(prompt, completion, total, hit, miss, reasoning, UsageSource.ACTUAL);
+    }
+
+    private static int valueOrZero(Integer value) {
+        return value != null ? value : 0;
+    }
+
+    private static int intValue(JsonNode node, String field) {
+        return node.hasNonNull(field) ? node.get(field).asInt() : 0;
     }
 
     // === 重试逻辑 ===

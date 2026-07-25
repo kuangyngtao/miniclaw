@@ -15,7 +15,8 @@ public record LLMConfig(
     Duration requestTimeout,
     int maxRetries,
     int contextWindow,
-    String encoding
+    String encoding,
+    ProviderDialect dialect
 ) {
     public enum Protocol {
         OPENAI_COMPAT,
@@ -29,11 +30,23 @@ public record LLMConfig(
         return builder().apiKey(apiKey).build();
     }
 
+    public LLMConfig(String apiKey, String baseUrl, String model, Protocol protocol,
+                     Duration connectTimeout, Duration requestTimeout, int maxRetries,
+                     int contextWindow, String encoding) {
+        this(apiKey, baseUrl, model, protocol, connectTimeout, requestTimeout, maxRetries,
+            contextWindow, encoding, ProviderDialect.GENERIC_OPENAI_COMPAT);
+    }
+
+    public LLMConfig {
+        if (dialect == null) dialect = ProviderDialect.GENERIC_OPENAI_COMPAT;
+    }
+
     public static class Builder {
         private String apiKey;
         private String baseUrl = "https://api.deepseek.com";
-        private String model = "deepseek-chat";
+        private String model = "deepseek-v4-flash";
         private Protocol protocol = Protocol.OPENAI_COMPAT;
+        private ProviderDialect dialect = ProviderDialect.DEEPSEEK_V4;
         private Duration connectTimeout = Duration.ofSeconds(10);
         private Duration requestTimeout = Duration.ofSeconds(60);
         private int maxRetries = 3;
@@ -44,6 +57,7 @@ public record LLMConfig(
         public Builder baseUrl(String baseUrl)            { this.baseUrl = baseUrl; return this; }
         public Builder model(String model)                { this.model = model; return this; }
         public Builder protocol(Protocol protocol)        { this.protocol = protocol; return this; }
+        public Builder dialect(ProviderDialect dialect)   { this.dialect = dialect; return this; }
         public Builder connectTimeout(Duration timeout)   { this.connectTimeout = timeout; return this; }
         public Builder requestTimeout(Duration timeout)   { this.requestTimeout = timeout; return this; }
         public Builder maxRetries(int maxRetries)         { this.maxRetries = maxRetries; return this; }
@@ -61,7 +75,7 @@ public record LLMConfig(
                 encoding = detectEncoding(model);
             }
             return new LLMConfig(apiKey, baseUrl, model, protocol,
-                connectTimeout, requestTimeout, maxRetries, contextWindow, encoding);
+                connectTimeout, requestTimeout, maxRetries, contextWindow, encoding, dialect);
         }
 
         /** 按模型名前缀匹配上下文窗口大小。未匹配到返回 128000。 */
