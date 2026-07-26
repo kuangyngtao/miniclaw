@@ -66,9 +66,9 @@ public final class RemoteDiscoveryMain {
 
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
-                case "--target" -> targetId = args[++i];
-                case "--profile" -> profileName = args[++i];
-                case "--output" -> outputDir = Path.of(args[++i]);
+                case "--target" -> targetId = nextArg(args, i++);
+                case "--profile" -> profileName = nextArg(args, i++);
+                case "--output" -> outputDir = Path.of(nextArg(args, i++));
                 default -> {
                     System.err.println("usage: discover --target <id> [--profile <name>] [--output <dir>]");
                     return 4;
@@ -258,8 +258,16 @@ public final class RemoteDiscoveryMain {
         return v;
     }
 
+    private static String nextArg(String[] args, int i) {
+        if (i + 1 >= args.length) {
+            System.err.println("missing value for " + args[i]);
+            throw new ConfigException("missing value for " + args[i]);
+        }
+        return args[i + 1];
+    }
+
     /** Thrown for configuration errors; mapped to exit code 4. */
-    static final class ConfigException extends RuntimeException {
-        ConfigException(String msg) { super(msg); }
+    public static final class ConfigException extends RuntimeException {
+        public ConfigException(String msg) { super(msg); }
     }
 }

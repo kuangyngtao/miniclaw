@@ -25,6 +25,7 @@
         <module>clawkit-evaluation</module>
         <module>extensions/clawkit-ops-mcp</module>
         <module>extensions/clawkit-ops-loop</module>
+        <module>extensions/clawkit-ops-delivery</module>
     </modules>
 
     <properties>
