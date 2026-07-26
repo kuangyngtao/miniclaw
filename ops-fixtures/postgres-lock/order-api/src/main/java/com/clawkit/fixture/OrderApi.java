@@ -29,7 +29,7 @@ public final class OrderApi {
     private static final AtomicLong CPU_BURN_MS = new AtomicLong();
     private static final AtomicLong LOCK_GENERATION = new AtomicLong();
     private static final AtomicInteger HELD_CONNECTIONS = new AtomicInteger();
-    private static final String ACCOUNT = "acct-001";
+    private static final String DEFAULT_ACCOUNT = "hot-0001";
     private static HikariDataSource pool;
     private static volatile boolean ready;
 
@@ -66,6 +66,7 @@ public final class OrderApi {
             if ("POST".equals(exchange.getRequestMethod())) {
                 JsonNode body = JSON.readTree(exchange.getRequestBody());
                 String requestId = required(body, "requestId");
+                String accountId = body.path("accountId").asText(DEFAULT_ACCOUNT);
                 long amountCents = body.path("amountCents").asLong(-1);
                 if (amountCents < 1 || amountCents > 1_000_000) throw new IllegalArgumentException("invalid amountCents");
                 delay();
@@ -73,18 +74,31 @@ public final class OrderApi {
                     connection.setAutoCommit(false);
                     try (PreparedStatement lock = connection.prepareStatement(
                             "SELECT balance_cents FROM accounts WHERE account_id = ? FOR UPDATE")) {
-                        lock.setString(1, ACCOUNT);
-                        try (ResultSet rows = lock.executeQuery()) { if (!rows.next()) throw new IllegalStateException("account missing"); }
+                        lock.setString(1, accountId);
+                        try (ResultSet rows = lock.executeQuery()) { if (!rows.next()) throw new IllegalStateException("account missing: " + accountId); }
                     }
                     int inserted;
                     try (PreparedStatement insert = connection.prepareStatement(
                             "INSERT INTO orders(request_id, account_id, amount_cents) VALUES (?, ?, ?) ON CONFLICT DO NOTHING")) {
                         insert.setObject(1, UUID.fromString(requestId));
-                        insert.setString(2, ACCOUNT);
+                        insert.setString(2, accountId);
                         insert.setLong(3, amountCents);
                         inserted = insert.executeUpdate();
                     }
                     duplicate = inserted == 0;
+                    if (!duplicate) {
+                        try (PreparedStatement deduct = connection.prepareStatement(
+                                "UPDATE accounts SET balance_cents = balance_cents - ? WHERE account_id = ? AND balance_cents >= ?")) {
+                            deduct.setLong(1, amountCents);
+                            deduct.setString(2, accountId);
+                            deduct.setLong(3, amountCents);
+                            if (deduct.executeUpdate() == 0) {
+                                connection.rollback();
+                                json(exchange, 402, Map.of("error", "insufficient balance"));
+                                return;
+                            }
+                        }
+                    }
                     connection.commit();
                 }
                 success = true;
