@@ -251,7 +251,7 @@ public final class OrderApi {
                             "INSERT INTO reconciliation_runs(reconciliation_id, account_id, started_at, status) VALUES (?, ?, ?, 'STARTED')")) {
                         insertRec.setObject(1, reconciliationId);
                         insertRec.setString(2, DEFAULT_ACCOUNT);
-                        insertRec.setObject(3, startedAt);
+                        insertRec.setTimestamp(3, java.sql.Timestamp.from(startedAt));
                         insertRec.executeUpdate();
                     }
                 } catch (Exception e) {
@@ -288,7 +288,7 @@ public final class OrderApi {
                 try (Connection writeConn = pool.getConnection()) {
                     try (PreparedStatement updateRec = writeConn.prepareStatement(
                             "UPDATE reconciliation_runs SET completed_at = ?, status = ? WHERE reconciliation_id = ?")) {
-                        updateRec.setObject(1, completedAt);
+                        updateRec.setTimestamp(1, java.sql.Timestamp.from(completedAt));
                         updateRec.setString(2, status);
                         updateRec.setObject(3, reconciliationId);
                         updateRec.executeUpdate();

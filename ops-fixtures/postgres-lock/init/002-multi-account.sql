@@ -44,5 +44,7 @@ UPDATE accounts SET opening_balance_cents = balance_cents WHERE opening_balance_
 -- Make opening_balance_cents NOT NULL after backfill
 ALTER TABLE accounts ALTER COLUMN opening_balance_cents SET NOT NULL;
 
+-- App role gets write access to reconciliation_runs
+GRANT SELECT, INSERT, UPDATE ON reconciliation_runs TO clawkit_app;
 -- Observer role gets read access to reconciliation_runs
 GRANT SELECT ON reconciliation_runs TO clawkit_observer;
