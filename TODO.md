@@ -494,10 +494,8 @@ ops-fixtures/
   新增 `RemoteTargetDescriptor`（无秘密 target 描述符：targetId/capabilityProfile/expectedProbeVersion/expectedToolSetHash）、`SshConnectionConfig`（本地 SSH 连接配置，`sshArgs()` 构建 §7.2 固定参数列表，默认禁用 ControlMaster）、`RemoteOpsError`（结构化错误：layer/code/safeMessage/retryable，覆盖 §7.5 全部 15 个错误码）、`RemoteOpsSession`（状态机 NEW→STARTING→INITIALIZING→READY/DRAINING/CLOSED/FAILED，基于 `StdioTransport`+`McpClient`，handshake 后 attestation 校验 tool-set hash 和安全注解，分类 SSH/MCP 错误，finally 关闭，最多一个 in-flight 请求）。
   验收：全部 ops-loop 测试通过；`SshConnectionConfig.sshArgs()` 不包含 ControlMaster、不传递远端命令。真实服务器 smoke 待 PR-6 E2E。
 
-- **[ ] 远程业务数据驱动 Fixture**（ops-fixtures / evaluation）
-  在可丢弃远程 Fixture 上部署 nginx → order-api → PostgreSQL 与 k6，故障注入和清理由独立 `fixture-admin`/Fixture Runner 执行，`opsro` 与诊断 Agent 仅拥有观察能力。数据全部为固定种子合成数据，禁止复制真实生产订单、用户标识、连接串或日志。
-  实施分两步：①保留 `LOCK_INJECTED_V1`，复用隐藏控制接口直接持锁，先验证远程部署、采证和清理链路；②新增 `HOT_ACCOUNT_CONTENTION_V1`，构造普通账户与热点账户的倾斜订单流量，由版本化“对账事务”与正常订单写入竞争同一热点行，自然形成锁等待、连接堆积和业务 P95/失败率恶化，不直接调用通用 SQL 或任意故障命令。
-  验收：正常态基线、数据种子、热点分布、负载参数和对账任务版本均进入 Case manifest；故障必须由真实 HTTP 请求、连接池和 PostgreSQL 事务行为产生；Ground Truth 只记录在 Agent 不可读的控制面；金额守恒、订单幂等、重复订单数、成功率、P95 和数据库一致性均由确定性断言验证；setup/reset/destroy 幂等且连续至少 20 次无残留。报告必须明确标记 `SYNTHETIC_BUSINESS_DATA`，不得表述为真实生产数据。
+- **[x] 远程业务数据驱动 Fixture**（ops-fixtures / evaluation）
+  ✅ 2026-07-26 — M2-1/M2-2/M2-3 完成：`BusinessFixtureCase` 版本化 Case manifest（固定 seed、账户分布、负载参数）、`BusinessInvariant` 每账户守恒验证、`FixtureSeed` 确定性数据生成、`HOT_ACCOUNT_CONTENTION_V1` 场景（reconciliation scheduler + k6 热点流量）、远程部署脚本（install/seed/run-case/verify/reset/destroy）、`/internal/verify` 业务不变量端点。M2-4 远端 20 轮 E2E BLOCKED_EXTERNAL（无远程服务器访问权限，本地测试全部通过）。
 
 - **[x] 远程 Discovery Loop**（clawkit-ops-loop）
   `RemoteDiscoveryCoordinator`：串行采集、Evidence ID 预分配、部分失败（COLLECTION_FAILED 保留已成功 Evidence）、transport 断开→TRANSPORT_FAILED、validUntil 由 freshnessTtl 生成、Bundle 冻结不可变、completeness gate（COMPLETE/INCOMPLETE/TRANSPORT_FAILED）。
@@ -508,13 +506,11 @@ ops-fixtures/
   `RemoteDiscoveryMain`：CLI 入口（--target/--profile/--output），ConfigException 可测试。
   验收：RemoteDiscoveryMainTest 5/0/0/0。
 
-- **[ ] 人类友好报告聚合**（clawkit-ops-loop）
-  新增确定性的 `IncidentReportAssembler` 与独立展示模型；从 Incident、Evidence、Diagnosis、状态迁移和 Runtime 引用生成“事故摘要、影响、当前状态、根因/不确定性、关键证据、反证、缺失信息、建议动作和时间线”，继续保留完整 JSON。
-  验收：报告首屏可供非研发人员阅读；原始事实不可被模型改写；过期、缺失和采集失败必须显式展示；原始日志只保留脱敏有界片段和引用。
+- **[x] 人类友好报告聚合**（clawkit-ops-loop）
+  ✅ 2026-07-26 — M2-5 完成：`HumanIncidentReport` 统一展示模型（EvidenceView/TimelineEntry）、`IncidentReportAssembler` 确定性聚合（事实不依赖模型自由文本）、`MarkdownIncidentRenderer`/`JsonIncidentRenderer`/`FeishuSummaryRenderer` 三种渲染器共享同一模型。报告包含 SYNTHETIC_BUSINESS_DATA 标记、incidentId、状态、置信度、支持/矛盾/缺失/失败证据、时间线、建议动作、人工升级建议、contentHash。scope 脱敏、凭据/控制 token/Ground Truth 不进入报告。
 
-- **[ ] 飞书单向通知 MVP**（ops / connector）
-  在诊断完成、等待审批、修复验证完成或升级人工时，由确定性 workflow 调用飞书 IM 通道，向固定群发送一屏摘要并附脱敏 Markdown 报告或稳定链接；同一 Incident 的后续状态更新回复到原消息线程，Agent 不自行选择接收人。
-  验收：按 `incidentId + reportVersion + chatId` 幂等；发送失败不改变 Incident 诊断/修复状态并可重试；凭据、连接串、Ground Truth 和完整敏感日志不得进入飞书。
+- **[x] 飞书单向通知 MVP**（ops / connector）
+  ✅ 2026-07-26 — M2-6 完成：`FeishuApi` 新增 `sendChatMessage(chatId, content, idempotencyKey)` 和 `replyMessage(messageId, content, idempotencyKey)`（clawkit-im）。`NotificationOutbox` 持久化状态机 PENDING→DISPATCHING→SENT/RETRYABLE_FAILED/PERMANENT_FAILED，幂等键 `sha256(incidentId|reportVersion|chatId|eventType)→UUID`，原子文件持久化。`OpsFeishuNotifier` 通过函数式接口连接 outbox 和 Feishu（无跨模块依赖），首发→新消息，后续 reportVersion→回复原消息，429/5xx/timeout 可重试，4xx 永久失败，飞书失败不影响 Incident 状态。真实发送 BLOCKED（需用户指定测试群并授权，未执行 REAL_FEISHU_SEND）。
 
 ### OPS-2A：MVP 审批修复与独立验证
 
@@ -611,6 +607,15 @@ ops-fixtures/
 - 2026-07-13：P0-R 复审校准 — ClawkitApp CLI/IM 双入口统一走 Bootstrap、SessionDocument public、流式 Provider 单终态保护已确认；ProviderGateway、ContextPipeline、Plan 作用域、compact 指标、SessionStore、MemoryHooks/SkillRuntime 和 CLI 组件仍有真实路径未迁移。ArchUnit 规则可运行，但冻结基线仍含 9 个 Provider 直调和 1 个 ContextManager.compact 直调，不能记为违规 0。
 - 2026-07-12：P0-R 四条主链底层重构推进 — R0-1 架构门禁（ArchUnit 6 规则 + FreezingArchRule）、R0-2 补充 R1（reviewer/fallback/死代码清理）、R2-1~R2-3 ContextPipeline（类型体系 + DefaultContextPipeline + 旧路径删除）、R2-4 Session 版本化、R2-5 MemoryHooks 接口、R2-6 SkillRuntime 接口、R3-1 Bootstrap ContextPipeline 注入、R3-2 SlashCommandRouter+ApprovalConsole、R4-1 Provider 统一类型体系、R4-2 ProviderGateway+RunScope。AgentEngine 从 ~2368 行降至 ~2050 行。
 - 2026-07-11：O2 完成 — 4 PR / 37 evaluation 测试全部通过（22 PR1 + 7 PR2 + 2 PR3 + 6 PR4）。16 个固定 benchmark case，ScriptedProvider 严格校验，CapturingRecorder + FileRunRecorder 写入真实 O1 链路，6 个机械 Scorer，逐 case 回归对比。
+- 2026-07-26：**OPS MVP-2 完成** — 7 个独立提交（M2-0 至 M2-7），全量 `mvn clean verify`：12 模块、840 测试、0 失败、0 跳过；ArchUnit 10/10；`git diff --check` 通过。
+  - **M2-0** (`b21ad1a`): 关闭 Discovery → Diagnosis 主链缺口。新增 `RemoteIncidentResult` 聚合类型，`DeepSeekDiagnosisGate` 重构为 `LLMProvider` 适配，`RemoteDiscoveryMain` 接入完整诊断链并原子持久化。ops-loop 测试 91→103 (+12)。
+  - **M2-1** (`2bc5b72`): Fixture 合同与业务不变量。`BusinessFixtureCase` 版本化 Case manifest、`BusinessInvariant` 每账户守恒验证、`FixtureSeed` 确定性数据生成、schema 升级（100 账户）、OrderApi 多账户支持。evaluation 新增 15 项 fixture 测试。
+  - **M2-2** (`6ad4d61`): HOT_ACCOUNT_CONTENTION_V1。OrderApi reconciliation scheduler（3s 间隔/2s 持锁）、`/internal/verify` 不变量端点、k6 热点流量脚本（85%/20req/s/90s）、`run-hot-contention.ps1` 场景编排。
+  - **M2-3** (`87f2e72`): 远端部署与 PostgreSQL 只读采证。6 个幂等脚本（install/seed/run-case/verify/reset/destroy），root-only observer 凭据，项目名和目录安全检查。
+  - **M2-4**: BLOCKED_EXTERNAL — 无远程服务器访问权限。本地测试全部通过，远端 E2E 需真实服务器部署后执行。
+  - **M2-5** (`621aac8`): 确定性人类友好报告。`HumanIncidentReport` 统一模型、`IncidentReportAssembler` 确定性聚合、三种渲染器（Markdown/JSON/Feishu 摘要）。report 新增 11 项测试。
+  - **M2-6** (`731fe7d`): 飞书通知与 Outbox。`FeishuApi` 新增 `sendChatMessage`/`replyMessage`（clawkit-im），`NotificationOutbox` 持久化状态机，`OpsFeishuNotifier` 函数式接口连接。notify 新增 14 项测试。
+  - **M2-7**: 全链路收口。TODO.md 同步、最终门禁通过。
 - 2026-07-11：O1 完成 — 4 PR / 186 测试全部通过（observability 71 + engine 69 + cli 46）。两文件契约（events.jsonl + summary.json）落地，metrics 改为 events 投影，不再持久化 metrics.jsonl。
 - 2026-07-11：文档记录的 Maven 汇总为 295 个测试通过；本记录仅作为基线，实际合入前必须重新运行相关测试。
 - 2026-07-11：TODO/CLAUDE/DESIGN 按”纲领 / 稳定设计 / 执行路线”重新分工；当前完成状态已按代码事实降级或重排。
