@@ -192,7 +192,7 @@ public final class RemoteOpsSession implements AutoCloseable {
     }
 
     private void doInitialize() throws IOException {
-        ExecutionControl control = ExecutionControl.none();
+        ExecutionControl control = new DeadlineControl(requestTimeout, clock.instant());
         McpInitializeResult info = client.initialize(control);
 
         // Strict: protocolVersion MUST be 2024-11-05 (§4.3.1)
@@ -236,7 +236,13 @@ public final class RemoteOpsSession implements AutoCloseable {
     // ── Tool calls ──
 
     public McpCallResult callTool(String toolName, ObjectNode arguments) throws IOException {
-        return callTool(toolName, arguments, ExecutionControl.none());
+        return callTool(toolName, arguments, new DeadlineControl(requestTimeout, clock.instant()));
+    }
+
+    /** Call a tool with per-spec timeout from EvidenceSpec. */
+    public McpCallResult callToolWithTimeout(String toolName, ObjectNode arguments,
+                                              Duration timeout) throws IOException {
+        return callTool(toolName, arguments, new DeadlineControl(timeout, clock.instant()));
     }
 
     public McpCallResult callTool(String toolName, ObjectNode arguments, ExecutionControl control)
