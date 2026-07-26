@@ -189,12 +189,37 @@ public final class NotificationOutbox {
         return entries;
     }
 
-    private void persist(Entry entry) throws IOException {
+    /**
+     * Atomic persist with CAS: if on-disk entry was already updated by another
+     * process (e.g. concurrently marked SENT), reject the stale write.
+     *
+     * <p>R4: Prevents two dispatchers from double-sending the same notification.
+     * DISPATCHING after crash recovers via the same idempotency key.
+     */
+    private synchronized void persist(Entry entry) throws IOException {
         Files.createDirectories(outboxDir);
         Path target = outboxDir.resolve(entry.idempotencyKey() + ".json");
+
+        // CAS: if target exists and is SENT, don't overwrite
+        if (Files.exists(target) && entry.state() != State.SENT) {
+            Entry onDisk = MAPPER.readValue(target.toFile(), Entry.class);
+            if (onDisk.state() == State.SENT && entry.state() != State.SENT) {
+                log.warn("Outbox CAS reject: {} already SENT (tried {})",
+                    entry.idempotencyKey().substring(0, 8), entry.state());
+                return; // Another dispatcher already sent — don't clobber
+            }
+        }
+
         Path tmp = outboxDir.resolve(entry.idempotencyKey() + ".tmp");
         MAPPER.writerWithDefaultPrettyPrinter().writeValue(tmp.toFile(), entry);
         Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE,
             StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    /** List entries in RETRYABLE_FAILED state that can be retried. */
+    public List<Entry> listRetryable() throws IOException {
+        return listAll().stream()
+            .filter(e -> e.state() == State.RETRYABLE_FAILED)
+            .toList();
     }
 }

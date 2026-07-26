@@ -109,12 +109,13 @@ public final class OpsFeishuNotifier {
                 log.info("[feishu-notify] sent: incident={} version={}",
                     incidentId, reportVersion);
             } catch (IOException e) {
-                String msg = e.getMessage() != null ? e.getMessage() : "unknown";
-                if (isRetryable(msg)) {
-                    entry = outbox.markRetryableFailed(entry, msg);
+                boolean retryable = isRetryableException(e);
+                String reason = e.getMessage() != null ? e.getMessage() : "unknown";
+                if (retryable) {
+                    entry = outbox.markRetryableFailed(entry, reason);
                     log.warn("[feishu-notify] retryable: incident={}", incidentId);
                 } else {
-                    entry = outbox.markPermanentFailed(entry, msg);
+                    entry = outbox.markPermanentFailed(entry, reason);
                     log.error("[feishu-notify] permanent: incident={}", incidentId);
                 }
             }
@@ -138,16 +139,30 @@ public final class OpsFeishuNotifier {
             .findFirst().orElse(null);
     }
 
-    static boolean isRetryable(String errorMessage) {
-        if (errorMessage == null) return false;
-        String m = errorMessage.toLowerCase();
-        if (m.contains("code=429") || m.contains("rate limit")) return true;
-        if (m.contains("code=5") || m.contains("server error")) return true;
+    static boolean isRetryableException(IOException e) {
+        // R4: Use reflection to check for FeishuApiException (avoids cross-module dependency)
+        if (e.getClass().getSimpleName().equals("FeishuApiException")) {
+            try {
+                var m = e.getClass().getMethod("retryable");
+                return (boolean) m.invoke(e);
+            } catch (Exception ignored) {}
+        }
+        // Fallback: string classification
+        String m = e.getMessage();
+        if (m == null) return true;
+        m = m.toLowerCase();
+        if (m.contains("429") || m.contains("503") || m.contains("502") || m.contains("500")) return true;
         if (m.contains("timeout") || m.contains("timed out")) return true;
         if (m.contains("connection refused")) return true;
-        if (m.contains("code=400") || m.contains("code=401")
-            || m.contains("code=403") || m.contains("code=404")) return false;
+        if (m.contains("400") || m.contains("401") || m.contains("403") || m.contains("404")) return false;
         return true;
+    }
+
+    /** @deprecated use isRetryableException */
+    @Deprecated
+    static boolean isRetryable(String errorMessage) {
+        if (errorMessage == null) return false;
+        return isRetryableException(new IOException(errorMessage));
     }
 
     public NotificationOutbox outbox() { return outbox; }

@@ -137,6 +137,67 @@ class NotificationOutboxTest {
         assertThat(OpsFeishuNotifier.isRetryable("code=404 not found")).isFalse();
     }
 
+    // ── R4: Structured exception classification ──
+
+    @Test void feishuApiExceptionRetryableClassification() {
+        // Simulate what FeishuApiException would do (avoids cross-module dep)
+        // 429 → retryable
+        assertThat(OpsFeishuNotifier.isRetryableException(
+            new java.io.IOException("429"))).isTrue();
+        // 503 → retryable
+        assertThat(OpsFeishuNotifier.isRetryableException(
+            new java.io.IOException("503"))).isTrue();
+        // timeout → retryable
+        assertThat(OpsFeishuNotifier.isRetryableException(
+            new java.io.IOException("connection timed out"))).isTrue();
+        // 400 → permanent
+        assertThat(OpsFeishuNotifier.isRetryableException(
+            new java.io.IOException("400 bad request"))).isFalse();
+        // 401 → permanent
+        assertThat(OpsFeishuNotifier.isRetryableException(
+            new java.io.IOException("401 unauthorized"))).isFalse();
+    }
+
+    // ── R4: Outbox CAS prevents concurrent double-send ──
+
+    @Test void outboxCasPreventsOverwritingSent() throws Exception {
+        var entry = outbox.upsertPending("inc-cas", "v1", "chat-cas",
+            NotificationOutbox.EventType.INITIAL_REPORT);
+        outbox.markDispatching(entry);
+        outbox.markSent(entry, "msg-done");
+
+        // Simulate a stale dispatcher trying to mark as retryable
+        // (CAS should prevent overwriting SENT with RETRYABLE_FAILED)
+        var current = outbox.findByKey(entry.idempotencyKey());
+        assertThat(current.state()).isEqualTo(NotificationOutbox.State.SENT);
+        // Marking retryable on a SENT entry: CAS rejects silently
+        outbox.markRetryableFailed(entry, "stale");
+        var after = outbox.findByKey(entry.idempotencyKey());
+        assertThat(after.state()).isEqualTo(NotificationOutbox.State.SENT);
+    }
+
+    // ── R4: Chinese renderer doesn't leak sensitive data ──
+
+    @Test void chineseFeishuRendererNoSensitiveLeak() {
+        var report = new com.clawkit.ops.loop.report.HumanIncidentReport(
+            "1", "1", null, "SYNTHETIC_BUSINESS_DATA",
+            "inc-cn", "inc-cn", "测试场景", java.time.Instant.now(),
+            java.time.Instant.now(),
+            com.clawkit.ops.loop.report.HumanIncidentReport.IncidentStatus.ACTIVE,
+            com.clawkit.ops.loop.report.HumanIncidentReport.DiagnosisConfidence.PROBABLE,
+            "HOT_ACCOUNT_CONTENTION", 0.85, "摘要", "影响", "活跃",
+            java.util.List.of(), java.util.List.of(), java.util.List.of(),
+            java.util.List.of(), java.util.List.of(),
+            java.util.List.of("ESCALATE"), true, "需人工确认", false);
+        String feishu = com.clawkit.ops.loop.report.FeishuSummaryRenderer.render(report);
+        assertThat(feishu).contains("事故报告");
+        assertThat(feishu).contains("很可能");  // PROBABLE
+        assertThat(feishu).contains("升级人工处理");
+        assertThat(feishu).doesNotContain("fixture-control-only");
+        assertThat(feishu).doesNotContain("CLAWKIT_API_KEY");
+        assertThat(feishu).doesNotContain("122.51.51");
+    }
+
     // ── Notifier mock test ──
 
     @Test void notifierUsesOutbox() throws Exception {
