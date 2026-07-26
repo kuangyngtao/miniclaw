@@ -476,10 +476,11 @@ ops-fixtures/
 
 定版架构见 [docs/ops-mvp1-secure-remote-discovery-design.md](docs/ops-mvp1-secure-remote-discovery-design.md)；针对 2026-07-26 复核缺口的逐 PR 修复合同见 [docs/ops-mvp1-completion-execution-plan.md](docs/ops-mvp1-completion-execution-plan.md)。实施主体固定为 **Claude Code Agent（内部使用 DeepSeek 模型）**，不是 Claude 与 DeepSeek 两个独立主体。每个 PR 必须经过“实现 Agent 会话 → 确定性门禁 → 全新只读评审会话 → 修正会话 → 全新隔离复审 → 人工/Codex 验收”；各会话使用同一 Claude Code Agent + DeepSeek 技术栈，但实现与评审上下文和工具权限隔离。存在 Blocking 或评审未完成时不得进入下一 PR。实施顺序固定为：安全脚本与真实护栏 → 严格 Handshake/Session → Profile 驱动 Discovery → 手动入口与旧路径退场 → DeepSeek Diagnosis Gate → 远程 E2E 收口。
 
-- **[x] SSH 执行后端**（clawkit-ops-mcp）
-  新增 `SshTargetConfig`（host/port/user/auth/known_hosts/ControlMaster）和 `SshCommandExecutor`（实现 `CommandExecutor`，通过系统 `ssh` CLI 远程执行命令；连接复用、并发限制、输出截断；分类 CONNECTION_FAILED/AUTH_FAILED/HOST_KEY_REJECTED/COMMAND_NOT_FOUND）。`OpsMcpMain` 和 `OpsMcpHttpMain` 检测 `CLAWKIT_OPS_SSH_HOST` 后自动切换 `SshCommandExecutor` + `DockerOpsBackend`；`DockerOpsBackend` 接口不变。密码认证通过 `sshpass -e` 支持但不推荐。
-  验收：19 项 SSH 测试全部通过（fake transport 验证命令构造、错误分类、shell 转义、并发边界、配置校验）；私钥路径通过环境变量传入，不进模型/日志/仓库；目标主机和命令模板均为 allowlist（`SshCommandExecutor` 不改变 `DockerOpsBackend` 的命令模板和参数校验链）。
-  该项只证明原型和测试事实，不代表最终安全远程路径；阶段一将迁移到 forced-command 承载的远端 MCP stdio session，迁移完成后删除通用远端命令路径和 PASSWORD/sshpass 入口。
+- **[x] SSH 执行后端（历史原型，已删除）**（clawkit-ops-mcp）
+  2026-07-22 原型：`SshTargetConfig` + `SshCommandExecutor`，19 项测试通过。
+  2026-07-26 PR-M4 退役：`SshCommandExecutor`、`SshTargetConfig`、`SshCommandExecutorTest` 已删除。
+  `CLAWKIT_OPS_SSH_HOST` 检测后硬退出（exit 4），不再提供迁移路径。
+  远程路径已切换为 forced-command MCP stdio session（`RemoteOpsSession`）。
 
 - **[~] 云服务器运维账号（P0 权限收口中）**（ops / infrastructure）
   `ops-fixtures/remote/setup-opsro.sh` 已执行：腾讯云 Lighthouse `lhins-1d23zpu6`（122.51.51.118，4核4G Ubuntu）上 `opsro` 用户已创建（无 sudo、口令锁定、仅密钥认证、docker 组成员），SSH 已加固（禁止密码/PTY/端口转发/环境变量注入）。本地通过 `ssh -i id_ed25519_clawkit opsro@122.51.51.118 docker version` 验证免密连接成功。
@@ -498,9 +499,14 @@ ops-fixtures/
   实施分两步：①保留 `LOCK_INJECTED_V1`，复用隐藏控制接口直接持锁，先验证远程部署、采证和清理链路；②新增 `HOT_ACCOUNT_CONTENTION_V1`，构造普通账户与热点账户的倾斜订单流量，由版本化“对账事务”与正常订单写入竞争同一热点行，自然形成锁等待、连接堆积和业务 P95/失败率恶化，不直接调用通用 SQL 或任意故障命令。
   验收：正常态基线、数据种子、热点分布、负载参数和对账任务版本均进入 Case manifest；故障必须由真实 HTTP 请求、连接池和 PostgreSQL 事务行为产生；Ground Truth 只记录在 Agent 不可读的控制面；金额守恒、订单幂等、重复订单数、成功率、P95 和数据库一致性均由确定性断言验证；setup/reset/destroy 幂等且连续至少 20 次无残留。报告必须明确标记 `SYNTHETIC_BUSINESS_DATA`，不得表述为真实生产数据。
 
-- **[~] 远程 Discovery Loop**（clawkit-ops-loop）
-  新增 `DiscoveryProfile`（版本化证据采集声明：`REMOTE_APP_DOWN_V1` 10 项、`REMOTE_POSTGRES_DIAGNOSIS_V1` 10 项，含 required/optional、顺序号、timeout、freshness TTL）和 `EvidenceSpec`（单条证据规格）。`RemoteOpsSession` 已就位，MCP 远程 E2E 链路已验证通过（initialize → tools/list → tools/call 全链路）。剩余：`RemoteDiscoveryCoordinator`（编排 session 启动、按 profile 采集、external HTTP probe、EvidenceBundle 冻结、completeness gate）。
-  验收：部分失败测试骨架已在 PR-0 `PartialFailureEvidenceTest` 中定义 7 项 @Disabled 合同测试。
+- **[x] 远程 Discovery Loop**（clawkit-ops-loop）
+  `RemoteDiscoveryCoordinator`：串行采集、Evidence ID 预分配、部分失败（COLLECTION_FAILED 保留已成功 Evidence）、transport 断开→TRANSPORT_FAILED、validUntil 由 freshnessTtl 生成、Bundle 冻结不可变、completeness gate（COMPLETE/INCOMPLETE/TRANSPORT_FAILED）。
+  `DiscoveryProfile`：`REMOTE_APP_DOWN_V1` 8 项（6 required + 2 optional，固定参数，仅 APP_DOWN_V1 工具）；`REMOTE_POSTGRES_DIAGNOSIS_V1` 10 项。
+  `EvidenceSanitizer`：脱敏 URI/host/凭据/连接串，截断日志/body 至有界长度，保留业务事实（状态码/健康/容器状态等）。
+  `Evidence.fact` 保留 success/data/errorCode/error。
+  验收：PartialFailureEvidenceTest 16/0/0/0（含 data 保留、HTTP 503、脱敏、失败不伪造 data）。
+  `RemoteDiscoveryMain`：CLI 入口（--target/--profile/--output），ConfigException 可测试。
+  验收：RemoteDiscoveryMainTest 5/0/0/0。
 
 - **[ ] 人类友好报告聚合**（clawkit-ops-loop）
   新增确定性的 `IncidentReportAssembler` 与独立展示模型；从 Incident、Evidence、Diagnosis、状态迁移和 Runtime 引用生成“事故摘要、影响、当前状态、根因/不确定性、关键证据、反证、缺失信息、建议动作和时间线”，继续保留完整 JSON。

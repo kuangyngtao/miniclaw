@@ -162,6 +162,14 @@ public final class DeepSeekDiagnosisGate {
             if (e.validUntil() != null) {
                 sb.append(" validUntil=").append(e.validUntil());
             }
+            // Include sanitized evidence facts so the model can diagnose
+            if (e.fact() != null && !e.fact().isEmpty()) {
+                try {
+                    String compact = MAPPER.writeValueAsString(e.fact());
+                    if (compact.length() > 2048) compact = compact.substring(0, 2048) + "...";
+                    sb.append("\n  facts: ").append(compact);
+                } catch (Exception ignored) {}
+            }
             sb.append("\n");
         }
 
