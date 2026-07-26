@@ -36,6 +36,15 @@ public final class RemoteDiscoveryMain {
     }
 
     static int run(String[] args) {
+        try {
+            return runInternal(args);
+        } catch (ConfigException e) {
+            System.err.println(e.getMessage());
+            return 4;
+        }
+    }
+
+    private static int runInternal(String[] args) {
         // ── Parse args ──
         String targetId = null;
         String profileName = "REMOTE_APP_DOWN_V1";
@@ -165,9 +174,13 @@ public final class RemoteDiscoveryMain {
     private static String require(String name) {
         String v = System.getenv(name);
         if (v == null || v.isBlank()) {
-            System.err.println("missing required env: " + name);
-            System.exit(4);
+            throw new ConfigException("missing required env: " + name);
         }
         return v;
+    }
+
+    /** Thrown for configuration errors; mapped to exit code 4. */
+    static final class ConfigException extends RuntimeException {
+        ConfigException(String msg) { super(msg); }
     }
 }
