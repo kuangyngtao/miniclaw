@@ -2,9 +2,11 @@
 
 > 修订日期：2026-07-25
 >
-> 状态：OPS-0A/0B 工程实现完成；OPS-1 已完成 SSH 后端与远程只读账号，远程 Discovery Loop 待完成
+> 状态：OPS-0A/0B 工程实现完成；OPS-1 已有 SSH 原型后端，但 `opsro` 的 Docker 组权限是 P0 阻断，forced-command 安全接口、SSH/MCP session 生命周期与远程 Discovery Loop 待完成
 >
 > 当前工程事实与实施顺序：[TODO.md](../TODO.md)
+>
+> OPS MVP-1 定版实现方案：[ops-mvp1-secure-remote-discovery-design.md](ops-mvp1-secure-remote-discovery-design.md)
 
 ## 1. 目标与非目标
 

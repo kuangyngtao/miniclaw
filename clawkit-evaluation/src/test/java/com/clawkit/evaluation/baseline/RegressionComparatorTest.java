@@ -2,6 +2,7 @@ package com.clawkit.evaluation.baseline;
 
 import com.clawkit.evaluation.BenchmarkReport;
 import com.clawkit.evaluation.BenchmarkResult;
+import com.clawkit.evaluation.BenchmarkSpec;
 import com.clawkit.observability.RunMetrics;
 import com.clawkit.observability.RunSummary;
 import com.clawkit.observability.RunStatus;
@@ -50,10 +51,19 @@ class RegressionComparatorTest {
             durationMs, List.of(result), passed ? "UNCHANGED" : "DEGRADED", null);
     }
 
+    private static List<BenchmarkSpec> specsFor(String... caseIds) {
+        var list = new java.util.ArrayList<BenchmarkSpec>();
+        for (var id : caseIds) {
+            list.add(BenchmarkSpec.builder(id).category("cat").prompt("test").build());
+        }
+        return list;
+    }
+
     @Test
     void shouldSaveAndLoadBaseline() throws Exception {
+        var specs = specsFor("test-case");
         var report = makeReport("test-case", true, 3, 5, 1, 200, 3);
-        var baseline = BaselineData.from(report, "abc123");
+        var baseline = BaselineData.from(report, specs, "abc123");
         Path path = tempDir.resolve("baseline.json");
         BaselineStore.save(path, baseline);
 
@@ -62,45 +72,67 @@ class RegressionComparatorTest {
         assertThat(loaded.get().suiteId()).isEqualTo("clawkit-runtime-regression");
         assertThat(loaded.get().summary().totalCases()).isEqualTo(1);
         assertThat(loaded.get().cases()).containsKey("test-case");
+        // SHA-256 fingerprints should be 64 hex chars
+        assertThat(loaded.get().caseSetFingerprint()).hasSize(64);
+        assertThat(loaded.get().scriptScorerFingerprint()).hasSize(64);
     }
 
     @Test
     void shouldDetectNoRegression() {
+        var specs = specsFor("test-case");
         var report = makeReport("test-case", true, 3, 5, 1, 200, 3);
-        var baseline = BaselineData.from(report, "abc");
+        var baseline = BaselineData.from(report, specs, "abc");
 
-        var regression = RegressionComparator.compare(report, baseline);
+        var regression = RegressionComparator.compare(report, specs, baseline);
         assertThat(regression.verdict()).isEqualTo(Verdict.UNCHANGED);
     }
 
     @Test
     void shouldDetectDegradedWhenPassToFail() {
+        var specs = specsFor("test-case");
         var baselineReport = makeReport("test-case", true, 3, 5, 1, 200, 3);
         var currentReport = makeReport("test-case", false, 1, 0, 0, 50, 1);
-        var baseline = BaselineData.from(baselineReport, "abc");
+        var baseline = BaselineData.from(baselineReport, specs, "abc");
 
-        var regression = RegressionComparator.compare(currentReport, baseline);
+        var regression = RegressionComparator.compare(currentReport, specs, baseline);
         assertThat(regression.verdict()).isEqualTo(Verdict.DEGRADED);
     }
 
     @Test
     void shouldDetectDegradedWhenTurnsIncrease() {
+        var specs = specsFor("test-case");
         var baselineReport = makeReport("test-case", true, 3, 5, 1, 200, 3);
         var currentReport = makeReport("test-case", true, 8, 12, 3, 500, 8);
-        var baseline = BaselineData.from(baselineReport, "abc");
+        var baseline = BaselineData.from(baselineReport, specs, "abc");
 
-        var regression = RegressionComparator.compare(currentReport, baseline);
+        var regression = RegressionComparator.compare(currentReport, specs, baseline);
         // Turns: baseline=3, current=8, limit=max(3+1, ceil(3*1.1))=max(4,4)=4. 8>4 → DEGRADED
         assertThat(regression.verdict()).isEqualTo(Verdict.DEGRADED);
     }
 
     @Test
-    void shouldDetectIncompatibleBaseline() {
+    void shouldNotGateOnMachineDependentDuration() {
+        var specs = specsFor("test-case");
+        var baselineReport = makeReport("test-case", true, 3, 5, 1, 100, 3);
+        var currentReport = makeReport("test-case", true, 3, 5, 1, 10_000, 3);
+        var baseline = BaselineData.from(baselineReport, specs, "abc");
+
+        var regression = RegressionComparator.compare(currentReport, specs, baseline);
+
+        assertThat(regression.verdict()).isEqualTo(Verdict.UNCHANGED);
+        assertThat(regression.diffs())
+            .noneMatch(diff -> diff.metric().startsWith("duration:"));
+    }
+
+    @Test
+    void shouldDetectIncompatibleBaselineWhenCasesDiffer() {
+        var specsA = specsFor("case-a");
+        var specsB = specsFor("case-b");
         var baselineReport = makeReport("case-a", true, 3, 5, 1, 200, 3);
         var currentReport = makeReport("case-b", true, 3, 5, 1, 200, 3);
-        var baseline = BaselineData.from(baselineReport, "abc");
+        var baseline = BaselineData.from(baselineReport, specsA, "abc");
 
-        var regression = RegressionComparator.compare(currentReport, baseline);
+        var regression = RegressionComparator.compare(currentReport, specsB, baseline);
         assertThat(regression.verdict()).isEqualTo(Verdict.INCOMPATIBLE_BASELINE);
     }
 

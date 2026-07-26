@@ -1,14 +1,23 @@
 package com.clawkit.evaluation.baseline;
 
 import com.clawkit.evaluation.BenchmarkReport;
+import com.clawkit.evaluation.BenchmarkSpec;
 import com.clawkit.evaluation.pricing.PricingSnapshot;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
+import java.util.HexFormat;
+import java.util.List;
 import java.util.Map;
 
 /**
  * 版本化基线数据结构，持久化到 JSON。
+ *
+ * <p>指纹使用 SHA-256，覆盖 suite 身份、case 元数据、script 步骤和 scorer 描述。
+ * 不保存完整 prompt、凭据或敏感内容。
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record BaselineData(
@@ -17,8 +26,8 @@ public record BaselineData(
     String suiteVersion,
     int metricSchemaVersion,
     String executionProfile,
-    String caseSetHash,
-    String scriptSetHash,
+    String caseSetFingerprint,
+    String scriptScorerFingerprint,
     String pricingSnapshotVersion,
     String pricingSnapshotHash,
     Instant createdAt,
@@ -65,14 +74,16 @@ public record BaselineData(
         String status
     ) {}
 
-    public static final int CURRENT_SCHEMA_VERSION = 2;
+    public static final int CURRENT_SCHEMA_VERSION = 3;
 
-    public static BaselineData from(BenchmarkReport report, String gitCommit) {
-        return from(report, gitCommit, null);
+    /** 从 report + specs 构建基线数据。specs 用于生成稳定指纹。 */
+    public static BaselineData from(BenchmarkReport report, List<BenchmarkSpec> specs,
+                                     String gitCommit) {
+        return from(report, specs, gitCommit, null);
     }
 
-    public static BaselineData from(BenchmarkReport report, String gitCommit,
-                                    PricingSnapshot pricingSnapshot) {
+    public static BaselineData from(BenchmarkReport report, List<BenchmarkSpec> specs,
+                                     String gitCommit, PricingSnapshot pricingSnapshot) {
         var cases = new java.util.LinkedHashMap<String, CaseEntry>();
         for (var r : report.results()) {
             var s = r.summary();
@@ -95,10 +106,10 @@ public record BaselineData(
             CURRENT_SCHEMA_VERSION,
             "clawkit-runtime-regression",
             "1.0",
-            2,
+            3,
             "default",
-            hashCases(report),
-            hashScripts(report),
+            computeCaseSetFingerprint(specs),
+            computeScriptScorerFingerprint(specs),
             pricingSnapshot != null ? pricingSnapshot.version() : null,
             pricingSnapshot != null ? pricingSnapshot.hash() : null,
             Instant.now(),
@@ -117,13 +128,82 @@ public record BaselineData(
         );
     }
 
-    private static String hashCases(BenchmarkReport report) {
+    // ═══════════════════════════════════════════════════════════════
+    // SHA-256 Fingerprints
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Case 集合指纹：suite 身份 + 排序后的 case ID / 类别 / fixture / 权限 / 思维模式。
+     */
+    static String computeCaseSetFingerprint(List<BenchmarkSpec> specs) {
         var sb = new StringBuilder();
-        for (var r : report.results()) sb.append(r.caseId()).append("|");
-        return Integer.toHexString(sb.toString().hashCode());
+        sb.append("suite=clawkit-runtime-regression|v1.0\n");
+        sb.append("metricSchema=v3\n");
+        var sorted = specs.stream()
+            .sorted(java.util.Comparator.comparing(BenchmarkSpec::id))
+            .toList();
+        for (var spec : sorted) {
+            sb.append("case:").append(spec.id())
+                .append("|cat=").append(spec.category())
+                .append("|fixture=").append(spec.fixture().name())
+                .append("|perm=").append(spec.permissionMode().name())
+                .append("|think=").append(spec.thinkingMode().name())
+                .append("|exec=").append(spec.executionMode().name())
+                .append("\n");
+        }
+        return sha256(sb.toString());
     }
 
-    private static String hashScripts(BenchmarkReport report) {
-        return Integer.toHexString(report.results().hashCode());
+    /**
+     * Script + Scorer 指纹：排序后的 prompt 摘要、script step 语义字段、scorer 描述。
+     */
+    static String computeScriptScorerFingerprint(List<BenchmarkSpec> specs) {
+        var sb = new StringBuilder();
+        var sorted = specs.stream()
+            .sorted(java.util.Comparator.comparing(BenchmarkSpec::id))
+            .toList();
+        for (var spec : sorted) {
+            sb.append("case:").append(spec.id()).append("\n");
+            // Prompt: hash only, never store content
+            sb.append("  promptHash:").append(sha256(spec.prompt())).append("\n");
+            // Script steps: phase + turn + streaming + tools + response text + error
+            for (int i = 0; i < spec.script().size(); i++) {
+                var step = spec.script().get(i);
+                sb.append("  step:").append(i)
+                    .append("|phase=").append(step.phase())
+                    .append("|turn=").append(step.expectedTurn())
+                    .append("|stream=").append(step.expectedStreaming());
+                if (step.expectedAvailableTools() != null) {
+                    var tools = new java.util.ArrayList<>(step.expectedAvailableTools());
+                    java.util.Collections.sort(tools);
+                    sb.append("|tools=").append(String.join(",", tools));
+                }
+                if (step.response() != null) {
+                    sb.append("|response=").append(sha256(step.response().toString()));
+                }
+                if (step.error() != null) {
+                    sb.append("|error=").append(step.error().getClass().getSimpleName())
+                        .append(":").append(step.error().getMessage());
+                }
+                sb.append("\n");
+            }
+            // Scorers: descriptor fingerprint
+            for (int i = 0; i < spec.scorers().size(); i++) {
+                var scorer = spec.scorers().get(i);
+                sb.append("  scorer:").append(i)
+                    .append("|").append(scorer.descriptor().fingerprint())
+                    .append("\n");
+            }
+        }
+        return sha256(sb.toString());
+    }
+
+    static String sha256(String input) {
+        try {
+            var md = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(md.digest(input.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException(e);
+        }
     }
 }

@@ -1,6 +1,6 @@
 # clawkit
 
-[![CodeQL](https://github.com/kuangyngtao/clawkit/actions/workflows/codeql.yml/badge.svg)](https://github.com/kuangyngtao/clawkit/actions/workflows/codeql.yml)
+[![CodeQL](https://github.com/kuangyngtao/miniclaw/actions/workflows/codeql.yml/badge.svg)](https://github.com/kuangyngtao/miniclaw/actions/workflows/codeql.yml)
 
 > Java 21 本地 Agent Runtime，以 Evidence-gated Ops Loop 验证安全执行、失败恢复与独立验收
 
@@ -63,8 +63,8 @@ clawkit 关注 Agent 的底层运行能力和可验证闭环，而不是单次�
 ## 快速开始
 
 ```bash
-git clone https://github.com/kuangyngtao/clawkit.git
-cd clawkit
+git clone https://github.com/kuangyngtao/miniclaw.git
+cd miniclaw
 mvn package -pl clawkit-cli -am -DskipTests
 ```
 

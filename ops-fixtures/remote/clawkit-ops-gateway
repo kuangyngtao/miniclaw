@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# clawkit-ops-gateway — OpenSSH forced-command entrypoint
+#
+# Invoked by sshd when opsro connects via the restricted key.
+# MUST be root-owned (0755) and NOT writable by opsro.
+#
+# Design doc §6.2:
+#   - Does NOT read SSH_ORIGINAL_COMMAND
+#   - Does NOT output a banner
+#   - Only executes: sudo -n /usr/local/sbin/clawkit-ops-mcp-stdio
+
+set -euo pipefail
+
+# ── Security: ignore SSH_ORIGINAL_COMMAND (§6.2) ──
+# We do NOT read, eval, or act on SSH_ORIGINAL_COMMAND.
+# The forced-command in authorized_keys invokes this script
+# unconditionally; any client-supplied command is DISCARDED.
+
+# ── Exec the fixed launcher via sudo ──
+# sudoers must grant: opsro ALL=(root) NOPASSWD: /usr/local/sbin/clawkit-ops-mcp-stdio
+exec sudo -n /usr/local/sbin/clawkit-ops-mcp-stdio

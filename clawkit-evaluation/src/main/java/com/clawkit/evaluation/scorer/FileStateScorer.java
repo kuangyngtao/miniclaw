@@ -23,6 +23,15 @@ public class FileStateScorer implements BenchmarkScorer {
     }
 
     @Override
+    public ScorerDescriptor descriptor() {
+        // Sorted file paths differentiate expectation sets without including content
+        var paths = new java.util.ArrayList<>(expectedFiles.keySet());
+        java.util.Collections.sort(paths);
+        String pathList = String.join(",", paths);
+        return new ScorerDescriptor("FileStateScorer", 1, "paths=[" + pathList + "]");
+    }
+
+    @Override
     public Score score(BenchmarkSpec spec, BenchmarkResult result, Path runArtifactDir) {
         if (runArtifactDir == null) {
             return Score.notApplicable("FileStateScorer");

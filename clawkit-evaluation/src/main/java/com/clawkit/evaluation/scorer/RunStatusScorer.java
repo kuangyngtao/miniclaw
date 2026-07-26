@@ -22,6 +22,12 @@ public class RunStatusScorer implements BenchmarkScorer {
     }
 
     @Override
+    public ScorerDescriptor descriptor() {
+        return new ScorerDescriptor("RunStatusScorer", 1,
+            "expectedStatus=" + expectedStatus.name());
+    }
+
+    @Override
     public Score score(BenchmarkSpec spec, BenchmarkResult result, Path runArtifactDir) {
         if (result.metrics() == null) {
             return Score.fail("RunStatusScorer", expectedStatus.name(), "null",

@@ -10,6 +10,11 @@ import java.util.concurrent.TimeUnit;
 /**
  * Executes commands on a remote host via the system {@code ssh} CLI.
  *
+ * @deprecated Replaced by forced-command MCP stdio session
+ *             ({@code RemoteOpsSession}). This class is retained only for
+ *             migration compatibility in tests and will be removed.
+ *             See docs/ops-mvp1-secure-remote-discovery-design.md §7.
+ *
  * <p>Connection multiplexing (ControlMaster) reduces per-command SSH handshake
  * latency. The {@link SshTargetConfig} supplies host, port, user, and key
  * identity; passphrases are handled by {@code ssh-agent}, never by this class.

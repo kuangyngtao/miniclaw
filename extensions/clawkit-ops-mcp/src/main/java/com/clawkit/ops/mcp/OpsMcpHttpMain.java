@@ -88,9 +88,19 @@ public final class OpsMcpHttpMain {
         exchange.sendResponseHeaders(status, -1);
     }
 
+    /**
+     * @deprecated SSH command executor is replaced by forced-command MCP stdio
+     *             session (PR-2 RemoteOpsSession). This method remains for
+     *             migration compatibility only and will be removed in PR-7.
+     */
+    @Deprecated
     static CommandExecutor resolveCommandExecutor(Map<String, String> env) {
         String sshHost = env.get("CLAWKIT_OPS_SSH_HOST");
         if (sshHost != null && !sshHost.isBlank()) {
+            System.err.println("[clawkit-ops-mcp] WARNING: CLAWKIT_OPS_SSH_HOST is deprecated.");
+            System.err.println("[clawkit-ops-mcp] Remote OPS now uses forced-command MCP stdio session.");
+            System.err.println("[clawkit-ops-mcp] See docs/ops-mvp1-secure-remote-discovery-design.md §7.");
+            System.err.println("[clawkit-ops-mcp] This path will be removed. Use RemoteOpsSession instead.");
             return new SshCommandExecutor(SshTargetConfig.fromEnvironment(env));
         }
         return new ProcessCommandExecutor();

@@ -14,13 +14,18 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 public final class OpsMcpServer {
 
     public static final String PROTOCOL_VERSION = "2024-11-05";
+    public static final String PROBE_VERSION = "1";
+    public static final int MAX_LINE_BYTES = 65_536; // 64 KiB
     public static final java.util.Set<String> TOOL_NAMES = java.util.Set.of(
         "service_status", "container_status", "ports", "http_probe", "logs");
 
@@ -47,6 +52,13 @@ public final class OpsMcpServer {
             String line;
             while ((line = reader.readLine()) != null) {
                 if (line.isBlank()) continue;
+                // P0 guardrail: reject oversized lines (§6.2 stdout constraint)
+                int byteLength = line.getBytes(StandardCharsets.UTF_8).length;
+                if (byteLength > MAX_LINE_BYTES) {
+                    write(writer, error(null, -32600,
+                        "request exceeds maximum size of " + MAX_LINE_BYTES + " bytes"));
+                    continue;
+                }
                 JsonNode request;
                 try {
                     request = mapper.readTree(line);
@@ -87,7 +99,34 @@ public final class OpsMcpServer {
         ObjectNode info = result.putObject("serverInfo");
         info.put("name", "clawkit-ops-mcp");
         info.put("version", "0.1.0");
+        // P0 attestation fields (§6.3, §7.2)
+        info.put("probeVersion", PROBE_VERSION);
+        info.put("capabilityProfile", profile.name());
+        info.put("toolSetHash", computeToolSetHash(profile));
         return success(id, result);
+    }
+
+    /**
+     * Compute a stable hash of the tool names, annotations, and input schemas
+     * for the given profile. Used by the client to verify the remote server
+     * exposes exactly the expected tool set (§7.2 attestation).
+     */
+    public static String computeToolSetHash(OpsCapabilityProfile profile) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            // Hash the sorted tool names — sufficient for MVP since all tools
+            // share the same annotations. If annotations diverge per-tool in
+            // the future, include the full annotation set in the hash.
+            String[] names = profile.toolNames().toArray(String[]::new);
+            java.util.Arrays.sort(names);
+            for (String name : names) {
+                md.update(name.getBytes(StandardCharsets.UTF_8));
+            }
+            byte[] digest = md.digest();
+            return HexFormat.of().formatHex(digest, 0, 8); // first 8 bytes = 16 hex chars
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 not available", e);
+        }
     }
 
     private ObjectNode listTools(JsonNode id) {

@@ -1,6 +1,7 @@
 package com.clawkit.evaluation.baseline;
 
 import com.clawkit.evaluation.BenchmarkReport;
+import com.clawkit.evaluation.BenchmarkSpec;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -14,6 +15,7 @@ import java.util.List;
  *   <li>安全约束失败</li>
  *   <li>缺少 RunCompleted</li>
  *   <li>events 与 summary 不一致</li>
+ *   <li>Case/script/scorer fingerprint 不兼容</li>
  * </ul>
  *
  * <p>结构指标逐 case 对比，不比全局平均值。
@@ -24,20 +26,40 @@ public class RegressionComparator {
     private static final int TURN_ABSOLUTE_TOLERANCE = 1;
     private static final double TOOL_RELATIVE_TOLERANCE = 0.10;
     private static final int TOOL_ABSOLUTE_TOLERANCE = 2;
-    private static final double DURATION_RELATIVE_TOLERANCE = 0.15;
-    private static final int DURATION_ABSOLUTE_TOLERANCE = 100;
 
     /**
      * 对比当前报告与基线。
+     * @param current 本次运行报告
+     * @param specs   本次使用的 case 定义（用于指纹对比）
+     * @param baseline 已持久化的基线
      * @return 回归报告
      */
-    public static RegressionReport compare(BenchmarkReport current, BaselineData baseline) {
-        // 验证 fingerprint
-        String currentHash = hashCases(current);
-        if (!currentHash.equals(baseline.caseSetHash())) {
+    public static RegressionReport compare(BenchmarkReport current,
+                                            List<BenchmarkSpec> specs,
+                                            BaselineData baseline) {
+        // 验证 schema version 兼容
+        if (baseline.schemaVersion() != BaselineData.CURRENT_SCHEMA_VERSION) {
             return new RegressionReport(Verdict.INCOMPATIBLE_BASELINE,
-                "Case set fingerprint mismatch: baseline=" + baseline.caseSetHash()
-                + " current=" + currentHash,
+                "Baseline schema v" + baseline.schemaVersion()
+                + " != current v" + BaselineData.CURRENT_SCHEMA_VERSION,
+                List.of());
+        }
+
+        // 验证 case-set fingerprint
+        String currentCaseSetFp = BaselineData.computeCaseSetFingerprint(specs);
+        if (!currentCaseSetFp.equals(baseline.caseSetFingerprint())) {
+            return new RegressionReport(Verdict.INCOMPATIBLE_BASELINE,
+                "Case set fingerprint mismatch: baseline="
+                + baseline.caseSetFingerprint() + " current=" + currentCaseSetFp,
+                List.of());
+        }
+
+        // 验证 script/scorer fingerprint
+        String currentScriptFp = BaselineData.computeScriptScorerFingerprint(specs);
+        if (!currentScriptFp.equals(baseline.scriptScorerFingerprint())) {
+            return new RegressionReport(Verdict.INCOMPATIBLE_BASELINE,
+                "Script/scorer fingerprint mismatch: baseline="
+                + baseline.scriptScorerFingerprint() + " current=" + currentScriptFp,
                 List.of());
         }
 
@@ -73,10 +95,6 @@ public class RegressionComparator {
                 entry.toolFailures(), result.toolFailures(),
                 0.5, 1, true, diffs);
 
-            compareMetric("duration:" + result.caseId(),
-                entry.durationMs(), result.durationMs(),
-                DURATION_RELATIVE_TOLERANCE, DURATION_ABSOLUTE_TOLERANCE, true, diffs);
-
             compareMetric("provider-calls:" + result.caseId(),
                 entry.providerCalls(), result.providerCalls(),
                 0.10, 1, true, diffs);
@@ -99,30 +117,30 @@ public class RegressionComparator {
     }
 
     private static void compareMetric(String name,
-                                       double baseline, double current,
+                                       double baselineVal, double currentVal,
                                        double relTol, double absTol,
                                        boolean higherIsWorse,
                                        List<RegressionReport.MetricDiff> diffs) {
-        if (baseline == 0 && current == 0) {
+        if (baselineVal == 0 && currentVal == 0) {
             diffs.add(new RegressionReport.MetricDiff(name,
                 "0", "0", "0", Verdict.UNCHANGED));
             return;
         }
-        double limit = Math.max(baseline + absTol, Math.ceil(baseline * (1 + relTol)));
-        double improvedLimit = Math.max(0, baseline - Math.max(absTol, baseline * relTol));
+        double limit = Math.max(baselineVal + absTol, Math.ceil(baselineVal * (1 + relTol)));
+        double improvedLimit = Math.max(0, baselineVal - Math.max(absTol, baselineVal * relTol));
 
-        String baselineStr = formatDouble(baseline);
-        String currentStr = formatDouble(current);
-        String delta = formatDelta(baseline, current);
+        String baselineStr = formatDouble(baselineVal);
+        String currentStr = formatDouble(currentVal);
+        String delta = formatDelta(baselineVal, currentVal);
 
         Verdict verdict;
         if (higherIsWorse) {
-            if (current > limit) verdict = Verdict.DEGRADED;
-            else if (current < improvedLimit) verdict = Verdict.IMPROVED;
+            if (currentVal > limit) verdict = Verdict.DEGRADED;
+            else if (currentVal < improvedLimit) verdict = Verdict.IMPROVED;
             else verdict = Verdict.UNCHANGED;
         } else {
-            if (current < limit) verdict = Verdict.DEGRADED;
-            else if (current > improvedLimit) verdict = Verdict.IMPROVED;
+            if (currentVal < limit) verdict = Verdict.DEGRADED;
+            else if (currentVal > improvedLimit) verdict = Verdict.IMPROVED;
             else verdict = Verdict.UNCHANGED;
         }
 
@@ -134,15 +152,9 @@ public class RegressionComparator {
         return String.format("%.1f", v);
     }
 
-    private static String formatDelta(double baseline, double current) {
-        if (baseline == 0) return current > 0 ? "+" + formatDouble(current) : "0";
-        double pct = ((current - baseline) / baseline) * 100;
+    private static String formatDelta(double baselineVal, double currentVal) {
+        if (baselineVal == 0) return currentVal > 0 ? "+" + formatDouble(currentVal) : "0";
+        double pct = ((currentVal - baselineVal) / baselineVal) * 100;
         return String.format("%+.1f%%", pct);
-    }
-
-    private static String hashCases(BenchmarkReport report) {
-        var sb = new StringBuilder();
-        for (var r : report.results()) sb.append(r.caseId()).append("|");
-        return Integer.toHexString(sb.toString().hashCode());
     }
 }

@@ -75,6 +75,15 @@
                         <configuration>
                             <mainClass>com.clawkit.evaluation.BenchmarkMain</mainClass>
                         </configuration>
+                        <executions>
+                            <execution>
+                                <id>runtime-benchmark</id>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>java</goal>
+                                </goals>
+                            </execution>
+                        </executions>
                     </plugin>
                 </plugins>
             </build>

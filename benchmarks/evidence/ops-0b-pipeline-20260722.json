@@ -1,0 +1,28 @@
+{
+  "evidenceType": "PIPELINE_BENCHMARK",
+  "historical": true,
+  "latestVersionValidated": false,
+  "suite": "ops-0b-postgres",
+  "executedAt": "2026-07-22",
+  "sourceCommit": "unknown",
+  "requested": 120,
+  "completed": 118,
+  "evaluable": 118,
+  "passed": 118,
+  "sourceSummarySha256": "9f7a2b2b4d6ad43629042df15748e35470b6c23b878a3af0de957fb147020957",
+  "cases": {
+    "UNKNOWN": { "requested": 20, "completed": 20, "passed": 20 },
+    "SELF_RECOVERED": { "requested": 20, "completed": 19, "passed": 19 },
+    "STALE_LOCK_LOG": { "requested": 20, "completed": 20, "passed": 20 },
+    "CPU_PRESSURE": { "requested": 20, "completed": 20, "passed": 20 },
+    "CONNECTION_EXHAUSTION": { "requested": 20, "completed": 19, "passed": 19 },
+    "DB_LOCK_WAIT": { "requested": 20, "completed": 20, "passed": 20 }
+  },
+  "limitations": [
+    "DiagnosticSignals and DiagnosisReconciler participated",
+    "Two runs were incomplete (SELF_RECOVERED iteration 2, CONNECTION_EXHAUSTION iteration 1)",
+    "This is not an unknown-fault diagnosis accuracy result",
+    "This is not an automatic repair benchmark",
+    "The optimized version was not rerun for full 6x20"
+  ]
+}

@@ -38,6 +38,8 @@ jobs:
           }
       - name: Clean verify
         run: mvn -B -ntp clean verify
+      - name: Runtime baseline compare
+        run: mvn -B -ntp -pl clawkit-evaluation -am -Pbenchmark verify "-Dbenchmark.mode=compare"
       - name: Ensure build did not modify tracked files
         run: git diff --exit-code
 

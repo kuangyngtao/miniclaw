@@ -1,8 +1,12 @@
 # Maven
 target/
+dist/
 *.jar
 *.war
 *.ear
+
+# Generated benchmark review artifacts
+benchmarks/baselines/*.candidate.json
 
 # IDE
 .idea/

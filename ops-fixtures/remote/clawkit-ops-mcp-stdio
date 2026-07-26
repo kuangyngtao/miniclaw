@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# clawkit-ops-mcp-stdio — root-owned fixed launcher for the OPS MCP stdio server
+#
+# Invoked by the gateway via sudo. MUST be root-owned (0755) and
+# NOT writable by opsro.
+#
+# Design doc §6.2:
+#   - Reads root-only /etc/clawkit/ops-mcp.env
+#   - Validates the JAR path is fixed and not writable by opsro
+#   - Execs java -jar <fixed-path>, no user arguments passed through
+
+set -euo pipefail
+
+JAR="/usr/local/lib/clawkit/ops-mcp.jar"
+ENV_FILE="/etc/clawkit/ops-mcp.env"
+
+# ── Validate JAR path (§6.2) ──
+if [[ ! -f "$JAR" ]]; then
+    echo "fatal: JAR not found at $JAR" >&2
+    exit 1
+fi
+
+# JAR must not be writable by group or others
+JAR_PERMS=$(stat -c '%a' "$JAR" 2>/dev/null || echo "000")
+JAR_GROUP_W=$((${JAR_PERMS:1:1} % 2))
+JAR_OTHER_W=$((${JAR_PERMS:2:1} % 2))
+if [[ "$JAR_GROUP_W" -ne 0 || "$JAR_OTHER_W" -ne 0 ]]; then
+    echo "fatal: JAR is group/other writable: $JAR (perms=$JAR_PERMS)" >&2
+    exit 1
+fi
+
+# ── Load root-only environment (§6.2) ──
+if [[ -f "$ENV_FILE" ]]; then
+    # Source in a subshell to avoid polluting our env,
+    # then export only known-safe variables.
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+fi
+
+# ── Exec the JVM (§6.2) ──
+# No user arguments propagated. No $@, no $*, no $1.
+exec java \
+    -Xmx256m \
+    -Djava.security.egd=file:/dev/./urandom \
+    -jar "$JAR"

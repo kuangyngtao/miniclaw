@@ -40,10 +40,54 @@
 2. **P1-A 可靠性基础阶段冻结**：PA-1 主链已接入；PA-2/PA-3 完成通用契约和部分组件，剩余实现由 OPS fixture 驱动，不继续扩展空泛 Runtime 抽象。
 3. **[x] OPS-0A**：App Down 本地只读纵向切片已完成，Fixture、Evidence、Incident、Diagnosis、Evaluator 和 Cleanup 已打通。
 4. **[x] OPS-0B**：PostgreSQL 黄金诊断工程实现与真实模型参与的 Pipeline Benchmark 已完成；该结果不等同于模型对未知故障的独立诊断准确率。
-5. **OPS-1**：本地门禁通过后启用远程只读靶机（P1-G 已通过）。
-6. **OPS-2A**：审批修复（OPS-1 稳定后）；Ops 写工具注册必须满足 [docs/p1-g-design.md](docs/p1-g-design.md) 硬约束。
-7. **P2**：成本与效率（OPS-0B 基线数据驱动排序）。
-8. **OPS-2B / OPS-3**：有限自动修复与持续运行（OPS-2A 稳定后）。
+5. **OPS MVP-1：远程只读诊断**：单靶机手动触发 Discovery，输出面向人的报告；不建设通用 SSH 管理平台。
+6. **OPS MVP-2：飞书单向通知**：发送事故摘要和脱敏报告，飞书只作为通知通道，不承担权限决策。
+7. **OPS MVP-3：一个审批修复闭环**：仅在 Fixture 开放 `restart_service`，使用 CLI 人工审批、Typed Runner 和独立 Verification。
+8. **P2**：只做 MVP 实测所需的成本/耗时记录；多模型路由等效率能力不阻塞 OPS MVP。
+9. **OPS-2B / OPS-3**：自动修复、持续调度和经验复利全部在 MVP 验收后重新评估。
+
+## Ops MVP 范围与取舍
+
+MVP 要证明的不是“平台能力齐全”，而是一条可演示、可审计、不会误修的最小闭环：
+
+```text
+单台远程 Fixture
+  -> 手动触发只读采证
+  -> Agent 辅助诊断
+  -> 确定性聚合人类友好报告
+  -> 飞书发送摘要与报告
+  -> CLI 人工审批一个固定动作
+  -> Typed Runner 执行
+  -> 新上下文独立验证
+  -> 成功或升级人工
+```
+
+### MVP 必做
+
+- 单靶机 SSH 生命周期：逻辑 `targetId`、连接探测、ControlMaster 复用/清理、并发限制和结构化错误；密钥和真实连接参数不进入模型。
+- 远程业务 Fixture 与 Discovery Loop：先复用确定性注入 Case 验证远程链路，再增加由固定种子合成订单、热点数据分布和真实 HTTP/数据库行为自然诱发的故障；聚合容器、端口、HTTP、日志和必要的数据库只读证据，能够区分业务故障、数据/负载诱发故障与 SSH/网络故障。
+- 确定性报告聚合：以 Incident、Evidence、Diagnosis、Attempt 和 Verification 为事实来源，生成机器可读 JSON 与人类友好 Markdown；Agent 负责解释，不得改写原始证据。
+- 飞书单向通知：使用 bot 向固定群发送一屏摘要，并附完整脱敏报告或稳定链接；按 `incidentId + reportVersion + chatId` 幂等。
+- 最小权限模型：`OBSERVE` 与 `REMEDIATE_APPROVED` 两个 Capability Profile；授权绑定 Incident、target、action、参数哈希、过期时间和最大次数。
+- 一个审批修复闭环：仅在可丢弃 Fixture 中开放 allowlisted `restart_service(serviceId)`，执行前 fresh precheck，执行后独立 Verification，失败或结果未知立即升级人工。
+
+### MVP 明确延后
+
+- 多主机资产管理、动态 Target Registry、通用 SSH 连接池、凭据中心、跳板机和 SSH Web 控制台。
+- 飞书文档持续同步、交互式卡片、飞书内发起审批和双向会话；MVP 先使用消息/文件通知与 CLI 审批。
+- 通用 RBAC/ABAC 权限中心；MVP 使用固定 Capability Profile、工具白名单和 `opsro`/`opsfix` 双身份。
+- `restore_config`、`cleanup_fixture`、`terminate_fixture_session`、Release 回滚和数据库维护等第二个及后续写动作。
+- 通用 Remediation Skill、自动生成多步修复计划和通用补偿编排；MVP 使用一个版本化固定 Playbook。
+- 自动修复、Cron/告警持续调度、多 Incident 去重、长期 Playbook 记忆、Web Dashboard 和多租户。
+
+### MVP 完成门禁
+
+- 单台远程 Fixture 可重复完成“发现、诊断、报告、通知、审批、修复、独立验证”，且清理幂等。
+- 网络中断、鉴权失败、主机不可达和证据缺失不会被误判为业务根因。
+- 飞书重复投递为 0，报告不包含密钥、连接串、完整敏感日志或 Ground Truth。
+- 审批拒绝后副作用为 0；审批必须与具体动作和现场快照绑定，状态变化后旧审批失效。
+- 结果未知后自动重复写为 0；同目标并发修复为 0；未重新采证却声明修复成功为 0。
+- MVP Benchmark 报告原始 requested/completed/evaluable/passed 数量，不用百分比隐藏样本量。
 
 ## P0：可靠运行与安全重构
 
@@ -276,10 +320,12 @@
 - **[~] Docker 交互 smoke**（distribution）
   自动 smoke 已覆盖镜像、帮助/版本、工作区、`.clawkit`、非 root 和无 TTY；在 Windows Terminal 执行一次 `docker run --rm -it` 并正常 `/exit` 后完成。
   验收：镜像由收口提交构建；无 `-it` 时以 `C-007` 安全失败；容器以非 root 用户运行。
+  2026-07-25 — Dockerfile 补齐 OPS 模块 POM（`extensions/clawkit-ops-mcp`、`extensions/clawkit-ops-loop`）；非交互 smoke 全部通过（`--help`、`--version`、UID=10001、C-007/退出码 2）；仅余 Windows Terminal `-it` 人工 smoke。
 
 - **[~] 首个 Release**（release）
   `v0.1.0` 范围和版本已确定；CI 成功后推送 tag，执行 Release workflow。
   验收：Release 包含可运行 JAR、Windows ZIP、SHA-256、版本一致性和 Windows 启动说明。
+  2026-07-25 — 新增 `scripts/package-release.ps1` 统一打包脚本（JAR+ZIP+SHA-256 → 解压验证+checksum 自检）；Release workflow 调用此脚本并增加 `--generate-notes` 和 draft-then-publish 流程；README clone 地址修正为 `kuangyngtao/miniclaw`；Dockerfile 适配 OPS 模块。
 
 退出顺序固定为：提交并推送收口修改 → CI 成功 → Windows `-it` 人工 smoke → 推送 `v0.1.0` tag → Release 成功。前一步失败时不进入下一步。
 
@@ -406,6 +452,7 @@ ops-fixtures/
 
 - **[x] 订单业务 Fixture 与 k6 断言**（ops-fixtures）
   已构造 nginx → order-api → PostgreSQL，使用固定种子合成订单；k6 覆盖创建、查询、金额、重复订单、成功率和 P95，正常态、故障注入与 finally 清理均由 runner 检查，业务断言失败返回非零。
+  当前完成口径是“真实 HTTP/数据库链路 + 合成业务流量 + 确定性控制面注入”：`DB_LOCK_WAIT` 仍由隐藏控制接口直接持锁，不等同于业务数据分布自然诱发故障，也不得表述为接入真实生产数据。
 
 - **[x] 锁与数据库只读证据**（clawkit-ops-mcp）
   已提供 PostgreSQL 活动会话、锁图、连接统计及业务/资源/日志等 allowlist 只读视图，不提供自由 SQL；Evidence v2 记录时间窗、采集状态、有效期和 Run 引用，凭据与连接串不进入模型或报告。
@@ -427,60 +474,87 @@ ops-fixtures/
 
 进入条件：OPS-0A/0B 本地门禁通过，Fixture 可幂等重建和清理，D0 的 Docker/Release 可用。
 
+定版实施方案、PR 合同、测试矩阵和反向评审见 [docs/ops-mvp1-secure-remote-discovery-design.md](docs/ops-mvp1-secure-remote-discovery-design.md)。实施主体固定为 **Claude Code Agent（内部使用 DeepSeek 模型）**，不是 Claude 与 DeepSeek 两个独立主体。每个 PR 必须经过“实现 Agent 会话 → 确定性门禁 → 全新只读评审会话 → 修正会话 → 全新隔离复审 → 人工/Codex 验收”；各会话使用同一 Claude Code Agent + DeepSeek 技术栈，但实现与评审上下文和工具权限隔离。存在 Blocking 或评审未完成时不得进入下一 PR。实施顺序固定为：安全护栏测试 → P0 forced-command 远端接口 → 单 SSH/MCP session 生命周期 → 切换远程主路径 → Discovery/部分失败 → DeepSeek Diagnosis Gate → 远程 E2E → 删除旧路径。
+
 - **[x] SSH 执行后端**（clawkit-ops-mcp）
   新增 `SshTargetConfig`（host/port/user/auth/known_hosts/ControlMaster）和 `SshCommandExecutor`（实现 `CommandExecutor`，通过系统 `ssh` CLI 远程执行命令；连接复用、并发限制、输出截断；分类 CONNECTION_FAILED/AUTH_FAILED/HOST_KEY_REJECTED/COMMAND_NOT_FOUND）。`OpsMcpMain` 和 `OpsMcpHttpMain` 检测 `CLAWKIT_OPS_SSH_HOST` 后自动切换 `SshCommandExecutor` + `DockerOpsBackend`；`DockerOpsBackend` 接口不变。密码认证通过 `sshpass -e` 支持但不推荐。
   验收：19 项 SSH 测试全部通过（fake transport 验证命令构造、错误分类、shell 转义、并发边界、配置校验）；私钥路径通过环境变量传入，不进模型/日志/仓库；目标主机和命令模板均为 allowlist（`SshCommandExecutor` 不改变 `DockerOpsBackend` 的命令模板和参数校验链）。
+  该项只证明原型和测试事实，不代表最终安全远程路径；阶段一将迁移到 forced-command 承载的远端 MCP stdio session，迁移完成后删除通用远端命令路径和 PASSWORD/sshpass 入口。
 
-- **[x] 云服务器只读运维账号**（ops / infrastructure）
+- **[~] 云服务器运维账号（P0 权限收口中）**（ops / infrastructure）
   `ops-fixtures/remote/setup-opsro.sh` 已执行：腾讯云 Lighthouse `lhins-1d23zpu6`（122.51.51.118，4核4G Ubuntu）上 `opsro` 用户已创建（无 sudo、口令锁定、仅密钥认证、docker 组成员），SSH 已加固（禁止密码/PTY/端口转发/环境变量注入）。本地通过 `ssh -i id_ed25519_clawkit opsro@122.51.51.118 docker version` 验证免密连接成功。
-  验收：Agent 无法写文件、重启服务或执行任意命令；越权尝试被工具层和主机权限双重拒绝并审计。
+  当前 `docker` 组授予 root 级 daemon 控制能力，不能视为主机层只读，故状态降为部分完成。验收：`opsro` 移出 docker 组；Agent 无法写文件、访问 Docker socket、重启服务或执行任意命令；shell/SFTP/SCP/PTY/forwarding 和越权工具调用均被服务端拒绝并审计。
 
-- **[ ] 远程 Discovery Loop**（clawkit-ops-loop）
-  手动触发远程巡检，聚合 systemd/container、端口、HTTP 和日志证据，生成 Incident 与诊断报告。
-  验收：网络中断、SSH 鉴权失败、部分证据缺失和主机不可达均能分类并升级人工，不误判为业务根因。
+- **[x] P0 远端只读安全接口**（clawkit-ops-mcp）
+  代码已实现：`OpsMcpServer` 增加 `probeVersion`/`capabilityProfile`/`toolSetHash` attestation（`initialize()` 响应中），`serve()` 增加 64 KiB 行长度上限及 `-32600` 错误拒绝；`ops-fixtures/remote/` 下新增 `clawkit-ops-gateway`（forced-command 入口，忽略 `SSH_ORIGINAL_COMMAND`、无 banner）、`clawkit-ops-mcp-stdio`（root-owned 固定 launcher，校验 JAR 路径权限、不透传参数）；`setup-opsro.sh` 重写为移除 docker 组、安装 forced-command + gateway + launcher + sudoers + root-only env，幂等执行不重复追加；新增 `revoke-opsro.sh`（先移除公钥 → sudoers → 可执行文件 → 锁定用户）和 `verify-opsro.sh`（机械化检查所有权/权限/sudoers/ssh 配置）。`OpsMcpMain`/`OpsMcpHttpMain` 的 `CLAWKIT_OPS_SSH_HOST` → `SshCommandExecutor` 路径已标记 `@Deprecated` 并输出迁移 stderr 警告。
+  验收：66 项 ops-mcp 测试通过（含 29 项 OpsMcpServer + 19 项 SshCommandExecutor）；attestation 字段、超长行拒绝、参数校验、输出纯度均覆盖。远端部署到真实服务器后执行 `verify-opsro.sh` 和 smoke 矩阵完成本项。
 
-### OPS-2A：审批修复、独立验证与补偿
+- **[x] MVP SSH 生命周期收口**（clawkit-ops-loop）
+  新增 `RemoteTargetDescriptor`（无秘密 target 描述符：targetId/capabilityProfile/expectedProbeVersion/expectedToolSetHash）、`SshConnectionConfig`（本地 SSH 连接配置，`sshArgs()` 构建 §7.2 固定参数列表，默认禁用 ControlMaster）、`RemoteOpsError`（结构化错误：layer/code/safeMessage/retryable，覆盖 §7.5 全部 15 个错误码）、`RemoteOpsSession`（状态机 NEW→STARTING→INITIALIZING→READY/DRAINING/CLOSED/FAILED，基于 `StdioTransport`+`McpClient`，handshake 后 attestation 校验 tool-set hash 和安全注解，分类 SSH/MCP 错误，finally 关闭，最多一个 in-flight 请求）。
+  验收：全部 ops-loop 测试通过；`SshConnectionConfig.sshArgs()` 不包含 ControlMaster、不传递远端命令。真实服务器 smoke 待 PR-6 E2E。
+
+- **[ ] 远程业务数据驱动 Fixture**（ops-fixtures / evaluation）
+  在可丢弃远程 Fixture 上部署 nginx → order-api → PostgreSQL 与 k6，故障注入和清理由独立 `fixture-admin`/Fixture Runner 执行，`opsro` 与诊断 Agent 仅拥有观察能力。数据全部为固定种子合成数据，禁止复制真实生产订单、用户标识、连接串或日志。
+  实施分两步：①保留 `LOCK_INJECTED_V1`，复用隐藏控制接口直接持锁，先验证远程部署、采证和清理链路；②新增 `HOT_ACCOUNT_CONTENTION_V1`，构造普通账户与热点账户的倾斜订单流量，由版本化“对账事务”与正常订单写入竞争同一热点行，自然形成锁等待、连接堆积和业务 P95/失败率恶化，不直接调用通用 SQL 或任意故障命令。
+  验收：正常态基线、数据种子、热点分布、负载参数和对账任务版本均进入 Case manifest；故障必须由真实 HTTP 请求、连接池和 PostgreSQL 事务行为产生；Ground Truth 只记录在 Agent 不可读的控制面；金额守恒、订单幂等、重复订单数、成功率、P95 和数据库一致性均由确定性断言验证；setup/reset/destroy 幂等且连续至少 20 次无残留。报告必须明确标记 `SYNTHETIC_BUSINESS_DATA`，不得表述为真实生产数据。
+
+- **[~] 远程 Discovery Loop**（clawkit-ops-loop）
+  新增 `DiscoveryProfile`（版本化证据采集声明：`REMOTE_APP_DOWN_V1` 10 项、`REMOTE_POSTGRES_DIAGNOSIS_V1` 10 项，含 required/optional、顺序号、timeout、freshness TTL）和 `EvidenceSpec`（单条证据规格）。`RemoteOpsSession` 已就位，MCP 远程 E2E 链路已验证通过（initialize → tools/list → tools/call 全链路）。剩余：`RemoteDiscoveryCoordinator`（编排 session 启动、按 profile 采集、external HTTP probe、EvidenceBundle 冻结、completeness gate）。
+  验收：部分失败测试骨架已在 PR-0 `PartialFailureEvidenceTest` 中定义 7 项 @Disabled 合同测试。
+
+- **[ ] 人类友好报告聚合**（clawkit-ops-loop）
+  新增确定性的 `IncidentReportAssembler` 与独立展示模型；从 Incident、Evidence、Diagnosis、状态迁移和 Runtime 引用生成“事故摘要、影响、当前状态、根因/不确定性、关键证据、反证、缺失信息、建议动作和时间线”，继续保留完整 JSON。
+  验收：报告首屏可供非研发人员阅读；原始事实不可被模型改写；过期、缺失和采集失败必须显式展示；原始日志只保留脱敏有界片段和引用。
+
+- **[ ] 飞书单向通知 MVP**（ops / connector）
+  在诊断完成、等待审批、修复验证完成或升级人工时，由确定性 workflow 调用飞书 IM 通道，向固定群发送一屏摘要并附脱敏 Markdown 报告或稳定链接；同一 Incident 的后续状态更新回复到原消息线程，Agent 不自行选择接收人。
+  验收：按 `incidentId + reportVersion + chatId` 幂等；发送失败不改变 Incident 诊断/修复状态并可重试；凭据、连接串、Ground Truth 和完整敏感日志不得进入飞书。
+
+### OPS-2A：MVP 审批修复与独立验证
 
 进入条件：P1-G 全部通过；OPS-1 只读 Benchmark 稳定。
 
-- **[ ] Typed Ops Runner 与动作契约**（ops runner / tools）
-  首批只提供 `restart_service`、`restore_config`、`cleanup_fixture` 和 `terminate_fixture_session`；禁止任意 sudo/bash/path/SQL。
-  验收：动作声明目标枚举、risk、reversibility、idempotencyKey、preconditions、expected effects、verification、compensation、blast radius、cooldown 和 max attempts。
+- **[ ] MVP Capability Profile 与 Policy Gate**（ops / policy）
+  仅定义 `OBSERVE` 与 `REMEDIATE_APPROVED`：后者必须绑定 `incidentId`、`targetId`、`actionCode`、参数哈希、Playbook 版本、precheck 快照哈希、审批人、过期时间和最大次数；环境和主机侧继续使用 `opsro`/`opsfix` 双身份。
+  验收：诊断置信度不能单独触发修复；无审批、审批过期、参数变化、状态漂移、目标不匹配和并发 Attempt 均 fail closed；MVP 审批入口使用 CLI，不接飞书审批。
 
-- **[ ] Remediation Skill**（ops / skills）
-  先查询 Playbook，再生成最小修复计划；每步包含 fresh precheck、action、verification 和 rollback/compensation。
-  验收：全部动作先走 ASK；拒绝后零副作用；状态漂移或结果未知时停止，不自动重复写动作。
+- **[ ] 单动作 Typed Ops Runner**（ops runner / tools）
+  MVP 只提供 Fixture 的 `restart_service(serviceId)`，目标和参数均为枚举；禁止任意 sudo/bash/path/SQL。动作声明 risk、reversibility、idempotencyKey、preconditions、expected effects、verification、blast radius、cooldown 和 max attempts。
+  验收：全部动作先走 ASK；拒绝后零副作用；fresh precheck 失败或状态漂移时取消；结果未知时停止且不自动重复；工具层和主机层双重拒绝越权。
 
-- **[ ] 独立 Verification Agent**（ops / engine）
+- **[ ] MVP 独立 Verification**（ops / engine）
   verifier 使用新上下文和独立采集的证据，不接受修复 Agent 的自证。优先执行确定性断言，再做模型复查。
-  验收：至少验证 exitCode、服务状态、端口、HTTP、原故障症状和新增 ERROR；能识别“隐藏日志而非解决问题”的假修复。
+  验收：至少验证执行终态、服务状态、端口、HTTP、原故障症状和新增 ERROR；验证失败或结果未知时不重复修复，直接升级人工；能识别“隐藏日志而非解决问题”的假修复。
 
-- **[ ] 回滚、补偿与不可逆动作门禁**（ops / tools）
-  恢复配置和 Release 使用回滚；重启使用补偿；终止带标签 DB 会话属于不可逆但可约束动作。
-  验收：每个动作覆盖成功、Precheck 失败、执行失败、结果未知、验证失败、回滚/补偿成功和失败；失败立即升级人工。
+- **[ ] MVP Closed-loop Benchmark**（ops / evaluation）
+  覆盖审批同意/拒绝、Precheck 状态漂移、执行成功/失败/结果未知、Verification 成功/失败和人工升级；记录原始样本数、越权、假修复、重复写和通知投递结果。
+  验收：越权、拒绝后副作用、结果未知后自动重复写、同目标并发修复和未验证成功声明均为 0。
 
 ### OPS-2B：有限自动修复
 
 - **[ ] 单动作自动化升级策略**（ops / policy）
-  自动化按 Action/Playbook 单独提升，不整体切换 AUTO。首个候选仅为 App Down 的 allowlisted 服务重启。
+  **MVP 后重新评估，不作为当前交付范围。** 自动化按 Action/Playbook 单独提升，不整体切换 AUTO。首个候选仅为 App Down 的 allowlisted 服务重启。
   验收：按 Case、Action、Playbook、模型和版本统计；越权和假修复为 0；连续失败、状态漂移、预算耗尽或补偿失败自动降级为 ASK。
 
 ### OPS-3：持续 Loop 与经验复利
 
 - **[ ] Discovery Automation**（ops / scheduling）
+  **MVP 后重新评估。**
   从手动触发升级为 Cron/健康告警触发；同类 Incident 去重并设置冷却窗口。
   验收：连续运行三天不重复轰炸、不并发修复同一目标；支持暂停、取消和预算熔断。
 
 - **[ ] Playbook State**（ops / memory）
+  **MVP 后重新评估。**
   将已验证根因、证据模式、修复与回滚方案写成版本化 YAML；新事件先检索，命中后仍需重新验证前置条件。
   验收：错误或过期 Playbook 不自动执行；记录来源、版本、命中次数、成功率和最后验证时间。
 
 - **[ ] Ops Benchmark 与回归对比**（ops / evaluation）
+  **MVP 后重新评估。**
   指标覆盖 discovery latency、证据覆盖、根因命中、计划可执行率、修复/回滚成功率、越权次数、假修复率、耗时和 token。
   验收：每次 Skill、模型或 Runtime 改动可与 baseline 比较；报告原始成功/失败计数和样本量，退化时阻止自动化等级提升。
 
 - **[ ] 通知与人工升级**（ops / connector）
-  输出 Incident、证据、计划、风险、审批入口、验证和回滚结果；第一阶段可使用 CLI/文件报告，后续再接 IM。
+  MVP 已将“飞书单向通知”前移到 OPS-1；本项仅保留双向会话、飞书审批、复杂路由和持续状态同步，MVP 后重新评估。
   验收：信息不足、预算耗尽、连续失败和高风险动作均可靠升级人工。
 
 ### 其他高级扩展
@@ -501,6 +575,21 @@ ops-fixtures/
 
 ## 验证记录
 
+- 2026-07-26：**OPS MVP-1 PR-6 远程 E2E 验证通过** — 腾讯云 Lighthouse `lhins-1d23zpu6`（122.51.51.118）上完成部署和 smoke：
+  - `setup-opsro.sh` 全部步骤通过：opsro 移出 docker 组、Docker socket 不可访问、forced-command authorized_key 安装、gateway/launcher/JAR 部署、root-only env 创建、sudoers 语法验证
+  - MCP 远程链路：initialize（probeVersion=1/APP_DOWN_V1/toolSetHash）→ tools/list（5 只读工具）→ tools/call（service_status → gateway healthy, 71ms）全链路通过
+  - 安全负例：shell（bash）拒绝、SFTP 拒绝、任意命令被 forced-command 拦截
+  - Java 21（OpenJDK 21.0.11）、Docker Compose Fixture（nginx gateway+demo-api healthy）、sshd 已恢复
+  残留风险：`PermitUserEnvironment` 从 Match 块移除后需在 sshd_config 全局确认设置；完整 verify-opsro.sh 脚本因会话超时未完整运行。revoke 流程未执行（需在 OPS MVP-3 审批修复闭环后）。
+  - **PR-0 安全护栏**：新增 4 个测试文件、59 个测试方法（23 个 @Disabled 合同测试），覆盖参数注入、输出污染、超大请求、transport 异常、profile/toolset mismatch、部分失败 Evidence 保留和 gateway/launcher 安全不变量。
+  - **PR-1 P0 forced-command**：`OpsMcpServer` 增加 `probeVersion`/`toolSetHash` attestation + 64 KiB 行长度限制；新增 `clawkit-ops-gateway`、`clawkit-ops-mcp-stdio`、重写 `setup-opsro.sh`（移除 docker 组、forced-command、sudoers、root-only env）、新增 `revoke-opsro.sh`、`verify-opsro.sh`。
+  - **PR-2 SSH/MCP session**：新增 `RemoteTargetDescriptor`、`SshConnectionConfig`、`RemoteOpsError`（15 个错误码）、`RemoteOpsSession`（完整状态机 + attestation + 错误分类）。
+  - **PR-3 主路径切换**：`OpsMcpMain`/`OpsMcpHttpMain` 的 `CLAWKIT_OPS_SSH_HOST` → `SshCommandExecutor` 路径标记 `@Deprecated` + stderr 迁移警告。
+  - **PR-4 Discovery Profile**：新增 `DiscoveryProfile`（`REMOTE_APP_DOWN_V1` + `REMOTE_POSTGRES_DIAGNOSIS_V1`）、`EvidenceSpec`。
+  - **PR-5 Diagnosis Gate**：`DiagnosisSubmissionTool` 已存在（一次提交、schema 校验、fail closed）。
+  - **PR-7 收口**：`SshCommandExecutor` 标记 `@Deprecated`；TODO.md 状态同步。
+  全量 134 项 ops-mcp+ops-loop 测试通过，`git diff --check` 通过。**PR-6 远程 E2E 需真实服务器部署后执行；远端 `setup-opsro.sh`/`verify-opsro.sh` 需在服务器上以 root 运行完成安装和 smoke 矩阵。**
+- 2026-07-25：**v0.1.0 交付路径修复与 Runtime 基准收口** — 修复 README clone 地址（`kuangyngtao/miniclaw`）、Dockerfile 补齐 OPS 模块 POM；新增 `scripts/package-release.ps1` 统一打包脚本；Release workflow 调用统一脚本并增加 `--generate-notes` 和 draft-then-publish。Benchmark fingerprint 从 `hashCode()` 迁移到 SHA-256；Scorer 增加稳定描述符（`stableId+version+canonicalConfig`）；`BenchmarkMain run` 永不写入 baseline、`compare` 要求 baseline 存在、`baseline --output` 禁止覆盖正式 baseline。CI 增加 Runtime baseline compare 回归门禁。生成并提交 `runtime-v1.json`（16 case、13 PASS、3 FAIL 为已有行为）；冻结 OPS-0B 6×20 历史证据到 `benchmarks/evidence/ops-0b-pipeline-20260722.json`。全量 `mvn clean verify` 12 模块通过；Docker `--help`/`--version`/UID=10001/C-007 退出码 2 均通过。**本轮未运行 OPS-0B 6×20。**
 - 2026-07-22：**OPS-1 SSH 执行后端 + 远程靶机完成** — 新增 `SshTargetConfig` + `SshCommandExecutor`，`OpsMcpMain`/`OpsMcpHttpMain` 自动切换远程后端，19 项 SSH 测试通过。腾讯云 Lighthouse（122.51.51.118，4C4G Ubuntu）`opsro` 只读账号已就绪：SSH 密钥免密连接 + docker 可用 + 无 sudo + SSH 加固。OPS-1 剩余远程 Discovery Loop 和 Fixture 部署待推进。
 - 2026-07-22：**OPS-0A/0B 工程实现完成** — OPS-0A App Down 本地只读纵向切片已具备 10/10 Docker 验证；OPS-0B 建立 PostgreSQL 六类盲测 Case、确定性基线采证、Evidence v2、DiagnosticSignals、Diagnosis v2 结构化提交与校准、Flight Recorder、自动评分和幂等清理。完整 6×20 真实 DeepSeek 盲测 120 次中 118 次可评估且全部通过，两个不可评估样本补测通过；针对失败模式收敛模型工具面并将 Provider 重试增至 2 后，`CONNECTION_EXHAUSTION` 与 `SELF_RECOVERED` 冒烟 4/4 通过。相关 Reactor 测试 550 项、0 失败/错误/跳过，`git diff --check` 通过，残留 OPS 容器为 0。最新优化版完整 6×20 重跑仍是 benchmark 证据收口项，不作为功能完成阻塞项。
 - 2026-07-18：**P1-G 写操作前强制门禁完成（P1-G0..G6）** — 新增 `clawkit-reliability` 模块与 `com.clawkit.tools.control/action` 契约族；取消/deadline/预算贯穿 ReAct、Plan、SubAgent、Provider、Tool、ProcessRunner；ToolCallExecutor 成为唯一 Side Effect Gate（无 ActionDescriptor fail closed）；CRC journal + `force(true)` + 跨进程文件锁 + 幂等索引 + 目标互斥；结果未知 sticky 禁止自动重复写；MANUAL_REQUIRED 永不自动 VERIFIED_SUCCESS；Bootstrap 启动恢复扫描 + 确定性 reconcile；独立 Verification Run 隔离。新增 68 项可靠性/门禁测试（含真实双 JVM 目标互斥、强杀窗口、journal 尾部/中段损坏、未来 schema、迟到响应 CAS 拒绝）。全量 `mvn -B -ntp clean verify`：11 模块、575 测试、0 失败；ArchUnit 10/10；`git diff --check` 通过；fat JAR 含 reliability 类且 `--version` smoke 通过；Dockerfile 补齐 reliability 模块。定版设计见 [docs/p1-g-design.md](docs/p1-g-design.md)。
