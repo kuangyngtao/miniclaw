@@ -2,26 +2,40 @@ package com.clawkit.ops.loop;
 
 import com.clawkit.ops.mcp.OpsCapabilityProfile;
 import com.clawkit.ops.mcp.OpsMcpServer;
+import com.clawkit.provider.LLMConfig;
+import com.clawkit.provider.LLMProvider;
+import com.clawkit.provider.ProviderFactory;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.util.List;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.UUID;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
 /**
- * Manual entry point for a single-target remote discovery.
+ * Manual entry point for a single-target remote discovery + diagnosis.
  *
- * <p>PR-M4 §6. Connects to the configured remote host via
- * {@link RemoteOpsSession}, collects evidence per the selected
- * {@link DiscoveryProfile}, and persists results.
+ * <p>M2-0 Gate-0. Connects to the configured remote host via
+ * {@link RemoteOpsSession}, collects evidence, runs diagnosis through
+ * {@link DeepSeekDiagnosisGate}, and atomically persists a
+ * {@link RemoteIncidentResult}.
  *
- * <p>Exit codes: 0=COMPLETE, 2=INCOMPLETE, 3=SSH/MCP failure,
- * 4=config error, 5=persistence failure.
+ * <p>Exit codes:
+ * <ul>
+ *   <li>0 — COMPLETE with diagnosis</li>
+ *   <li>2 — Discovery incomplete</li>
+ *   <li>3 — SSH/MCP failure</li>
+ *   <li>4 — Config error</li>
+ *   <li>5 — Persistence failure</li>
+ *   <li>6 — Diagnosis / Provider unavailable</li>
+ * </ul>
  */
 public final class RemoteDiscoveryMain {
 
@@ -66,7 +80,7 @@ public final class RemoteDiscoveryMain {
             return 4;
         }
 
-        // ── Resolve config from environment (§6.1) ──
+        // ── Resolve config from environment ──
         String host = require("CLAWKIT_REMOTE_OPS_HOST");
         String portStr = System.getenv().getOrDefault("CLAWKIT_REMOTE_OPS_PORT", "22");
         String user = require("CLAWKIT_REMOTE_OPS_USER");
@@ -131,8 +145,10 @@ public final class RemoteDiscoveryMain {
         // ── Execute discovery ──
         String incidentId = "inc-" + targetId + "-" + UUID.randomUUID().toString().substring(0, 8);
         String runId = "run-" + UUID.randomUUID().toString().substring(0, 8);
+        Clock clock = Clock.systemUTC();
+        Instant startedAt = clock.instant();
 
-        RemoteOpsSession session = new RemoteOpsSession(descriptor, connConfig, Clock.systemUTC());
+        RemoteOpsSession session = new RemoteOpsSession(descriptor, connConfig, clock);
         try {
             session.start();
         } catch (IOException e) {
@@ -140,10 +156,10 @@ public final class RemoteDiscoveryMain {
             return 3;
         }
 
-        DiscoveryResult result;
+        DiscoveryResult discovery;
         try {
             RemoteDiscoveryCoordinator coord = new RemoteDiscoveryCoordinator(session);
-            result = coord.collect(incidentId, runId, discoveryProfile);
+            discovery = coord.collect(incidentId, runId, discoveryProfile);
         } catch (IOException e) {
             System.err.println("discovery failed: " + e.getMessage());
             session.close();
@@ -152,19 +168,82 @@ public final class RemoteDiscoveryMain {
             session.close();
         }
 
-        // ── Persist result ──
+        // ── Diagnosis Gate ──
+        Diagnosis diagnosis;
+        boolean providerCalled = false;
+        String diagnosisFailureCode = null;
+
+        if (discovery.status() == DiscoveryStatus.COMPLETE) {
+            String apiKey = System.getenv("CLAWKIT_API_KEY");
+            if (apiKey == null || apiKey.isBlank()) {
+                // API key missing — keep Discovery, diagnose as INCONCLUSIVE
+                System.err.println("CLAWKIT_API_KEY not set — diagnosis skipped");
+                diagnosis = new Diagnosis("INCONCLUSIVE", 0.0,
+                    List.of(), List.of(), List.of(), List.of(),
+                    "ESCALATE", false);
+                diagnosisFailureCode = "PROVIDER_NOT_CONFIGURED";
+            } else {
+                try {
+                    LLMConfig llmConfig = LLMConfig.builder()
+                        .apiKey(apiKey)
+                        .build();
+                    LLMProvider llmProvider = ProviderFactory.create(llmConfig);
+
+                    DeepSeekDiagnosisGate gate = new DeepSeekDiagnosisGate(
+                        llmProvider, llmConfig.model(), clock);
+
+                    Duration diagnosisDeadline = Duration.ofSeconds(120);
+                    diagnosis = gate.diagnose(discovery, null, diagnosisDeadline);
+                    providerCalled = true;
+
+                    if ("INCONCLUSIVE".equals(diagnosis.rootCauseCode())
+                        && diagnosis.confidence() == 0.0) {
+                        diagnosisFailureCode = "DIAGNOSIS_INCONCLUSIVE";
+                    }
+                } catch (Exception e) {
+                    System.err.println("diagnosis failed: " + e.getMessage());
+                    diagnosis = new Diagnosis("INCONCLUSIVE", 0.0,
+                        List.of(), List.of(), List.of(), List.of(),
+                        "ESCALATE", false);
+                    diagnosisFailureCode = "PROVIDER_ERROR";
+                }
+            }
+        } else {
+            // Discovery incomplete or transport failed — skip Provider
+            diagnosis = new Diagnosis("INCONCLUSIVE", 0.0,
+                List.of(), List.of(), List.of(), List.of(),
+                "ESCALATE", false);
+            diagnosisFailureCode = discovery.status() == DiscoveryStatus.TRANSPORT_FAILED
+                ? "TRANSPORT_FAILED" : "DISCOVERY_INCOMPLETE";
+        }
+
+        // ── Aggregate result ──
+        RemoteIncidentResult result = new RemoteIncidentResult(
+            discovery, diagnosis, providerCalled, diagnosisFailureCode,
+            clock.instant());
+
+        // ── Atomic persist ──
         try {
             Files.createDirectories(outputDir);
-            Path output = outputDir.resolve("discovery-" + runId + ".json");
-            MAPPER.writerWithDefaultPrettyPrinter().writeValue(output.toFile(), result);
-            System.out.println("discovery complete: " + output.toAbsolutePath());
+            Path target = outputDir.resolve("incident-" + runId + ".json");
+            Path tmp = outputDir.resolve("incident-" + runId + ".json.tmp");
+
+            MAPPER.writerWithDefaultPrettyPrinter().writeValue(tmp.toFile(), result);
+            Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING);
+
+            System.out.println("incident result: " + target.toAbsolutePath());
         } catch (IOException e) {
             System.err.println("failed to write output: " + e.getMessage());
             return 5;
         }
 
-        // ── Exit code by status ──
-        return switch (result.status()) {
+        // ── Exit code ──
+        if (!providerCalled && diagnosisFailureCode != null
+            && (diagnosisFailureCode.startsWith("PROVIDER_"))) {
+            return 6;
+        }
+        return switch (discovery.status()) {
             case COMPLETE -> 0;
             case INCOMPLETE -> 2;
             case TRANSPORT_FAILED -> 3;

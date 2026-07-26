@@ -1,15 +1,23 @@
 package com.clawkit.ops.loop;
 
+import com.clawkit.provider.LLMException;
+import com.clawkit.provider.LLMProvider;
+import com.clawkit.provider.ModelParameters;
+import com.clawkit.provider.ModelRequest;
+import com.clawkit.provider.ModelResponse;
+import com.clawkit.tools.control.ExecutionControl;
+import com.clawkit.tools.schema.Message;
+import com.clawkit.tools.schema.ToolDefinition;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicReference;
+
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,49 +25,50 @@ import org.slf4j.LoggerFactory;
 /**
  * Runs a DeepSeek diagnosis on a frozen {@link DiscoveryResult}.
  *
- * <p>PR-M5 §7. The gate enforces:
+ * <p>M2-0: Refactored to use {@link LLMProvider} (with its built-in HTTP,
+ * auth, retry, timeout, and circuit-breaker) instead of raw JSON strings.
+ *
+ * <p>The gate enforces:
  * <ol>
  *   <li>Only call Provider when status is COMPLETE and all required
  *       evidence is current and unexpired.</li>
  *   <li>Provider receives only redacted evidence facts + logical targetId
- *       + the {@code submit_diagnosis} tool.</li>
+ *       + the {@code submit_diagnosis} tool definition.</li>
  *   <li>Empty content, truncation, invalid JSON, or fabricated evidence
- *       IDs → retry once → fail-closed as INCONCLUSIVE.</li>
+ *       IDs → retry once at gate level → fail-closed as INCONCLUSIVE.</li>
+ *   <li>{@link ExecutionControl} deadline propagates through to the Provider.</li>
  * </ol>
  */
 public final class DeepSeekDiagnosisGate {
 
     private static final Logger log = LoggerFactory.getLogger(DeepSeekDiagnosisGate.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    static final int MAX_RETRIES = 1;
+    static final int MAX_CONTENT_RETRIES = 1;
     static final int MAX_OUTPUT_TOKENS = 2048;
 
-    /** Minimal Provider interface that the gate depends on. */
-    @FunctionalInterface
-    public interface DiagnosisProvider {
-        /** Send a raw chat completion request and return the response text. */
-        String complete(String requestJson) throws IOException;
-    }
-
-    private final DiagnosisProvider provider;
+    private final LLMProvider provider;
     private final String modelName;
     private final Clock clock;
 
-    public DeepSeekDiagnosisGate(DiagnosisProvider provider, String modelName, Clock clock) {
+    /**
+     * Create a gate backed by a typed {@link LLMProvider}.
+     * HTTP, auth, retry, timeout, and circuit-breaking are handled by the Provider.
+     */
+    public DeepSeekDiagnosisGate(LLMProvider provider, String modelName, Clock clock) {
         this.provider = provider;
         this.modelName = modelName != null ? modelName : "deepseek-v4-flash";
         this.clock = clock;
     }
 
     /**
-     * Attempt a diagnosis. Returns INCONCLUSIVE if the gate is not passed
-     * or if the Provider fails.
+     * Attempt a diagnosis with an explicit deadline.
      *
      * @param result   the frozen discovery result
      * @param symptom  human-readable symptom description
+     * @param control  execution control carrying at least a deadline
      * @return a Diagnosis record
      */
-    public Diagnosis diagnose(DiscoveryResult result, String symptom) {
+    public Diagnosis diagnose(DiscoveryResult result, String symptom, ExecutionControl control) {
         // ── Gate 1: only COMPLETE ──
         if (result.status() != DiscoveryStatus.COMPLETE) {
             log.info("[diagnosis-gate] status={} — skipping Provider", result.status());
@@ -81,72 +90,93 @@ public final class DeepSeekDiagnosisGate {
                 "evidence not current (stale=" + staleCount + " failed=" + failedCount + ")");
         }
 
-        // ── Gate 3: call Provider ──
-        String request = buildRequest(result, symptom);
-        String response;
+        // ── Gate 3: call Provider with typed request ──
         try {
-            response = callWithRetry(request);
-        } catch (IOException e) {
+            return callWithContentRetry(result, symptom, control);
+        } catch (LLMException e) {
             log.warn("[diagnosis-gate] Provider failed: {}", e.getMessage());
             return inconclusive(result, "Provider error: " + e.getMessage());
         }
+    }
 
-        // ── Gate 4: validate response ──
-        try {
-            Diagnosis d = parseAndValidate(response, result, now);
-            log.info("[diagnosis-gate] diagnosis: rootCause={}, confidence={}",
-                d.rootCauseCode(), d.confidence());
-            return d;
-        } catch (Exception e) {
-            log.warn("[diagnosis-gate] response validation failed: {}", e.getMessage());
-            return inconclusive(result, "validation failed: " + e.getMessage());
-        }
+    /**
+     * Attempt a diagnosis with a simple duration-based deadline.
+     */
+    public Diagnosis diagnose(DiscoveryResult result, String symptom, Duration deadline) {
+        return diagnose(result, symptom, new DeadlineControl(deadline, clock.instant()));
+    }
+
+    /**
+     * Attempt a diagnosis with no explicit deadline (uses Provider defaults).
+     */
+    public Diagnosis diagnose(DiscoveryResult result, String symptom) {
+        return diagnose(result, symptom, ExecutionControl.none());
     }
 
     // ── Internals ──
 
-    private String callWithRetry(String request) throws IOException {
-        IOException last = null;
-        for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    /**
+     * Call Provider with gate-level retry for content/validation failures.
+     * HTTP-level failures are handled by the Provider's own retry and
+     * surface as {@link LLMException} — those are NOT retried here.
+     */
+    private Diagnosis callWithContentRetry(DiscoveryResult result, String symptom,
+                                           ExecutionControl control) {
+        Exception lastFailure = null;
+        for (int attempt = 0; attempt <= MAX_CONTENT_RETRIES; attempt++) {
             try {
-                String resp = provider.complete(request);
-                if (resp == null || resp.isBlank()) {
-                    throw new IOException("empty Provider response");
+                ModelRequest request = buildRequest(result, symptom, control);
+                ModelResponse response = provider.generate(request);
+
+                String content = response.content();
+                if (content == null || content.isBlank()) {
+                    lastFailure = new IOException("empty Provider response");
+                    log.info("[diagnosis-gate] empty response, retry {}/{}",
+                        attempt + 1, MAX_CONTENT_RETRIES);
+                    continue;
                 }
-                return resp;
-            } catch (IOException e) {
-                last = e;
-                if (attempt < MAX_RETRIES) {
-                    log.info("[diagnosis-gate] retry {}/{}", attempt + 1, MAX_RETRIES);
+
+                Diagnosis d = parseAndValidate(content, result, now());
+                log.info("[diagnosis-gate] diagnosis: rootCause={}, confidence={}",
+                    d.rootCauseCode(), d.confidence());
+                return d;
+
+            } catch (LLMException e) {
+                // Provider-level failure (HTTP/auth/timeout) — do not retry at gate level
+                throw e;
+            } catch (Exception e) {
+                lastFailure = e;
+                if (attempt < MAX_CONTENT_RETRIES) {
+                    log.info("[diagnosis-gate] content validation failed ({}), retry {}/{}",
+                        e.getMessage(), attempt + 1, MAX_CONTENT_RETRIES);
                 }
             }
         }
-        throw last != null ? last : new IOException("Provider failed after retries");
+        log.warn("[diagnosis-gate] content retries exhausted: {}",
+            lastFailure != null ? lastFailure.getMessage() : "unknown");
+        return inconclusive(result, "validation failed after retries: "
+            + (lastFailure != null ? lastFailure.getMessage() : "unknown"));
     }
 
-    String buildRequest(DiscoveryResult result, String symptom) {
-        ObjectNode req = MAPPER.createObjectNode();
-        req.put("model", modelName);
-        req.put("max_tokens", MAX_OUTPUT_TOKENS);
-        req.put("temperature", 0.0);
-
-        // Evidence facts only — no host/key/path/URL
-        ArrayNode messages = req.putArray("messages");
-        ObjectNode sys = messages.addObject();
-        sys.put("role", "system");
-        sys.put("content", systemPrompt(result, symptom));
-        ObjectNode user = messages.addObject();
-        user.put("role", "user");
-        user.put("content", "Analyze the evidence and submit your diagnosis using submit_diagnosis.");
-
-        // Single tool
-        ArrayNode tools = req.putArray("tools");
-        tools.add(submitDiagnosisTool());
-
-        return req.toString();
+    private Instant now() {
+        return clock.instant();
     }
 
-    private String systemPrompt(DiscoveryResult result, String symptom) {
+    ModelRequest buildRequest(DiscoveryResult result, String symptom, ExecutionControl control) {
+        List<Message> messages = buildMessages(result, symptom);
+        List<ToolDefinition> tools = List.of(submitDiagnosisToolDef());
+        ModelParameters params = new ModelParameters(0.0, MAX_OUTPUT_TOKENS, false);
+        return new ModelRequest(messages, tools, params, control);
+    }
+
+    List<Message> buildMessages(DiscoveryResult result, String symptom) {
+        return List.of(
+            Message.system(systemPromptText(result, symptom)),
+            Message.user("Analyze the evidence and submit your diagnosis using submit_diagnosis.")
+        );
+    }
+
+    private String systemPromptText(DiscoveryResult result, String symptom) {
         StringBuilder sb = new StringBuilder();
         sb.append("You are an SRE diagnosing an incident.\n");
         sb.append("Target: ").append(result.incidentId()).append("\n");
@@ -162,7 +192,6 @@ public final class DeepSeekDiagnosisGate {
             if (e.validUntil() != null) {
                 sb.append(" validUntil=").append(e.validUntil());
             }
-            // Include sanitized evidence facts so the model can diagnose
             if (e.fact() != null && !e.fact().isEmpty()) {
                 try {
                     String compact = MAPPER.writeValueAsString(e.fact());
@@ -177,20 +206,14 @@ public final class DeepSeekDiagnosisGate {
         return sb.toString();
     }
 
-    private ObjectNode submitDiagnosisTool() {
-        ObjectNode tool = MAPPER.createObjectNode();
-        tool.put("type", "function");
-        ObjectNode fn = tool.putObject("function");
-        fn.put("name", "submit_diagnosis");
-        fn.put("description", "Submit a structured diagnosis for the incident.");
-        ObjectNode params = fn.putObject("parameters");
+    ToolDefinition submitDiagnosisToolDef() {
+        ObjectNode params = MAPPER.createObjectNode();
         params.put("type", "object");
         ObjectNode props = params.putObject("properties");
         props.putObject("rootCauseCode").put("type", "string")
             .put("description", "Root cause code from the allowed enumeration");
         props.putObject("diagnosisStatus").put("type", "string")
-            .put("enum", ArrayNode.class.cast(
-                MAPPER.createArrayNode().add("CONFIRMED").add("PROBABLE").add("INCONCLUSIVE")));
+            .put("enum", MAPPER.createArrayNode().add("CONFIRMED").add("PROBABLE").add("INCONCLUSIVE"));
         props.putObject("currentCondition").put("type", "string");
         props.putObject("confidence").put("type", "number")
             .put("minimum", 0).put("maximum", 1);
@@ -207,12 +230,12 @@ public final class DeepSeekDiagnosisGate {
         params.putArray("required")
             .add("rootCauseCode").add("diagnosisStatus").add("confidence")
             .add("supportingEvidence").add("contradictingEvidence");
-        return tool;
+        return new ToolDefinition("submit_diagnosis",
+            "Submit a structured diagnosis for the incident.", params);
     }
 
     Diagnosis parseAndValidate(String response, DiscoveryResult result, Instant now)
         throws IOException {
-        // Extract JSON from model response
         String json = extractFencedJson(response);
 
         JsonNode root;
@@ -228,11 +251,20 @@ public final class DeepSeekDiagnosisGate {
         validateReferences(root.path("supportingEvidence"), evidenceIds, "supportingEvidence");
         validateReferences(root.path("contradictingEvidence"), evidenceIds, "contradictingEvidence");
 
-        // Build Diagnosis using the simplified constructor
+        // Build Diagnosis
         boolean claimedResolved = root.path("claimedResolved").asBoolean(false);
         if (claimedResolved) {
             throw new IOException("claimedResolved=true rejected in read-only mode");
         }
+
+        Diagnosis.DiagnosisStatus diagStatus;
+        try {
+            diagStatus = Diagnosis.DiagnosisStatus.valueOf(
+                root.path("diagnosisStatus").asText("INCONCLUSIVE"));
+        } catch (IllegalArgumentException e) {
+            diagStatus = Diagnosis.DiagnosisStatus.INCONCLUSIVE;
+        }
+
         return new Diagnosis(
             root.path("rootCauseCode").asText("INCONCLUSIVE"),
             confidenceDouble(root.path("confidence"), 0.0),
@@ -241,7 +273,12 @@ public final class DeepSeekDiagnosisGate {
             toStringList(root.path("alternatives")),
             toStringList(root.path("missingEvidence")),
             root.path("recommendedActionCode").asText("ESCALATE"),
-            claimedResolved);
+            claimedResolved,
+            "1",
+            diagStatus,
+            Diagnosis.CurrentCondition.UNKNOWN,
+            now,
+            Diagnosis.ResolutionAttribution.NONE);
     }
 
     static String extractFencedJson(String response) {
@@ -250,7 +287,6 @@ public final class DeepSeekDiagnosisGate {
             int end = response.indexOf("```", start + 7);
             if (end > start) return response.substring(start + 7, end).trim();
         }
-        // Fallback: try to find a JSON object
         int brace = response.indexOf('{');
         int lastBrace = response.lastIndexOf('}');
         if (brace >= 0 && lastBrace > brace) {
@@ -280,7 +316,7 @@ public final class DeepSeekDiagnosisGate {
         if (v == null) return def;
         if (v.isNumber()) {
             double d = v.doubleValue();
-            return d > 1.0 ? d / 100.0 : d; // normalize percentage
+            return d > 1.0 ? d / 100.0 : d;
         }
         if (v.isTextual()) {
             return switch (v.asText().toUpperCase()) {
@@ -297,10 +333,5 @@ public final class DeepSeekDiagnosisGate {
         return new Diagnosis("INCONCLUSIVE", 0.0,
             List.of(), List.of(), List.of(), List.of(),
             "ESCALATE", false);
-    }
-
-    /** Simplified: required evidence heuristic for the gate check. */
-    private boolean isRequiredEvidence(Evidence e) {
-        return e.collectionStatus() != Evidence.CollectionStatus.COLLECTION_FAILED;
     }
 }
