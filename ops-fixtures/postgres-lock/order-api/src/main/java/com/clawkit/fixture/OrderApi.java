@@ -30,8 +30,11 @@ public final class OrderApi {
     private static final AtomicLong LOCK_GENERATION = new AtomicLong();
     private static final AtomicInteger HELD_CONNECTIONS = new AtomicInteger();
     private static final String DEFAULT_ACCOUNT = "hot-0001";
+    private static final AtomicLong RECONCILE_HOLD_MS = new AtomicLong();
+    private static final AtomicLong RECONCILE_INTERVAL_MS = new AtomicLong();
     private static HikariDataSource pool;
     private static volatile boolean ready;
+    private static volatile boolean reconcileRunning;
 
     private OrderApi() {}
 
@@ -54,6 +57,7 @@ public final class OrderApi {
         server.createContext("/orders", OrderApi::orders);
         server.createContext("/internal/metrics", OrderApi::metrics);
         server.createContext("/internal/control", OrderApi::control);
+        server.createContext("/internal/verify", OrderApi::verifyInvariant);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.start();
     }
@@ -183,6 +187,13 @@ public final class OrderApi {
                 System.out.println("historical diagnostic marker: database wait observed and cleared");
             }
             case "unknown" -> ARTIFICIAL_DELAY_MS.set(700);
+            case "hot-contention" -> {
+                long intervalMs = Long.parseLong(
+                    query(exchange.getRequestURI().getRawQuery()).getOrDefault("intervalMs", "3000"));
+                long holdMs = Long.parseLong(
+                    query(exchange.getRequestURI().getRawQuery()).getOrDefault("holdMs", "2000"));
+                startReconciliation(intervalMs, holdMs);
+            }
             default -> { json(exchange, 400, Map.of("error", "unknown mode")); return; }
         }
         json(exchange, 200, Map.of("accepted", true));
@@ -195,7 +206,7 @@ public final class OrderApi {
                 connection.setAutoCommit(false);
                 try (PreparedStatement statement = connection.prepareStatement(
                         "UPDATE accounts SET balance_cents = balance_cents WHERE account_id = ?")) {
-                    statement.setString(1, ACCOUNT); statement.executeUpdate();
+                    statement.setString(1, DEFAULT_ACCOUNT); statement.executeUpdate();
                 }
                 System.out.println("balance reconciliation transaction acquired account row lock");
                 long deadline = System.nanoTime() + millis * 1_000_000;
@@ -221,8 +232,112 @@ public final class OrderApi {
         try { acquired.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
     }
 
+    private static void startReconciliation(long intervalMs, long holdMs) {
+        RECONCILE_INTERVAL_MS.set(intervalMs);
+        RECONCILE_HOLD_MS.set(holdMs);
+        if (reconcileRunning) return;
+        reconcileRunning = true;
+        Thread.startVirtualThread(() -> {
+            System.out.println("reconciliation scheduler started: interval=" + intervalMs
+                + "ms hold=" + holdMs + "ms account=" + DEFAULT_ACCOUNT);
+            while (reconcileRunning) {
+                long generation = LOCK_GENERATION.incrementAndGet();
+                try (Connection connection = pool.getConnection()) {
+                    connection.setAutoCommit(false);
+                    connection.setTransactionIsolation(
+                        java.sql.Connection.TRANSACTION_READ_COMMITTED);
+                    try (PreparedStatement statement = connection.prepareStatement(
+                            "SELECT balance_cents FROM accounts WHERE account_id = ? FOR UPDATE")) {
+                        statement.setString(1, DEFAULT_ACCOUNT);
+                        try (ResultSet rows = statement.executeQuery()) {
+                            if (!rows.next()) throw new IllegalStateException("hot account missing");
+                        }
+                    }
+                    // Opening balance conservation check (deterministic read inside lock)
+                    try (PreparedStatement sumOrders = connection.prepareStatement(
+                            "SELECT COALESCE(SUM(amount_cents), 0) FROM orders WHERE account_id = ?")) {
+                        sumOrders.setString(1, DEFAULT_ACCOUNT);
+                        try (ResultSet rs = sumOrders.executeQuery()) {
+                            rs.next();
+                            // Log for observability — not part of Evidence
+                        }
+                    }
+                    // Hold lock for simulation
+                    long deadline = System.nanoTime() + holdMs * 1_000_000;
+                    while (reconcileRunning && LOCK_GENERATION.get() == generation
+                        && System.nanoTime() < deadline) {
+                        Thread.sleep(50);
+                    }
+                    connection.rollback();
+                } catch (Exception e) {
+                    // Connection timeout or pool exhaustion — expected symptom
+                    System.out.println("reconciliation cycle failed: " + e.getMessage());
+                }
+                try { Thread.sleep(intervalMs - holdMs); } catch (InterruptedException e) { break; }
+            }
+            System.out.println("reconciliation scheduler stopped");
+        });
+    }
+
+    private static void stopReconciliation() {
+        reconcileRunning = false;
+        RECONCILE_INTERVAL_MS.set(0);
+        RECONCILE_HOLD_MS.set(0);
+    }
+
+    /**
+     * Verify the conservation invariant for all accounts.
+     * opening_balance_cents = balance_cents + SUM(orders.amount_cents)
+     */
+    private static void verifyInvariant(HttpExchange exchange) throws IOException {
+        if (!env("CONTROL_TOKEN").equals(exchange.getRequestHeaders().getFirst("X-Control-Token"))) {
+            json(exchange, 404, Map.of("error", "not found")); return;
+        }
+        try (Connection connection = pool.getConnection();
+             PreparedStatement accounts = connection.prepareStatement(
+                 "SELECT account_id, account_class, opening_balance_cents, balance_cents FROM accounts ORDER BY account_id");
+             PreparedStatement orderSum = connection.prepareStatement(
+                 "SELECT COALESCE(SUM(amount_cents), 0) FROM orders WHERE account_id = ?")) {
+
+            var results = JSON.createArrayNode();
+            try (ResultSet rows = accounts.executeQuery()) {
+                while (rows.next()) {
+                    String accountId = rows.getString(1);
+                    String accountClass = rows.getString(2);
+                    long opening = rows.getLong(3);
+                    long balance = rows.getLong(4);
+
+                    orderSum.setString(1, accountId);
+                    long totalOrders;
+                    try (ResultSet sumRs = orderSum.executeQuery()) {
+                        sumRs.next();
+                        totalOrders = sumRs.getLong(1);
+                    }
+
+                    long expected = opening - totalOrders;
+                    boolean passed = expected == balance;
+
+                    var entry = JSON.createObjectNode();
+                    entry.put("accountId", accountId);
+                    entry.put("accountClass", accountClass);
+                    entry.put("openingBalanceCents", opening);
+                    entry.put("balanceCents", balance);
+                    entry.put("totalOrderCents", totalOrders);
+                    entry.put("expectedBalance", expected);
+                    entry.put("passed", passed);
+                    entry.put("drift", expected - balance);
+                    results.add(entry);
+                }
+            }
+            json(exchange, 200, results);
+        } catch (Exception e) {
+            json(exchange, 500, Map.of("error", e.getMessage()));
+        }
+    }
+
     private static void cleanup() {
         LOCK_GENERATION.incrementAndGet();
+        stopReconciliation();
         ARTIFICIAL_DELAY_MS.set(0); CPU_BURN_MS.set(0); HELD_CONNECTIONS.set(0);
         synchronized (SAMPLES) { SAMPLES.clear(); }
     }
