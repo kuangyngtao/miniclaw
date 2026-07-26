@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
+import java.time.Instant;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayDeque;
@@ -242,6 +243,22 @@ public final class OrderApi {
                 + "ms hold=" + holdMs + "ms account=" + DEFAULT_ACCOUNT);
             while (reconcileRunning) {
                 long generation = LOCK_GENERATION.incrementAndGet();
+                var reconciliationId = java.util.UUID.randomUUID();
+                Instant startedAt = Instant.now();
+                // Write STARTED to reconciliation_runs
+                try (Connection writeConn = pool.getConnection()) {
+                    try (PreparedStatement insertRec = writeConn.prepareStatement(
+                            "INSERT INTO reconciliation_runs(reconciliation_id, account_id, started_at, status) VALUES (?, ?, ?, 'STARTED')")) {
+                        insertRec.setObject(1, reconciliationId);
+                        insertRec.setString(2, DEFAULT_ACCOUNT);
+                        insertRec.setObject(3, startedAt);
+                        insertRec.executeUpdate();
+                    }
+                } catch (Exception e) {
+                    System.out.println("reconciliation STARTED write failed: " + e.getMessage());
+                }
+                // Acquire lock + hold
+                boolean completed = false;
                 try (Connection connection = pool.getConnection()) {
                     connection.setAutoCommit(false);
                     connection.setTransactionIsolation(
@@ -253,15 +270,6 @@ public final class OrderApi {
                             if (!rows.next()) throw new IllegalStateException("hot account missing");
                         }
                     }
-                    // Opening balance conservation check (deterministic read inside lock)
-                    try (PreparedStatement sumOrders = connection.prepareStatement(
-                            "SELECT COALESCE(SUM(amount_cents), 0) FROM orders WHERE account_id = ?")) {
-                        sumOrders.setString(1, DEFAULT_ACCOUNT);
-                        try (ResultSet rs = sumOrders.executeQuery()) {
-                            rs.next();
-                            // Log for observability — not part of Evidence
-                        }
-                    }
                     // Hold lock for simulation
                     long deadline = System.nanoTime() + holdMs * 1_000_000;
                     while (reconcileRunning && LOCK_GENERATION.get() == generation
@@ -269,9 +277,24 @@ public final class OrderApi {
                         Thread.sleep(50);
                     }
                     connection.rollback();
+                    completed = true;
                 } catch (Exception e) {
                     // Connection timeout or pool exhaustion — expected symptom
                     System.out.println("reconciliation cycle failed: " + e.getMessage());
+                }
+                // Write COMPLETED or FAILED
+                Instant completedAt = Instant.now();
+                String status = completed ? "COMPLETED" : "FAILED";
+                try (Connection writeConn = pool.getConnection()) {
+                    try (PreparedStatement updateRec = writeConn.prepareStatement(
+                            "UPDATE reconciliation_runs SET completed_at = ?, status = ? WHERE reconciliation_id = ?")) {
+                        updateRec.setObject(1, completedAt);
+                        updateRec.setString(2, status);
+                        updateRec.setObject(3, reconciliationId);
+                        updateRec.executeUpdate();
+                    }
+                } catch (Exception e) {
+                    System.out.println("reconciliation " + status + " write failed: " + e.getMessage());
                 }
                 try { Thread.sleep(intervalMs - holdMs); } catch (InterruptedException e) { break; }
             }

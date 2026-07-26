@@ -151,4 +151,40 @@ class BusinessFixtureCaseTest {
         var pool = new BusinessFixtureCase.DbPoolConfig(6, 800);
         assertThat(pool.maxPoolSize()).isEqualTo(6);
     }
+
+    // ── R2: Distribution tests ──
+
+    @Test void hotTrafficDistributionMatchesExpectedRatio() {
+        int total = 10000;
+        var orders = FixtureSeed.generateOrders(
+            BusinessFixtureCase.HOT_ACCOUNT_CONTENTION_V1, total);
+        long hotCount = orders.stream()
+            .filter(o -> o.accountId().equals("hot-0001")).count();
+        double ratio = (double) hotCount / total;
+        // Allow ±5% tolerance around 85%
+        assertThat(ratio).isBetween(0.80, 0.90);
+    }
+
+    @Test void allNormalAccountsAreReachable() {
+        // Generate many orders and verify all 99 normal accounts appear
+        int total = 50000; // large enough to hit all 99
+        var orders = FixtureSeed.generateOrders(
+            BusinessFixtureCase.HOT_ACCOUNT_CONTENTION_V1, total);
+        var normalIds = orders.stream()
+            .map(BusinessInvariant.OrderSnapshot::accountId)
+            .filter(id -> id.startsWith("acct-"))
+            .collect(java.util.stream.Collectors.toSet());
+        // With 15% × 50000 = 7500 orders over 99 accounts, all should appear
+        assertThat(normalIds.size()).isEqualTo(99);
+    }
+
+    @Test void requestIdsAreUnique() {
+        int total = 1000;
+        var orders = FixtureSeed.generateOrders(
+            BusinessFixtureCase.HOT_ACCOUNT_CONTENTION_V1, total);
+        var ids = orders.stream()
+            .map(BusinessInvariant.OrderSnapshot::requestId)
+            .collect(java.util.stream.Collectors.toSet());
+        assertThat(ids.size()).isEqualTo(total); // all unique
+    }
 }

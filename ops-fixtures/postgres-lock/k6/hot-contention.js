@@ -42,8 +42,9 @@ function selectAccount(vu, iter) {
     return HOT_ACCOUNT;
   }
   normalAccountOrders.add(1);
-  const idx = Math.floor(normalized * NORMAL_COUNT) + 1;
-  return 'acct-' + String(idx).padStart(4, '0');
+  // Re-normalize: map [HOT_PROBABILITY, 1.0) → [0, NORMAL_COUNT)
+  const normalIdx = Math.floor((normalized - HOT_PROBABILITY) / (1.0 - HOT_PROBABILITY) * NORMAL_COUNT);
+  return 'acct-' + String(normalIdx + 1).padStart(4, '0');
 }
 
 export default function () {
