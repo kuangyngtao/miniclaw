@@ -1,5 +1,12 @@
-CREATE ROLE clawkit_app LOGIN PASSWORD 'fixture-app-only' CONNECTION LIMIT 20;
-CREATE ROLE clawkit_observer LOGIN PASSWORD 'fixture-observer-only' CONNECTION LIMIT 3;
+-- M2-3/R1: Idempotent role creation
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'clawkit_app') THEN
+        CREATE ROLE clawkit_app LOGIN PASSWORD 'fixture-app-only' CONNECTION LIMIT 20;
+    END IF;
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'clawkit_observer') THEN
+        CREATE ROLE clawkit_observer LOGIN PASSWORD 'fixture-observer-only' CONNECTION LIMIT 3;
+    END IF;
+END $$;
 GRANT pg_read_all_stats TO clawkit_observer;
 
 CREATE TABLE accounts (

@@ -494,8 +494,10 @@ ops-fixtures/
   新增 `RemoteTargetDescriptor`（无秘密 target 描述符：targetId/capabilityProfile/expectedProbeVersion/expectedToolSetHash）、`SshConnectionConfig`（本地 SSH 连接配置，`sshArgs()` 构建 §7.2 固定参数列表，默认禁用 ControlMaster）、`RemoteOpsError`（结构化错误：layer/code/safeMessage/retryable，覆盖 §7.5 全部 15 个错误码）、`RemoteOpsSession`（状态机 NEW→STARTING→INITIALIZING→READY/DRAINING/CLOSED/FAILED，基于 `StdioTransport`+`McpClient`，handshake 后 attestation 校验 tool-set hash 和安全注解，分类 SSH/MCP 错误，finally 关闭，最多一个 in-flight 请求）。
   验收：全部 ops-loop 测试通过；`SshConnectionConfig.sshArgs()` 不包含 ControlMaster、不传递远端命令。真实服务器 smoke 待 PR-6 E2E。
 
-- **[x] 远程业务数据驱动 Fixture**（ops-fixtures / evaluation）
-  ✅ 2026-07-26 — M2-1/M2-2/M2-3 完成：`BusinessFixtureCase` 版本化 Case manifest（固定 seed、账户分布、负载参数）、`BusinessInvariant` 每账户守恒验证、`FixtureSeed` 确定性数据生成、`HOT_ACCOUNT_CONTENTION_V1` 场景（reconciliation scheduler + k6 热点流量）、远程部署脚本（install/seed/run-case/verify/reset/destroy）、`/internal/verify` 业务不变量端点。M2-4 远端 20 轮 E2E BLOCKED_EXTERNAL（无远程服务器访问权限，本地测试全部通过）。
+- **[~] 远程业务数据驱动 Fixture**（ops-fixtures / evaluation）
+  ⚠️ LOCAL_IMPLEMENTATION_PASS / EXTERNAL_ACCEPTANCE_PENDING
+  2026-07-26 — M2-1/M2-2/M2-3 代码完成。`BusinessFixtureCase` 版本化 Case manifest（固定 seed、账户分布、负载参数）、`BusinessInvariant` 每账户守恒验证、`FixtureSeed` 确定性数据生成、`HOT_ACCOUNT_CONTENTION_V1` 场景（reconciliation scheduler + k6 热点流量）、远程部署脚本（install/seed/run-case/verify/reset/destroy）、`/internal/verify` 业务不变量端点。
+  ❌ 未完成：M2-4 远端 20 轮 E2E（BLOCKED_EXTERNAL）；Docker live DB 未运行；OrderApi JAR 未重新构建；k6 普通账户分布需修复（R2）。
 
 - **[x] 远程 Discovery Loop**（clawkit-ops-loop）
   `RemoteDiscoveryCoordinator`：串行采集、Evidence ID 预分配、部分失败（COLLECTION_FAILED 保留已成功 Evidence）、transport 断开→TRANSPORT_FAILED、validUntil 由 freshnessTtl 生成、Bundle 冻结不可变、completeness gate（COMPLETE/INCOMPLETE/TRANSPORT_FAILED）。
@@ -506,11 +508,15 @@ ops-fixtures/
   `RemoteDiscoveryMain`：CLI 入口（--target/--profile/--output），ConfigException 可测试。
   验收：RemoteDiscoveryMainTest 5/0/0/0。
 
-- **[x] 人类友好报告聚合**（clawkit-ops-loop）
-  ✅ 2026-07-26 — M2-5 完成：`HumanIncidentReport` 统一展示模型（EvidenceView/TimelineEntry）、`IncidentReportAssembler` 确定性聚合（事实不依赖模型自由文本）、`MarkdownIncidentRenderer`/`JsonIncidentRenderer`/`FeishuSummaryRenderer` 三种渲染器共享同一模型。报告包含 SYNTHETIC_BUSINESS_DATA 标记、incidentId、状态、置信度、支持/矛盾/缺失/失败证据、时间线、建议动作、人工升级建议、contentHash。scope 脱敏、凭据/控制 token/Ground Truth 不进入报告。
+- **[~] 人类友好报告聚合**（clawkit-ops-loop）
+  ⚠️ LOCAL_IMPLEMENTATION_PASS / EXTERNAL_ACCEPTANCE_PENDING
+  2026-07-26 — M2-5 代码完成：`HumanIncidentReport` 统一展示模型（EvidenceView/TimelineEntry）、`IncidentReportAssembler` 确定性聚合（事实不依赖模型自由文本）、`MarkdownIncidentRenderer`/`JsonIncidentRenderer`/`FeishuSummaryRenderer` 三种渲染器共享同一模型。报告包含 SYNTHETIC_BUSINESS_DATA 标记、incidentId、状态、置信度、支持/矛盾/缺失/失败证据、时间线、建议动作、人工升级建议、contentHash。scope 脱敏、凭据/控制 token/Ground Truth 不进入报告。
+  ❌ 未完成：报告仅通过单元测试，未接入生产入口（R3）；飞书摘要需改为中文（R4）。
 
-- **[x] 飞书单向通知 MVP**（ops / connector）
-  ✅ 2026-07-26 — M2-6 完成：`FeishuApi` 新增 `sendChatMessage(chatId, content, idempotencyKey)` 和 `replyMessage(messageId, content, idempotencyKey)`（clawkit-im）。`NotificationOutbox` 持久化状态机 PENDING→DISPATCHING→SENT/RETRYABLE_FAILED/PERMANENT_FAILED，幂等键 `sha256(incidentId|reportVersion|chatId|eventType)→UUID`，原子文件持久化。`OpsFeishuNotifier` 通过函数式接口连接 outbox 和 Feishu（无跨模块依赖），首发→新消息，后续 reportVersion→回复原消息，429/5xx/timeout 可重试，4xx 永久失败，飞书失败不影响 Incident 状态。真实发送 BLOCKED（需用户指定测试群并授权，未执行 REAL_FEISHU_SEND）。
+- **[~] 飞书单向通知 MVP**（ops / connector）
+  ⚠️ LOCAL_IMPLEMENTATION_PASS / EXTERNAL_ACCEPTANCE_PENDING
+  2026-07-26 — M2-6 代码完成：`FeishuApi` 新增 `sendChatMessage(chatId, content, idempotencyKey)` 和 `replyMessage(messageId, content, idempotencyKey)`（clawkit-im）。`NotificationOutbox` 持久化状态机 PENDING→DISPATCHING→SENT/RETRYABLE_FAILED/PERMANENT_FAILED，幂等键 `sha256(incidentId|reportVersion|chatId|eventType)→UUID`，原子文件持久化。`OpsFeishuNotifier` 通过函数式接口连接 outbox 和 Feishu（无跨模块依赖），首发→新消息，后续 reportVersion→回复原消息，429/5xx/timeout 可重试，4xx 永久失败，飞书失败不影响 Incident 状态。
+  ❌ 未完成：真实发送 BLOCKED（需用户指定测试群并授权，REAL_FEISHU_SEND_NOT_RUN）；未接入生产入口（R3）；JSON 拼接需改为 ObjectNode（R4）；Outbox 缺少并发保护（R4）。
 
 ### OPS-2A：MVP 审批修复与独立验证
 

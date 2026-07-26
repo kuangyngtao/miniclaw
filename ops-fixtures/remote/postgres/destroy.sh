@@ -1,40 +1,38 @@
 #!/usr/bin/env bash
-# M2-3: Destroy fixture — stop containers, remove volumes, clean up.
-# MUST be run as root. Requires explicit confirmation.
+# M2-3/R1: Destroy fixture — stop containers, remove volumes, clean up.
+# MUST be run as root. Uses safety-guard assertions.
 set -euo pipefail
+source "$(dirname "$0")/lib/safety-guard.sh"
 
-PROJECT="${CLAWKIT_OPS_PROJECT:-clawkit-ops-m2-3}"
-FIXTURE_DIR="${CLAWKIT_OPS_FIXTURE_DIR:-/opt/clawkit/fixtures/postgres-lock}"
-COMPOSE_FILE="${FIXTURE_DIR}/compose.yaml"
+# Extra safety for destructive operation
+assert_safe_to_destroy "fixture project $PROJECT"
 
-echo "=== WARNING: destroy will remove all fixture data ==="
+echo "=== destroy: removing fixture ==="
 echo "Project: $PROJECT"
 echo "Fixture dir: $FIXTURE_DIR"
+echo "Compose file: $COMPOSE_FILE"
 
-# Safety: verify project name matches expected pattern
-if [[ ! "$PROJECT" =~ ^clawkit-ops- ]]; then
-    echo "FATAL: PROJECT must match 'clawkit-ops-*' pattern"
-    exit 1
+# ── Verify compose file points to expected project before touching anything ──
+if ! docker compose -f "$COMPOSE_FILE" -p "$PROJECT" ps --services 2>&1 | grep -q .; then
+    echo "No running services found for project $PROJECT — skipping container stop."
+else
+    echo "[1/3] Stopping containers and removing volumes..."
+    docker compose -f "$COMPOSE_FILE" -p "$PROJECT" down -v --remove-orphans 2>&1
 fi
 
-# Safety: verify fixture directory
-if [[ ! "$FIXTURE_DIR" =~ ^/opt/clawkit/fixtures/ ]]; then
-    echo "FATAL: FIXTURE_DIR must be under /opt/clawkit/fixtures/"
-    exit 1
-fi
-
-# Stop and remove containers, networks
-echo "[1/3] Stopping containers..."
-docker compose -f "$COMPOSE_FILE" -p "$PROJECT" down -v --remove-orphans 2>&1
-
-# Remove fixture directory
+# ── Remove fixture directory ──
 echo "[2/3] Removing fixture directory..."
-rm -rf "$FIXTURE_DIR"
+if [[ -d "$FIXTURE_DIR" ]]; then
+    rm -rf "$FIXTURE_DIR"
+    echo "   Removed: $FIXTURE_DIR"
+fi
 
-# Remove observer env file
-echo "[3/3] Removing observer credentials..."
-rm -f /etc/clawkit/ops-postgres-observer.env
+# ── Remove MCP env file ──
+echo "[3/3] Removing MCP environment..."
+if [[ -f /etc/clawkit/ops-mcp.env ]]; then
+    rm -f /etc/clawkit/ops-mcp.env
+    echo "   Removed: /etc/clawkit/ops-mcp.env"
+fi
 
 echo "=== destroy complete ==="
-echo "Project $PROJECT removed."
-echo "NOTE: Docker images are preserved. Use 'docker image prune' to clean up."
+echo "Docker images preserved. Run 'docker image prune' to clean up."
