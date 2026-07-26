@@ -105,4 +105,72 @@ public class FeishuApi {
             log.warn("Feishu edit error: {} (msg_id={})", json.path("msg").asText(), messageId);
         }
     }
+
+    /**
+     * M2-6: Send a text message to a fixed chat_id with an idempotency key.
+     *
+     * @param chatId fixed chat_id (bot must be a member)
+     * @param content message text (max ~30k chars)
+     * @param idempotencyKey stable UUID for dedup
+     * @return the Feishu message_id
+     */
+    public String sendChatMessage(String chatId, String content, String idempotencyKey)
+        throws IOException, InterruptedException {
+        String contentJson = "{\"text\":" + JSON.writeValueAsString(content) + "}";
+        String body = String.format(
+            "{\"receive_id\":\"%s\",\"msg_type\":\"text\",\"content\":%s,\"uuid\":\"%s\"}",
+            chatId, JSON.writeValueAsString(contentJson), idempotencyKey);
+
+        HttpRequest req = HttpRequest.newBuilder()
+            .uri(URI.create(BASE + "/im/v1/messages?receive_id_type=chat_id"))
+            .header("Content-Type", "application/json; charset=utf-8")
+            .header("Authorization", "Bearer " + getToken())
+            .POST(HttpRequest.BodyPublishers.ofString(body))
+            .build();
+
+        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        JsonNode json = JSON.readTree(resp.body());
+
+        int code = json.path("code").asInt(-1);
+        if (code != 0) {
+            String msg = json.path("msg").asText("unknown");
+            throw new IOException("Feishu sendChatMessage error [code=" + code + "]: " + msg);
+        }
+
+        return json.path("data").path("message_id").asText();
+    }
+
+    /**
+     * M2-6: Reply to an existing message in a chat.
+     *
+     * @param messageId the root message to reply to
+     * @param content reply text
+     * @param idempotencyKey stable UUID for dedup
+     * @return the Feishu reply message_id
+     */
+    public String replyMessage(String messageId, String content, String idempotencyKey)
+        throws IOException, InterruptedException {
+        String contentJson = "{\"text\":" + JSON.writeValueAsString(content) + "}";
+        String body = String.format(
+            "{\"msg_type\":\"text\",\"content\":%s,\"uuid\":\"%s\"}",
+            JSON.writeValueAsString(contentJson), idempotencyKey);
+
+        HttpRequest req = HttpRequest.newBuilder()
+            .uri(URI.create(BASE + "/im/v1/messages/" + messageId + "/reply"))
+            .header("Content-Type", "application/json; charset=utf-8")
+            .header("Authorization", "Bearer " + getToken())
+            .POST(HttpRequest.BodyPublishers.ofString(body))
+            .build();
+
+        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        JsonNode json = JSON.readTree(resp.body());
+
+        int code = json.path("code").asInt(-1);
+        if (code != 0) {
+            String msg = json.path("msg").asText("unknown");
+            throw new IOException("Feishu replyMessage error [code=" + code + "]: " + msg);
+        }
+
+        return json.path("data").path("message_id").asText();
+    }
 }
