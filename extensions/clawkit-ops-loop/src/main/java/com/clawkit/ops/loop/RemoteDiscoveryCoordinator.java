@@ -118,33 +118,41 @@ public final class RemoteDiscoveryCoordinator {
             else args.put(k, String.valueOf(v));
         });
 
-        // session.callTool() throws IOException on transport failure —
-        // let it propagate to the caller for transport-lost handling.
         McpCallResult result = session.callTool(spec.mcpTool(), args);
 
         try {
             JsonNode parsed = MAPPER.readTree(result.text());
             boolean success = parsed.path("success").asBoolean(false);
-            String errorCode = parsed.path("errorCode").asText(null);
-            String error = parsed.path("error").asText(null);
+            String errorCode = parsed.has("errorCode") && !parsed.get("errorCode").isNull()
+                ? parsed.get("errorCode").asText() : null;
+            String error = parsed.has("error") && !parsed.get("error").isNull()
+                ? parsed.get("error").asText() : null;
+            JsonNode data = parsed.get("data");
+
+            // Sanitize data before storing in evidence
+            JsonNode sanitized = data != null && !data.isNull()
+                ? EvidenceSanitizer.sanitize(data) : null;
 
             return createEvidence(incidentId, runId, spec, evidenceId,
-                observedAt, success, errorCode != null ? errorCode : error);
+                observedAt, success, errorCode, error, sanitized);
         } catch (Exception e) {
             return createEvidence(incidentId, runId, spec, evidenceId,
-                observedAt, false, "parse error: " + e.getMessage());
+                observedAt, false, "EVIDENCE_CAPTURE_FAILED",
+                e.getMessage(), null);
         }
     }
 
     private Evidence createEvidence(String incidentId, String runId,
                                      EvidenceSpec spec, String evidenceId,
                                      Instant observedAt, boolean success,
-                                     String errorDetail) {
+                                     String errorCode, String errorText,
+                                     JsonNode data) {
         ObjectNode fact = MAPPER.createObjectNode();
         fact.put("success", success);
-        if (errorDetail != null && !success) {
-            fact.put("error", errorDetail);
-        }
+        if (errorCode != null) fact.put("errorCode", errorCode);
+        if (errorText != null) fact.put("error", errorText);
+        if (data != null) fact.set("data", data);
+
         Evidence.CollectionStatus cs = success
             ? Evidence.CollectionStatus.OBSERVED
             : Evidence.CollectionStatus.COLLECTION_FAILED;

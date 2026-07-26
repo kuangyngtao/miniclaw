@@ -231,6 +231,82 @@ class PartialFailureEvidenceTest {
         assertThat(e.validUntil()).isNull();
     }
 
+    // ── Data preservation tests (§1) ──
+
+    @Test
+    void successfulEvidencePreservesDataFromRemote() throws Exception {
+        String toolData = "{\"success\":true,"
+            + "\"data\":{\"service\":\"gateway\",\"State\":\"running\",\"Health\":\"healthy\"},"
+            + "\"errorCode\":null,\"error\":null}";
+        var transport = newFakeTransport(initializeJson(), appDownToolsJson(),
+            mkToolResult(toolData));
+        var session = newSession(transport);
+        var coord = new RemoteDiscoveryCoordinator(session, CLOCK);
+        var profile = miniProfile(1, 1);
+        DiscoveryResult result = coord.collect("inc-1", "run-1", profile);
+
+        Evidence e = result.bundle().evidence().get(0);
+        assertThat(e.collectionStatus()).isEqualTo(Evidence.CollectionStatus.OBSERVED);
+        assertThat(e.fact().path("success").asBoolean()).isTrue();
+        assertThat(e.fact().has("data")).isTrue();
+        assertThat(e.fact().path("data").path("State").asText()).isEqualTo("running");
+    }
+
+    @Test
+    void httpFailurePreservesStatusCodeAndUnhealthyFlag() throws Exception {
+        String toolData = "{\"success\":true,"
+            + "\"data\":{\"endpoint\":\"gateway-health\",\"statusCode\":503,\"healthy\":false},"
+            + "\"errorCode\":null,\"error\":null}";
+        var transport = newFakeTransport(initializeJson(), appDownToolsJson(),
+            mkToolResult(toolData));
+        var session = newSession(transport);
+        var coord = new RemoteDiscoveryCoordinator(session, CLOCK);
+        var profile = miniProfile(1, 1);
+        DiscoveryResult result = coord.collect("inc-1", "run-1", profile);
+
+        Evidence e = result.bundle().evidence().get(0);
+        assertThat(e.collectionStatus()).isEqualTo(Evidence.CollectionStatus.OBSERVED);
+        assertThat(e.fact().path("data").path("statusCode").asInt()).isEqualTo(503);
+        assertThat(e.fact().path("data").path("healthy").asBoolean()).isFalse();
+    }
+
+    @Test
+    void urisAndConnectionDetailsAreRedacted() throws Exception {
+        String toolData = "{\"success\":true,"
+            + "\"data\":{\"URL\":\"http://secret:pass@host:8080/path\","
+            + "\"jdbcUrl\":\"jdbc:postgresql://db:5432/mydb\","
+            + "\"State\":\"running\"}}";
+        var transport = newFakeTransport(initializeJson(), appDownToolsJson(),
+            mkToolResult(toolData));
+        var session = newSession(transport);
+        var coord = new RemoteDiscoveryCoordinator(session, CLOCK);
+        var profile = miniProfile(1, 1);
+        DiscoveryResult result = coord.collect("inc-1", "run-1", profile);
+
+        Evidence e = result.bundle().evidence().get(0);
+        assertThat(e.fact().toString()).doesNotContain("secret:pass");
+        assertThat(e.fact().toString()).doesNotContain("postgresql://");
+        assertThat(e.fact().path("data").path("State").asText()).isEqualTo("running");
+    }
+
+    @Test
+    void failedEvidenceDoesNotGenerateFakeData() throws Exception {
+        String toolData = "{\"success\":false,\"errorCode\":\"COMMAND_FAILED\","
+            + "\"error\":\"No such container\"}";
+        var transport = newFakeTransport(initializeJson(), appDownToolsJson(),
+            mkToolResult(toolData));
+        var session = newSession(transport);
+        var coord = new RemoteDiscoveryCoordinator(session, CLOCK);
+        var profile = miniProfile(1, 1);
+        DiscoveryResult result = coord.collect("inc-1", "run-1", profile);
+
+        Evidence e = result.bundle().evidence().get(0);
+        assertThat(e.collectionStatus()).isEqualTo(Evidence.CollectionStatus.COLLECTION_FAILED);
+        assertThat(e.fact().path("success").asBoolean()).isFalse();
+        assertThat(e.fact().path("errorCode").asText()).isEqualTo("COMMAND_FAILED");
+        assertThat(e.fact().has("data")).isFalse();
+    }
+
     @Test
     void evidenceBundleCannotBeModifiedAfterFreeze() throws Exception {
         var transport = newFakeTransport(
@@ -327,6 +403,17 @@ class PartialFailureEvidenceTest {
     private static String toolSuccess() {
         return "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"isError\":false,"
             + "\"content\":[{\"type\":\"text\",\"text\":\"{\\\"success\\\":true}\"}]}}";
+    }
+
+    private static String mkToolResult(String textContent) {
+        // Full JSON-RPC wrapper with text content containing the OpsToolResult JSON
+        return "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"isError\":false,"
+            + "\"content\":[{\"type\":\"text\",\"text\":"
+            + escapeJson(textContent) + "}]}}";
+    }
+
+    private static String escapeJson(String raw) {
+        return "\"" + raw.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
     }
 
     private static String toolFail(String error) {

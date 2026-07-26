@@ -115,8 +115,8 @@ if command -v sshd &>/dev/null; then
         "sshd -T -C user=${OPS_USER},host=localhost,addr=127.0.0.1 2>/dev/null | grep -q '^passwordauthentication no$'"
     check "sshd effective: PermitTTY=no for opsro" sh -c \
         "sshd -T -C user=${OPS_USER},host=localhost,addr=127.0.0.1 2>/dev/null | grep -q '^permittty no$'"
-    check "sshd effective: disableforwarding=yes for opsro" sh -c \
-        "sshd -T -C user=${OPS_USER},host=localhost,addr=127.0.0.1 2>/dev/null | grep -q '^disableforwarding yes$'"
+    check "sshd effective: allowtcpforwarding=no for opsro" sh -c \
+        "sshd -T -C user=${OPS_USER},host=localhost,addr=127.0.0.1 2>/dev/null | grep -q '^allowtcpforwarding no$'"
 else
     check "sshd available" false
 fi

@@ -222,6 +222,9 @@ public final class DeepSeekDiagnosisGate {
 
         // Build Diagnosis using the simplified constructor
         boolean claimedResolved = root.path("claimedResolved").asBoolean(false);
+        if (claimedResolved) {
+            throw new IOException("claimedResolved=true rejected in read-only mode");
+        }
         return new Diagnosis(
             root.path("rootCauseCode").asText("INCONCLUSIVE"),
             confidenceDouble(root.path("confidence"), 0.0),
