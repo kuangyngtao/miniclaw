@@ -54,6 +54,7 @@ clawkit 是 Java 21 实现的本地 Agent Runtime，主要运行形态是 CLI，
 ```text
 Clawkit Agent Runtime
   -> Safe Ops Capability Layer（clawkit-ops-mcp / clawkit-ops-loop）
+  -> Ops Delivery Composition（clawkit-ops-delivery）
   -> Ops Arena（Fixture / Hidden Ground Truth / Evaluator）
 ```
 
@@ -128,6 +129,9 @@ Built-in tools / MCP / local stores / observability
 | `clawkit-engine` | Agent runtime、执行模式、工具调用编排 | 终端 UI、具体 Provider JSON |
 | `clawkit-im` | 飞书、微信等通道适配 | Agent 状态机 |
 | `clawkit-cli` | 启动装配、REPL、命令路由、展示和审批 UI | 核心业务规则 |
+| `clawkit-ops-mcp` | 结构化运维工具（SSH forced-command MCP） | Agent loop、终端 UI |
+| `clawkit-ops-loop` | OPS 状态机、Discovery、Diagnosis、Fixture Contract、报告、通知 Outbox | 终端 UI、具体运维领域 |
+| `clawkit-ops-delivery` | OPS 报告/通知 composition 模块（wire 所有子组件） | 不承载新领域逻辑 |
 
 依赖原则：
 
@@ -135,6 +139,7 @@ Built-in tools / MCP / local stores / observability
 - `tools`、`memory` 和 `reliability` 是基础模块，不依赖 engine/cli/im；`reliability` 只依赖 `tools` 契约。
 - `engine` 依赖稳定的 Provider、Tool、Context、Memory、Observability、Reliability 契约。
 - `cli` 和 `im` 是入口适配层，不拥有 Agent 核心状态机。
+- `clawkit-ops-delivery` 是 composition 模块，依赖 `ops-loop` + `im`，不承载新领域逻辑。
 - 新能力放入能表达职责的最窄模块；组合根可以装配具体实现，但不能承载业务逻辑。
 
 ## 当前实现事实
@@ -146,6 +151,16 @@ Built-in tools / MCP / local stores / observability
 - 普通 ReAct、Plan-and-Execute、SubAgent 和 internal tools 已进入同一工具执行链；`ToolCallExecutor` 同时是唯一 Side Effect Gate——副作用工具必须生成 `ActionDescriptor`，否则 fail closed。
 - `clawkit-reliability` 承载取消/预算/Attempt journal/目标互斥/恢复扫描；结果未知 sticky、durable DISPATCH_INTENT、MANUAL_REQUIRED 不自动成功等硬门禁由测试机械断言。
 - 本地观测覆盖 run、turn、provider、tool、compact、approval 与 attempt 迁移事件；并发 run 隔离与 reader 容错已建立。
+
+OPS MVP-2 交付（2026-07-26）：
+- Discovery → Diagnosis 主链闭合：`RemoteDiscoveryMain` → `RemoteDiscoveryWorkflow` → `DeepSeekDiagnosisGate`（LLMProvider 适配）→ `RemoteIncidentResult`
+- 业务数据驱动 Fixture：`BusinessFixtureCase`、`BusinessInvariant`、`FixtureSeed`、100 账户 schema
+- HOT_ACCOUNT_CONTENTION_V1：远端验证通过，真实 PostgreSQL 锁竞争（k6: 20% 失败率, P95=800ms）
+- 确定性报告：`HumanIncidentReport` + 三种 Renderer（Markdown/JSON/飞书中文摘要）
+- 飞书通知 Outbox：幂等键 + CAS 保护 + `FeishuApiException` 结构化错误
+- 新增 `clawkit-ops-delivery` composition 模块：`RemoteIncidentDeliveryMain` 完整管线
+- 远端 Fixture 部署脚本 6 个 + 安全守护 + 合同测试
+- 全量 `mvn clean verify`：13 模块、850+ 测试、0 失败
 
 当前真实状态和下一步以 `TODO.md` 为准，不在本文维护逐项完成记录。
 
