@@ -28,8 +28,19 @@ public class McpClient {
         this.serverName = serverName;
     }
 
-    /** 握手：initialize → 检查协议版本 → notifications/initialized */
-    public void initialize() throws IOException {
+    /**
+     * Handshake: initialize → check protocol version → notifications/initialized.
+     *
+     * @return the server's initialize result, including serverInfo for
+     *         downstream attestation. Callers who don't need attestation
+     *         can ignore the return value.
+     */
+    public McpInitializeResult initialize() throws IOException {
+        return initialize(ExecutionControl.none());
+    }
+
+    /** initialize with cancellation/timeout support. */
+    public McpInitializeResult initialize(ExecutionControl control) throws IOException {
         ObjectNode params = MAPPER.createObjectNode();
         params.put("protocolVersion", PROTOCOL_VERSION);
         ObjectNode clientInfo = params.putObject("clientInfo");
@@ -37,7 +48,7 @@ public class McpClient {
         clientInfo.put("version", "1.0");
         params.putObject("capabilities").putObject("tools");
 
-        String resp = sendRequest("initialize", params);
+        String resp = sendRequest("initialize", params, control);
         JsonNode root = MAPPER.readTree(resp);
         JsonNode result = root.get("result");
         if (result == null) {
@@ -46,15 +57,25 @@ public class McpClient {
                 + (error != null ? error.toString() : resp));
         }
 
-        String serverVersion = result.path("protocolVersion").asText("");
-        if (!PROTOCOL_VERSION.equals(serverVersion) && !serverVersion.isEmpty()) {
-            log.warn("[MCP:{}] protocol version mismatch: client={}, server={}",
-                serverName, PROTOCOL_VERSION, serverVersion);
+        String serverProtocolVersion = result.path("protocolVersion").asText("");
+
+        // Strict: protocol version MUST match (§4.1)
+        if (!PROTOCOL_VERSION.equals(serverProtocolVersion)) {
+            throw new IOException("[MCP:" + serverName
+                + "] protocol version mismatch: expected " + PROTOCOL_VERSION
+                + " but got " + (serverProtocolVersion.isEmpty() ? "<none>" : serverProtocolVersion));
         }
+
+        JsonNode info = result.path("serverInfo");
+        String name = info.path("name").asText("");
+        String version = info.path("version").asText("");
 
         // 发送 initialized 通知（无 id，不等待响应）
         sendNotification("notifications/initialized");
-        log.info("[MCP:{}] handshake complete", serverName);
+        log.info("[MCP:{}] handshake complete — {}/{}", serverName, name, version);
+
+        return new McpInitializeResult(serverProtocolVersion, name, version,
+            info.isMissingNode() ? MAPPER.createObjectNode() : info);
     }
 
     /** 发现工具列表 */

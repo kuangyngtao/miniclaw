@@ -131,8 +131,10 @@ if [[ -f "${AUTH_KEYS}" ]] && grep -qF "${KEY_CONTENT}" "${AUTH_KEYS}" 2>/dev/nu
         log "authorized_keys already has forced-command entry — unchanged"
     else
         # Old entry without forced-command — replace it
-        cp "${AUTH_KEYS}" "${AUTH_KEYS}.bak.$(date +%s)"
-        grep -vF "${KEY_CONTENT}" "${AUTH_KEYS}.bak.$(date +%s)" > "${AUTH_KEYS}" || true
+        local ts
+        ts=$(date +%s)
+        cp "${AUTH_KEYS}" "${AUTH_KEYS}.bak.${ts}"
+        grep -vF "${KEY_CONTENT}" "${AUTH_KEYS}.bak.${ts}" > "${AUTH_KEYS}" || true
         echo "${FORCED_LINE}" >> "${AUTH_KEYS}"
         log "replaced plain key entry with forced-command entry"
     fi
@@ -247,13 +249,28 @@ else
     fail "sudoers syntax invalid — check ${SUDOERS_FILE}"
 fi
 
-# ── sshd_config hardening (§6.1) ──
+# ── sshd_config hardening (§6.1, PR-M1 §3.2) ──
 echo ""
 echo "=== SSH hardening ==="
 
 if [[ -f "${SSHD_CONFIG}" ]]; then
     SSHD_MATCH="Match User ${OPS_USER}"
+
+    # Backup before any modification
+    SSHD_BACKUP="${SSHD_CONFIG}.bak.$(date +%s)"
+    cp "${SSHD_CONFIG}" "${SSHD_BACKUP}"
+    log "backed up sshd_config to ${SSHD_BACKUP}"
+
     if ! grep -qF "${SSHD_MATCH}" "${SSHD_CONFIG}"; then
+        # ── PermitUserEnvironment must be global (§3.2) ──
+        # Appending it first, before the Match block.
+        # The Match block does NOT include PermitUserEnvironment
+        # (it is not allowed in Match blocks).
+        if ! grep -q '^PermitUserEnvironment' "${SSHD_CONFIG}"; then
+            sed -i '1a PermitUserEnvironment no' "${SSHD_CONFIG}"
+            log "added global PermitUserEnvironment no"
+        fi
+
         cat >> "${SSHD_CONFIG}" <<'SSHEOF'
 
 # clawkit opsro — key-only, no PTY, no forwarding (§6.1)
@@ -262,20 +279,28 @@ Match User opsro
     KbdInteractiveAuthentication no
     PermitTTY no
     DisableForwarding yes
-    PermitUserEnvironment no
     PermitUserRC no
 SSHEOF
         log "appended sshd_config Match block for ${OPS_USER}"
 
-        # Validate sshd config before reloading
+        # Validate before reloading; rollback on failure (§3.2)
         if sshd -t 2>/dev/null; then
             systemctl reload sshd 2>/dev/null || service sshd reload 2>/dev/null || true
             log "sshd config valid — reloaded"
         else
-            fail "sshd config invalid — NOT reloaded"
+            cp "${SSHD_BACKUP}" "${SSHD_CONFIG}"
+            sshd -t 2>/dev/null || warn "sshd config still invalid after rollback"
+            fail "sshd config invalid — rolled back to backup"
         fi
     else
         log "sshd_config Match block already present"
+        # Still validate config
+        if ! sshd -t 2>/dev/null; then
+            cp "${SSHD_BACKUP}" "${SSHD_CONFIG}"
+            fail "sshd config invalid — rolled back to backup"
+        else
+            log "sshd config valid"
+        fi
     fi
 else
     warn "sshd_config not found at ${SSHD_CONFIG}"

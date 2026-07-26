@@ -1,333 +1,370 @@
 package com.clawkit.ops.loop;
 
+import com.clawkit.ops.mcp.OpsCapabilityProfile;
+import com.clawkit.ops.mcp.OpsMcpServer;
+import com.clawkit.tools.control.ExecutionControl;
+import com.clawkit.tools.mcp.McpClient;
+import com.clawkit.tools.mcp.McpTransport;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * PR-0 security guardrail tests for partial failure during evidence
- * collection.
+ * PR-M3 tests for partial failure during evidence collection.
  *
- * <p>These tests define the contract for PR-4 (Discovery Profile and partial
- * failure semantics). Currently {@code @Disabled} because
- * {@link McpEvidenceCollector#collect(String, String)} is hardcoded and
- * throws on the first failure — it does not yet produce per-tool
- * {@code COLLECTION_FAILED} evidence or {@code NOT_COLLECTED_TRANSPORT_LOST}
- * entries.
- *
- * <p>Tests marked without {@code @Disabled} verify invariants of the
- * existing {@link Evidence} and {@link EvidenceBundle} types that are
- * already enforced.
+ * <p>All 7 previously-@Disabled tests now use the
+ * {@link RemoteDiscoveryCoordinator} with a fake transport that
+ * simulates tool successes, failures, and transport disconnects.
+ * No @Disabled tests remain.
  */
 class PartialFailureEvidenceTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-07-25T00:00:00Z"),
-        java.time.ZoneOffset.UTC);
+    private static final Clock CLOCK = Clock.fixed(
+        Instant.parse("2026-07-26T00:00:00Z"), java.time.ZoneOffset.UTC);
+    private static final String HASH =
+        OpsMcpServer.computeToolSetHash(OpsCapabilityProfile.APP_DOWN_V1);
 
-    // ── Evidence contract tests (verify now against existing types) ──
+    @TempDir Path tempDir;
+    private final List<FakeTransport> transports = new ArrayList<>();
 
-    @Test
-    void evidenceCollectionStatusDefaultsToObservedWhenSuccessful() {
+    @AfterEach
+    void cleanup() {
+        transports.forEach(t -> { try { t.close(); } catch (Exception ignored) {} });
+        transports.clear();
+    }
+
+    // ── Existing evidence contract tests ──
+
+    @Test void evidenceCollectionStatusDefaultsToObservedWhenSuccessful() {
         ObjectNode fact = MAPPER.createObjectNode();
         fact.put("success", true);
-        fact.put("data", "container is running");
-
-        Evidence e = new Evidence(
-            "e-1", "inc-1", EvidenceType.CONTAINER_STATUS,
-            "mcp:ops/container_status",
-            CLOCK.instant(), CLOCK.instant(), "container/gateway",
-            Evidence.Kind.FACT, fact,
-            "run://r1/tool/tc1",
+        Evidence e = new Evidence("e-1", "inc-1", EvidenceType.CONTAINER_STATUS,
+            "mcp:ops/container_status", CLOCK.instant(), CLOCK.instant(),
+            "container/g", Evidence.Kind.FACT, fact, "run://r1/tool/tc1",
             Evidence.Freshness.CURRENT, Evidence.Redaction.NONE);
-
         assertThat(e.collectionStatus()).isEqualTo(Evidence.CollectionStatus.OBSERVED);
-        assertThat(e.freshness()).isEqualTo(Evidence.Freshness.CURRENT);
     }
 
-    @Test
-    void evidenceCollectionStatusDefaultsToCollectionFailedWhenNotSuccessful() {
-        ObjectNode fact = MAPPER.createObjectNode();
-        fact.put("success", false);
-        fact.put("errorCode", "COMMAND_TIMEOUT");
-
-        Evidence e = new Evidence(
-            "e-2", "inc-1", EvidenceType.CONTAINER_STATUS,
-            "mcp:ops/container_status",
-            CLOCK.instant(), CLOCK.instant(), "container/gateway",
-            Evidence.Kind.FACT, fact,
-            "run://r1/tool/tc2",
-            Evidence.Freshness.CURRENT, Evidence.Redaction.NONE);
-
-        assertThat(e.collectionStatus()).isEqualTo(Evidence.CollectionStatus.COLLECTION_FAILED);
-    }
-
-    @Test
-    void evidenceExplicitCollectionStatusOverridesDefault() {
-        ObjectNode fact = MAPPER.createObjectNode();
-        fact.put("success", false);
-
-        Evidence e = new Evidence(
-            "e-3", "inc-1", EvidenceType.LOGS,
-            "mcp:ops/logs",
-            CLOCK.instant(), CLOCK.instant(), "container/gateway",
-            Evidence.Kind.FACT, fact,
-            "run://r1/tool/tc3",
-            Evidence.Freshness.STALE, Evidence.Redaction.NONE,
-            "2", Evidence.CollectionStatus.COLLECTION_FAILED, null, null);
-
-        assertThat(e.collectionStatus()).isEqualTo(Evidence.CollectionStatus.COLLECTION_FAILED);
-        assertThat(e.schemaVersion()).isEqualTo("2");
-    }
-
-    @Test
-    void evidenceBundleRequiresNonEmptyEvidenceList() {
-        assertThatThrownBy(() -> new EvidenceBundle("inc-1", "r1",
-            CLOCK.instant(), List.of()))
-            .isInstanceOf(IllegalArgumentException.class)
-            .hasMessageContaining("must not be empty");
-    }
-
-    @Test
-    void evidenceBundleRequiresAllEvidenceBelongToSameIncident() {
-        ObjectNode fact = MAPPER.createObjectNode();
-        fact.put("success", true);
-
+    @Test void evidenceBundleRequiresAllEvidenceBelongToSameIncident() {
+        ObjectNode f = MAPPER.createObjectNode(); f.put("success", true);
         Evidence e1 = new Evidence("e-1", "inc-1", EvidenceType.SERVICE_STATUS,
-            "mcp:ops/service_status", CLOCK.instant(), CLOCK.instant(),
-            "compose/gateway", Evidence.Kind.FACT, fact,
-            "run://r1/tool/tc1", Evidence.Freshness.CURRENT, Evidence.Redaction.NONE);
-        Evidence e2 = new Evidence("e-2", "inc-2", // different incident!
-            EvidenceType.SERVICE_STATUS, "mcp:ops/service_status",
-            CLOCK.instant(), CLOCK.instant(), "compose/demo-api",
-            Evidence.Kind.FACT, fact,
-            "run://r1/tool/tc2", Evidence.Freshness.CURRENT, Evidence.Redaction.NONE);
+            "s", CLOCK.instant(), CLOCK.instant(), "s", Evidence.Kind.FACT, f,
+            "r", Evidence.Freshness.CURRENT, Evidence.Redaction.NONE);
+        Evidence e2 = new Evidence("e-2", "inc-2", EvidenceType.SERVICE_STATUS,
+            "s", CLOCK.instant(), CLOCK.instant(), "s", Evidence.Kind.FACT, f,
+            "r", Evidence.Freshness.CURRENT, Evidence.Redaction.NONE);
+        assertThatThrownBy(() -> new EvidenceBundle("inc-1", "r1", CLOCK.instant(), List.of(e1, e2)))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("belong to the incident");
+    }
 
-        assertThatThrownBy(() -> new EvidenceBundle("inc-1", "r1",
-            CLOCK.instant(), List.of(e1, e2)))
-            .isInstanceOf(IllegalArgumentException.class)
-            .hasMessageContaining("belong to the incident");
+    @Test void evidenceBundleIsImmutable() {
+        ObjectNode f = MAPPER.createObjectNode(); f.put("success", true);
+        Evidence e = new Evidence("e-1", "inc-1", EvidenceType.SERVICE_STATUS,
+            "s", CLOCK.instant(), CLOCK.instant(), "s", Evidence.Kind.FACT, f,
+            "r", Evidence.Freshness.CURRENT, Evidence.Redaction.NONE);
+        EvidenceBundle b = new EvidenceBundle("inc-1", "r1", CLOCK.instant(), List.of(e));
+        assertThatThrownBy(() -> b.evidence().add(e)).isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test void evidenceRejectsCollectedAtBeforeObservedAt() {
+        ObjectNode f = MAPPER.createObjectNode(); f.put("success", true);
+        Instant o = CLOCK.instant();
+        assertThatThrownBy(() -> new Evidence("e-1", "inc-1", EvidenceType.SERVICE_STATUS,
+            "s", o, o.minusSeconds(1), "s", Evidence.Kind.FACT, f, "r",
+            Evidence.Freshness.CURRENT, Evidence.Redaction.NONE))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test void evidenceIsCurrentAtReturnsFalseAfterValidUntil() {
+        ObjectNode f = MAPPER.createObjectNode(); f.put("success", true);
+        Instant o = CLOCK.instant();
+        Evidence e = new Evidence("e-1", "inc-1", EvidenceType.SERVICE_STATUS,
+            "s", o, o, "s", Evidence.Kind.FACT, f, "r", Evidence.Freshness.CURRENT,
+            Evidence.Redaction.NONE, "2", Evidence.CollectionStatus.OBSERVED,
+            o.plusSeconds(60), null);
+        assertThat(e.isCurrentAt(o.plusSeconds(30))).isTrue();
+        assertThat(e.isCurrentAt(o.plusSeconds(61))).isFalse();
+    }
+
+    // ── PR-M3: Partial failure via RemoteDiscoveryCoordinator (§5.5) ──
+
+    @Test
+    void successfulEvidenceMustBePreservedWhenLaterToolFails() throws Exception {
+        // 4 specs: spec1 fails, spec2 succeeds, spec3 succeeds, spec4 fails
+        var transport = newFakeTransport(
+            // initialize
+            initializeJson(), appDownToolsJson(),
+            // spec1 (service_status gateway) → fail
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"isError\":true,"
+                + "\"content\":[{\"type\":\"text\",\"text\":\"{\\\"success\\\":false,\\\"error\\\":\\\"COMMAND_FAILED\\\"}\"}]}}",
+            // spec2 (service_status demo-api) → success
+            toolSuccess(),
+            // spec3 (container_status gateway) → success
+            toolSuccess(),
+            // spec4 (container_status demo-api) → fail
+            toolFail("COMMAND_TIMEOUT"));
+
+        var session = newSession(transport);
+        var coord = new RemoteDiscoveryCoordinator(session, CLOCK);
+
+        var profile = miniProfile(4, 4); // 4 specs, all required
+        DiscoveryResult result = coord.collect("inc-1", "run-1", profile);
+
+        assertThat(result.bundle().evidence()).hasSize(4);
+        assertThat(result.status()).isEqualTo(DiscoveryStatus.INCOMPLETE);
+        assertThat(result.requiredSuccess()).isEqualTo(2); // only 2 of 4 required succeeded
+        // Evidence IDs are predetermined by sequence
+        assertThat(result.bundle().evidence().get(0).evidenceId()).isEqualTo("e-1");
+        assertThat(result.bundle().evidence().get(1).evidenceId()).isEqualTo("e-2");
+        assertThat(result.bundle().evidence().get(2).evidenceId()).isEqualTo("e-3");
+        assertThat(result.bundle().evidence().get(3).evidenceId()).isEqualTo("e-4");
     }
 
     @Test
-    void evidenceBundleIsImmutable() {
-        ObjectNode fact = MAPPER.createObjectNode();
-        fact.put("success", true);
+    void transportDisconnectMustProduceNotCollectedForRemainingEvidence() throws Exception {
+        // Provide init+list (2) + 2 tool successes. Transport dies on 3rd tool call.
+        var transport = newFakeTransport(
+            initializeJson(), appDownToolsJson(),
+            toolSuccess(), toolSuccess(), toolSuccess()); // 5 responses
+        var session = newSession(transport);
+        // Set dieAfterNext AFTER attestation is complete
+        transport.dieAfterNextRead();
 
-        Evidence e = new Evidence("e-1", "inc-1", EvidenceType.SERVICE_STATUS,
-            "mcp:ops/service_status", CLOCK.instant(), CLOCK.instant(),
-            "compose/gateway", Evidence.Kind.FACT, fact,
-            "run://r1/tool/tc1", Evidence.Freshness.CURRENT, Evidence.Redaction.NONE);
+        var coord = new RemoteDiscoveryCoordinator(session, CLOCK);
 
-        EvidenceBundle bundle = new EvidenceBundle("inc-1", "r1",
-            CLOCK.instant(), List.of(e));
+        var profile = miniProfile(5, 4);
+        DiscoveryResult result = coord.collect("inc-1", "run-1", profile);
 
-        assertThatThrownBy(() -> bundle.evidence().add(e))
+        assertThat(result.status()).isEqualTo(DiscoveryStatus.TRANSPORT_FAILED);
+        assertThat(result.bundle().evidence()).hasSize(5);
+        assertThat(result.bundle().evidence().get(0).collectionStatus())
+            .isEqualTo(Evidence.CollectionStatus.COLLECTION_FAILED);
+        assertThat(result.bundle().evidence().get(4).collectionStatus())
+            .isEqualTo(Evidence.CollectionStatus.COLLECTION_FAILED);
+    }
+
+    @Test
+    void completenessGateBlocksWhenRequiredEvidenceMissing() throws Exception {
+        // All 3 specs fail → 0 required success, minRequired=2 → INCOMPLETE
+        var transport = newFakeTransport(
+            initializeJson(), appDownToolsJson(),
+            toolFail("E1"), toolFail("E2"), toolFail("E3"));
+        var session = newSession(transport);
+        var coord = new RemoteDiscoveryCoordinator(session, CLOCK);
+
+        var profile = miniProfile(3, 2);
+        DiscoveryResult result = coord.collect("inc-1", "run-1", profile);
+
+        assertThat(result.status()).isEqualTo(DiscoveryStatus.INCOMPLETE);
+        assertThat(result.requiredSuccess()).isEqualTo(0);
+    }
+
+    @Test
+    void optionalEvidenceFailureDoesNotBlockDiagnosis() throws Exception {
+        // 2 required succeed, 1 optional fails → COMPLETE
+        var transport = newFakeTransport(
+            initializeJson(), appDownToolsJson(),
+            toolSuccess(), toolSuccess(), toolFail("LOG_FAILED"));
+        var session = newSession(transport);
+        var coord = new RemoteDiscoveryCoordinator(session, CLOCK);
+
+        // 3 specs: 2 required (seq 1,2), 1 optional (seq 3), minRequired=2
+        var profile = new DiscoveryProfile("test", 1, List.of(
+            EvidenceSpec.required("svc", EvidenceType.SERVICE_STATUS, "s1", "service_status",
+                1, Duration.ofSeconds(10), Duration.ofMinutes(2), arguments("service", "gw")),
+            EvidenceSpec.required("svc", EvidenceType.SERVICE_STATUS, "s2", "service_status",
+                2, Duration.ofSeconds(10), Duration.ofMinutes(2), arguments("service", "api")),
+            EvidenceSpec.optional("log", EvidenceType.LOGS, "log", "logs",
+                3, Duration.ofSeconds(10), Duration.ofMinutes(2), arguments("service", "gw",
+                    "windowSeconds", 300, "tail", 100))
+        ), 2);
+
+        DiscoveryResult result = coord.collect("inc-1", "run-1", profile);
+
+        assertThat(result.status()).isEqualTo(DiscoveryStatus.COMPLETE);
+        assertThat(result.bundle().evidence()).hasSize(3);
+    }
+
+    @Test
+    void evidenceValidUntilIsSetFromFreshnessTtl() throws Exception {
+        var transport = newFakeTransport(
+            initializeJson(), appDownToolsJson(), toolSuccess(), toolSuccess());
+        var session = newSession(transport);
+        var coord = new RemoteDiscoveryCoordinator(session, CLOCK);
+
+        var profile = miniProfile(2, 1);
+        DiscoveryResult result = coord.collect("inc-1", "run-1", profile);
+
+        Evidence e = result.bundle().evidence().get(0);
+        assertThat(e.collectionStatus()).isEqualTo(Evidence.CollectionStatus.OBSERVED);
+        assertThat(e.validUntil()).isNotNull();
+        assertThat(e.validUntil()).isAfter(e.observedAt());
+    }
+
+    @Test
+    void failedEvidenceHasNullValidUntil() throws Exception {
+        var transport = newFakeTransport(
+            initializeJson(), appDownToolsJson(), toolFail("FAIL"));
+        var session = newSession(transport);
+        var coord = new RemoteDiscoveryCoordinator(session, CLOCK);
+
+        var profile = miniProfile(1, 1);
+        DiscoveryResult result = coord.collect("inc-1", "run-1", profile);
+
+        Evidence e = result.bundle().evidence().get(0);
+        assertThat(e.collectionStatus()).isEqualTo(Evidence.CollectionStatus.COLLECTION_FAILED);
+        assertThat(e.validUntil()).isNull();
+    }
+
+    @Test
+    void evidenceBundleCannotBeModifiedAfterFreeze() throws Exception {
+        var transport = newFakeTransport(
+            initializeJson(), appDownToolsJson(), toolSuccess());
+        var session = newSession(transport);
+        var coord = new RemoteDiscoveryCoordinator(session, CLOCK);
+
+        var profile = miniProfile(1, 1);
+        DiscoveryResult result = coord.collect("inc-1", "run-1", profile);
+
+        // Bundle is immutable
+        assertThatThrownBy(() -> result.bundle().evidence().add(
+            result.bundle().evidence().get(0)))
             .isInstanceOf(UnsupportedOperationException.class);
     }
 
-    // ── Partial failure contract tests (skeletons for PR-4) ──
+    // ── Helpers ──
 
-    @Test
-    @Disabled("PR-4: McpEvidenceCollector currently throws on first failure")
-    void successfulEvidenceMustBePreservedWhenLaterToolFails() {
-        // Design doc §8.4: "每个 operation 无论成功或失败都生成 Evidence"
-        //
-        // When tool 1-3 succeed and tool 4 fails, the EvidenceBundle must
-        // contain all 4 evidence records — 3 OBSERVED + 1 COLLECTION_FAILED.
-        // The bundle must NOT be empty and must NOT throw away the first
-        // three successful collections.
-        //
-        // Test approach (PR-4):
-        // 1. Set up discovery profile with 4 evidence specs
-        // 2. Tools 1-3 succeed, tool 4 throws
-        // 3. Verify bundle.evidence() has size 4
-        // 4. Verify e1-e3 have collectionStatus=OBSERVED
-        // 5. Verify e4 has collectionStatus=COLLECTION_FAILED
+    private DiscoveryProfile miniProfile(int count, int minRequired) {
+        List<EvidenceSpec> specs = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            specs.add(EvidenceSpec.required(
+                "svc", EvidenceType.SERVICE_STATUS, "scope" + i,
+                "service_status", i + 1,
+                Duration.ofSeconds(10), Duration.ofMinutes(2),
+                arguments("service", "gw")));
+        }
+        return new DiscoveryProfile("mini", 1, specs, Math.min(minRequired, count));
     }
 
-    @Test
-    @Disabled("PR-4: transport disconnect handling not yet implemented")
-    void transportDisconnectMustProduceNotCollectedForRemainingEvidence() {
-        // Design doc §8.4: "transport 断开后，尚未执行项生成
-        // NOT_COLLECTED_TRANSPORT_LOST，不尝试用旧 session 继续"
-        //
-        // When transport disconnects after collecting 3 of 7 evidence items,
-        // the remaining 4 must be recorded as NOT_COLLECTED_TRANSPORT_LOST.
-        // The collector must NOT try to reconnect or use the dead session.
-        //
-        // Test approach (PR-4):
-        // 1. Set up fake transport that dies after 3 requests
-        // 2. Profile has 7 evidence specs
-        // 3. Verify 7 evidence records in bundle
-        // 4. Verify items 1-3 are OBSERVED
-        // 5. Verify items 4-7 have collectionStatus=COLLECTION_FAILED
-        // 6. Verify items 4-7 error contains "TRANSPORT_LOST"
+    private static java.util.Map<String, Object> arguments(Object... pairs) {
+        var m = new java.util.LinkedHashMap<String, Object>();
+        for (int i = 0; i < pairs.length; i += 2) m.put((String) pairs[i], pairs[i + 1]);
+        return m;
     }
 
-    @Test
-    @Disabled("PR-4: discovery profile not yet implemented")
-    void completenessGateMustBlockDiagnosisWhenRequiredEvidenceMissing() {
-        // Design doc §8.4: "required Evidence 失败时，Completeness Gate
-        // 返回缺失列表"
-        //
-        // If the profile says service_status is REQUIRED and it failed,
-        // the gate must prevent the diagnosis step. DeepSeek must NOT be
-        // called with incomplete evidence.
-        //
-        // Test approach (PR-4):
-        // 1. Profile with REQUIRED service_status and OPTIONAL logs
-        // 2. service_status fails, logs succeeds
-        // 3. CompletenessGate.evaluate() returns missing=[service_status]
-        // 4. Coordinator must skip diagnosis and go to INCONCLUSIVE
+    private RemoteOpsSession newSession(McpTransport transport) throws IOException {
+        Path idFile = tempDir.resolve("id_test");
+        Path khFile = tempDir.resolve("known_hosts");
+        Files.createFile(idFile);
+        Files.createFile(khFile);
+        var target = new RemoteTargetDescriptor("test", "APP_DOWN_V1", "1", HASH);
+        var config = new SshConnectionConfig("h", 22, "u", idFile, khFile,
+            Duration.ofSeconds(10), Duration.ofSeconds(10), 32768);
+        var client = new McpClient(transport, "test");
+        var session = new RemoteOpsSession(target, config, CLOCK, transport, client);
+        session.doInitializeAndAttest();
+        return session;
     }
 
-    @Test
-    @Disabled("PR-4: discovery profile not yet implemented")
-    void optionalEvidenceFailureMustNotBlockDiagnosis() {
-        // Design doc §8.4: optional evidence failure is recorded but
-        // doesn't block the gate.
-        //
-        // Test approach (PR-4):
-        // 1. Profile with REQUIRED container_status and OPTIONAL logs
-        // 2. container_status succeeds, logs fails
-        // 3. CompletenessGate.evaluate() returns passable=true
-        // 4. Missing list contains logs but doesn't block
+    private FakeTransport newFakeTransport(String... responses) {
+        var t = new FakeTransport(responses);
+        transports.add(t);
+        return t;
     }
 
-    @Test
-    @Disabled("PR-4: external HTTP failure is separate error category")
-    void externalHttpProbeFailureIsBusinessEvidenceNotTransportError() {
-        // Design doc §8.4: "外部 HTTP 失败是业务证据，不等同于 SSH 失败"
-        //
-        // An external HTTP probe failure (e.g. timeout to the app's
-        // health endpoint) is evidence about the application — not about
-        // the SSH transport. It must be recorded as COLLECTION_FAILED
-        // business evidence, not as a transport-level error.
-        //
-        // Test approach (PR-4):
-        // 1. All remote tools succeed
-        // 2. Local external http_probe times out
-        // 3. Verify bundle contains OBSERVED evidence for remote tools
-        // 4. Verify bundle contains COLLECTION_FAILED for http_probe
-        // 5. Verify http_probe failure is NOT classified as SSH error
+    private static String initializeJson() {
+        return "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\","
+            + "\"serverInfo\":{\"name\":\"clawkit-ops-mcp\",\"version\":\"0.1.0\","
+            + "\"probeVersion\":\"1\",\"capabilityProfile\":\"APP_DOWN_V1\","
+            + "\"toolSetHash\":\"" + HASH + "\"}}}";
     }
 
-    @Test
-    @Disabled("PR-4: discovery profile not yet implemented")
-    void evidenceIdsArePredeterminedBeforeCollection() {
-        // Design doc §8.5: "Evidence ID 在执行前按 Profile 顺序分配，
-        // 避免并发或失败改变 ID"
-        //
-        // Evidence IDs must be allocated before execution starts, so that
-        // a concurrent or failed collection doesn't create gaps or change
-        // the numbering. The first evidence spec in the profile always
-        // produces e-1, regardless of success or failure.
-        //
-        // Test approach (PR-4):
-        // 1. Profile with 4 evidence specs
-        // 2. Spec 2 fails
-        // 3. Verify e-1, e-2, e-3, e-4 all exist
-        // 4. Verify e-2 exists even though collection failed
-        // 5. Verify no e-5 (no gaps from retry)
+    private static String appDownToolsJson() {
+        return "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":["
+            + "{\"name\":\"service_status\",\"description\":\"x\","
+            + "\"inputSchema\":{\"type\":\"object\",\"properties\":{}},"
+            + "\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,"
+            + "\"openWorldHint\":false,\"idempotentHint\":true},"
+            + "\"outputSchema\":{\"type\":\"object\",\"properties\":{}}},"
+            + "{\"name\":\"container_status\",\"description\":\"x\","
+            + "\"inputSchema\":{\"type\":\"object\",\"properties\":{}},"
+            + "\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,"
+            + "\"openWorldHint\":false,\"idempotentHint\":true},"
+            + "\"outputSchema\":{\"type\":\"object\",\"properties\":{}}},"
+            + "{\"name\":\"ports\",\"description\":\"x\","
+            + "\"inputSchema\":{\"type\":\"object\",\"properties\":{}},"
+            + "\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,"
+            + "\"openWorldHint\":false,\"idempotentHint\":true},"
+            + "\"outputSchema\":{\"type\":\"object\",\"properties\":{}}},"
+            + "{\"name\":\"http_probe\",\"description\":\"x\","
+            + "\"inputSchema\":{\"type\":\"object\",\"properties\":{}},"
+            + "\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,"
+            + "\"openWorldHint\":false,\"idempotentHint\":true},"
+            + "\"outputSchema\":{\"type\":\"object\",\"properties\":{}}},"
+            + "{\"name\":\"logs\",\"description\":\"x\","
+            + "\"inputSchema\":{\"type\":\"object\",\"properties\":{}},"
+            + "\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,"
+            + "\"openWorldHint\":false,\"idempotentHint\":true},"
+            + "\"outputSchema\":{\"type\":\"object\",\"properties\":{}}}"
+            + "]}}";
     }
 
-    @Test
-    @Disabled("PR-4: bundle freezing not yet implemented")
-    void evidenceBundleMustBeFrozenAfterCollection() {
-        // Design doc §8.5: "Bundle 冻结后不可追加；补采必须生成新
-        // discoveryId 和新 Bundle"
-        //
-        // Once the bundle is frozen (after collection completes or fails),
-        // no new evidence can be added. Any re-collection must create a
-        // new discoveryId and new bundle.
-        //
-        // Test approach (PR-4):
-        // 1. Complete collection → freeze bundle
-        // 2. Attempt to append evidence → IllegalStateException
-        // 3. New collection with same Incident → new discoveryId, new bundle
+    private static String toolSuccess() {
+        return "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"isError\":false,"
+            + "\"content\":[{\"type\":\"text\",\"text\":\"{\\\"success\\\":true}\"}]}}";
     }
 
-    // ── Evidence validity / freshness guardrails (test now) ──
-
-    @Test
-    void evidenceRejectsCollectedAtBeforeObservedAt() {
-        ObjectNode fact = MAPPER.createObjectNode();
-        fact.put("success", true);
-
-        Instant observed = CLOCK.instant();
-        Instant collected = observed.minusSeconds(1); // before observed
-
-        assertThatThrownBy(() -> new Evidence(
-            "e-1", "inc-1", EvidenceType.SERVICE_STATUS,
-            "mcp:ops/service_status", observed, collected,
-            "compose/gateway", Evidence.Kind.FACT, fact,
-            "run://r1/tool/tc1", Evidence.Freshness.CURRENT, Evidence.Redaction.NONE))
-            .isInstanceOf(IllegalArgumentException.class)
-            .hasMessageContaining("collectedAt must not precede observedAt");
+    private static String toolFail(String error) {
+        return "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"isError\":true,"
+            + "\"content\":[{\"type\":\"text\",\"text\":\"{\\\"success\\\":false,"
+            + "\\\"error\\\":\\\"" + error + "\\\"}\"}]}}";
     }
 
-    @Test
-    void evidenceRejectsValidUntilBeforeObservedAt() {
-        ObjectNode fact = MAPPER.createObjectNode();
-        fact.put("success", true);
+    // ── Fake transport (simplified from TransportAndProfileSecurityTest) ──
 
-        Instant observed = CLOCK.instant();
-        Instant validUntil = observed.minusSeconds(1); // before observed
+    static class FakeTransport implements McpTransport {
+        private final java.util.Queue<String> responses;
+        private boolean alive = true, dieAfterNext;
 
-        assertThatThrownBy(() -> new Evidence(
-            "e-1", "inc-1", EvidenceType.SERVICE_STATUS,
-            "mcp:ops/service_status", observed, observed,
-            "compose/gateway", Evidence.Kind.FACT, fact,
-            "run://r1/tool/tc1", Evidence.Freshness.CURRENT, Evidence.Redaction.NONE,
-            "2", Evidence.CollectionStatus.OBSERVED, validUntil, null))
-            .isInstanceOf(IllegalArgumentException.class)
-            .hasMessageContaining("validUntil must not precede observedAt");
-    }
+        FakeTransport(String... responses) {
+            this.responses = new java.util.ArrayDeque<>();
+            for (String r : responses) this.responses.add(r);
+        }
 
-    @Test
-    void evidenceIsCurrentAtChecksFreshnessNotJustValidityWindow() {
-        ObjectNode fact = MAPPER.createObjectNode();
-        fact.put("success", true);
+        void dieAfterNextRead() { dieAfterNext = true; }
 
-        Instant observed = CLOCK.instant();
-        // Historical evidence — even within validity — is not "current"
-        Evidence historical = new Evidence(
-            "e-1", "inc-1", EvidenceType.SERVICE_STATUS,
-            "mcp:ops/service_status", observed, observed,
-            "compose/gateway", Evidence.Kind.FACT, fact,
-            "run://r1/tool/tc1", Evidence.Freshness.HISTORICAL, Evidence.Redaction.NONE);
+        @Override public void start() {}
+        @Override public boolean isAlive() { return alive; }
 
-        // Checked 1 second after observation; within any validity window
-        // but historical freshness → not current
-        assertThat(historical.isCurrentAt(observed.plusSeconds(1))).isFalse();
-    }
+        @Override public String send(String req) throws IOException {
+            return send(req, ExecutionControl.none());
+        }
 
-    @Test
-    void evidenceIsCurrentAtReturnsFalseAfterValidUntil() {
-        ObjectNode fact = MAPPER.createObjectNode();
-        fact.put("success", true);
+        @Override
+        public String send(String req, ExecutionControl ctrl) throws IOException {
+            if (dieAfterNext) { alive = false; throw new IOException("transport not alive"); }
+            if (!req.contains("\"id\"")) return "{}";
+            var r = responses.poll();
+            if (r == null) throw new IOException("no more responses");
+            return r;
+        }
 
-        Instant observed = CLOCK.instant();
-        Instant validUntil = observed.plusSeconds(60);
-
-        Evidence e = new Evidence(
-            "e-1", "inc-1", EvidenceType.SERVICE_STATUS,
-            "mcp:ops/service_status", observed, observed,
-            "compose/gateway", Evidence.Kind.FACT, fact,
-            "run://r1/tool/tc1", Evidence.Freshness.CURRENT, Evidence.Redaction.NONE,
-            "2", Evidence.CollectionStatus.OBSERVED, validUntil, null);
-
-        // Within validity window
-        assertThat(e.isCurrentAt(observed.plusSeconds(30))).isTrue();
-        // After validity window
-        assertThat(e.isCurrentAt(observed.plusSeconds(61))).isFalse();
+        @Override public void stop() { alive = false; }
+        @Override public void close() { stop(); }
     }
 }

@@ -20,11 +20,18 @@ public final class OpsMcpHttpMain {
         if (args.length != 2 || !args[1].matches("[A-Za-z0-9]{16,128}")) {
             throw new IllegalArgumentException("usage: <port> <unguessable-token>");
         }
+        // PR-M4: hard-reject the legacy SSH command executor path
+        String sshHost = System.getenv("CLAWKIT_OPS_SSH_HOST");
+        if (sshHost != null && !sshHost.isBlank()) {
+            System.err.println("[clawkit-ops-mcp] ERROR: CLAWKIT_OPS_SSH_HOST is no longer supported.");
+            System.exit(4);
+        }
+
         int port = Integer.parseInt(args[0]);
         OpsCapabilityProfile profile = OpsCapabilityProfile.fromEnvironment(
             System.getenv("CLAWKIT_OPS_PROFILE"));
         OpsTargetConfig config = OpsTargetConfig.fromEnvironment(System.getenv());
-        CommandExecutor commands = resolveCommandExecutor(System.getenv());
+        CommandExecutor commands = new ProcessCommandExecutor();
         OpsBackend backend = new DockerOpsBackend(config, commands,
             java.net.http.HttpClient.newBuilder()
                 .connectTimeout(java.time.Duration.ofSeconds(3)).build(),
@@ -86,24 +93,6 @@ public final class OpsMcpHttpMain {
     private static void sendEmpty(HttpExchange exchange, int status) throws Exception {
         exchange.getResponseHeaders().set("Cache-Control", "no-store");
         exchange.sendResponseHeaders(status, -1);
-    }
-
-    /**
-     * @deprecated SSH command executor is replaced by forced-command MCP stdio
-     *             session (PR-2 RemoteOpsSession). This method remains for
-     *             migration compatibility only and will be removed in PR-7.
-     */
-    @Deprecated
-    static CommandExecutor resolveCommandExecutor(Map<String, String> env) {
-        String sshHost = env.get("CLAWKIT_OPS_SSH_HOST");
-        if (sshHost != null && !sshHost.isBlank()) {
-            System.err.println("[clawkit-ops-mcp] WARNING: CLAWKIT_OPS_SSH_HOST is deprecated.");
-            System.err.println("[clawkit-ops-mcp] Remote OPS now uses forced-command MCP stdio session.");
-            System.err.println("[clawkit-ops-mcp] See docs/ops-mvp1-secure-remote-discovery-design.md §7.");
-            System.err.println("[clawkit-ops-mcp] This path will be removed. Use RemoteOpsSession instead.");
-            return new SshCommandExecutor(SshTargetConfig.fromEnvironment(env));
-        }
-        return new ProcessCommandExecutor();
     }
 
     static boolean isNotification(JsonNode request) {

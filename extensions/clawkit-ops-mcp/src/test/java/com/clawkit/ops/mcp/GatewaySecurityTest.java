@@ -1,176 +1,242 @@
 package com.clawkit.ops.mcp;
 
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.List;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * PR-0 security guardrail tests for the remote gateway and launcher.
+ * PR-M1 security guardrail tests for the remote gateway, launcher, sudoers,
+ * and SSH configuration.
  *
- * <p>These tests define the security invariants that the remote gateway
- * ({@code clawkit-ops-gateway}) and fixed launcher
- * ({@code clawkit-ops-mcp-stdio}) must enforce. They are contract tests
- * for PR-1 (P0 forced-command remote interface).
+ * <p>All tests are static content analysis — they read script and config
+ * sources from the project tree and verify structural invariants.
+ * No {@code @Disabled} tests.
  *
- * <p>Tests are currently {@code @Disabled} because the gateway/launcher
- * artifacts do not exist yet. Each test references the specific invariant
- * from the design doc and the PR that will implement it.
+ * <p>Design doc §6.1–§6.2. Execution plan §3.
  */
 class GatewaySecurityTest {
 
-    // ── Gateway: SSH_ORIGINAL_COMMAND ignored ──
+    private static final Path PROJECT_ROOT = findProjectRoot();
+    private static final Path GATEWAY_PATH =
+        PROJECT_ROOT.resolve("ops-fixtures/remote/clawkit-ops-gateway");
+    private static final Path LAUNCHER_PATH =
+        PROJECT_ROOT.resolve("ops-fixtures/remote/clawkit-ops-mcp-stdio");
+    private static final Path SETUP_PATH =
+        PROJECT_ROOT.resolve("ops-fixtures/remote/setup-opsro.sh");
+    private static final String LAUNCHER_DST = "/usr/local/sbin/clawkit-ops-mcp-stdio";
+
+    private static Path findProjectRoot() {
+        Path cwd = Paths.get("").toAbsolutePath();
+        for (Path p = cwd; p != null; p = p.getParent()) {
+            if (Files.isDirectory(p.resolve("ops-fixtures/remote"))) return p;
+        }
+        return cwd.resolve("../../").normalize();
+    }
+
+    // ── helpers ──
+
+    /** Lines that are not comments (don't start with # after optional whitespace). */
+    private static List<String> codeLines(Path path) throws Exception {
+        return Files.readAllLines(path).stream()
+            .map(String::strip)
+            .filter(l -> !l.isEmpty() && !l.startsWith("#"))
+            .collect(Collectors.toList());
+    }
+
+    /** Full file content as a single string. */
+    private static String full(Path path) throws Exception {
+        return Files.readString(path);
+    }
+
+    // ── Gateway: SSH_ORIGINAL_COMMAND rejected (§6.2) ──
 
     @Test
-    @Disabled("PR-1: gateway artifact not yet built")
-    void gatewayMustIgnoreSshOriginalCommand() {
-        // Design doc §6.2: "不读取 SSH_ORIGINAL_COMMAND，不做 shell 参数拼接"
-        //
-        // When OpenSSH forced-command is configured, SSH_ORIGINAL_COMMAND
-        // contains whatever the client typed. The gateway MUST NOT read or
-        // act on this variable — it must always launch the fixed launcher
-        // regardless of what the client requested.
-        //
-        // Test approach (PR-1):
-        // 1. Set SSH_ORIGINAL_COMMAND="rm -rf /" in gateway environment
-        // 2. Gateway should still exec the fixed launcher path
-        // 3. Verify the command was NOT run, only the fixed launcher was
+    void gatewayMustRejectSshOriginalCommand() throws Exception {
+        List<String> lines = codeLines(GATEWAY_PATH);
+        String content = full(GATEWAY_PATH);
+
+        // Code lines must NOT use eval (even with SSH_ORIGINAL_COMMAND)
+        assertThat(lines).noneMatch(l -> l.contains("eval "));
+
+        // Must check SSH_ORIGINAL_COMMAND and reject non-empty (§3.3)
+        assertThat(content).contains("SSH_ORIGINAL_COMMAND");
+        // Rejection path: non-empty → exit non-zero, no stdout
+        assertThat(content).contains("exit 1");
+
+        // Must have set -euo pipefail
+        assertThat(lines).anyMatch(l -> l.contains("set -euo pipefail"));
+
+        // Must exec sudo to the fixed launcher (only when SSH_ORIGINAL_COMMAND is empty)
+        assertThat(lines).anyMatch(l -> l.contains("exec sudo") && l.contains(LAUNCHER_DST));
     }
 
     @Test
-    @Disabled("PR-1: gateway artifact not yet built")
-    void gatewayMustNotOutputBannerOrVersionInfo() {
-        // Design doc §6.2: "不输出 banner"
-        //
-        // The gateway's first bytes on stdout must be the MCP JSON-RPC
-        // initialize response. No welcome banner, no version string,
-        // no MOTD — anything else corrupts the JSON-RPC stream.
-        //
-        // Test approach (PR-1):
-        // 1. Start stdio transport to gateway
-        // 2. Send MCP initialize
-        // 3. First stdout line must be valid JSON-RPC with "result"
-        // 4. No plaintext output before the first JSON line
+    void gatewayMustNotOutputBannerOrVersionInfo() throws Exception {
+        List<String> lines = codeLines(GATEWAY_PATH);
+
+        // Code lines must NOT print to stdout (no bare echo without >&2)
+        for (String line : lines) {
+            if (line.startsWith("echo ") && !line.contains(">&2")) {
+                assertThat(line).as("gateway stdout echo: %s", line).isNull();
+            }
+        }
+
+        // Full content must not have banner/welcome text outside comments
+        String content = full(GATEWAY_PATH);
+        // Line-level check: every "welcome" or "banner" occurrence must be in a comment
+        for (String line : content.split("\n")) {
+            String t = line.strip().toLowerCase();
+            if ((t.contains("banner") || t.contains("welcome")) && !t.startsWith("#")) {
+                assertThat(t).as("gateway has banner/welcome in non-comment: %s", line).isNull();
+            }
+        }
     }
 
     @Test
-    @Disabled("PR-1: gateway artifact not yet built")
-    void gatewayMustNotReadStdinForCommandInput() {
-        // Design doc §6.2: "只执行固定命令"
-        //
-        // The gateway must NOT read stdin looking for a command to execute.
-        // It must unconditionally exec the fixed launcher.
-        //
-        // Test approach (PR-1):
-        // 1. Launch gateway subprocess
-        // 2. Write "arbitrary command" to its stdin
-        // 3. Gateway should ignore it and launch the fixed MCP server
+    void gatewayMustNotReadStdinForCommandInput() throws Exception {
+        List<String> lines = codeLines(GATEWAY_PATH);
+
+        // Code lines must not use "read" to consume stdin
+        assertThat(lines).noneMatch(l -> l.matches(".*\\bread\\b.*"));
+
+        // The only execution path is exec sudo
+        assertThat(lines).anyMatch(l -> l.contains("exec sudo"));
     }
 
-    // ── Launcher: no argument/env passthrough ──
+    // ── Launcher: no argument/env passthrough (§6.2) ──
 
     @Test
-    @Disabled("PR-1: launcher artifact not yet built")
-    void launcherMustNotPassThroughArguments() {
-        // Design doc §6.2: "exec java -jar <fixed-path>，不透传用户参数"
-        //
-        // The launcher script must exec a fixed java invocation. Any
-        // arguments received (e.g. from SSH_ORIGINAL_COMMAND) must be
-        // discarded — the JVM must only receive the fixed arguments defined
-        // in the root-owned launcher script.
-        //
-        // Test approach (PR-1):
-        // 1. Verify the launcher script is a simple exec with no $@ or $*
-        // 2. Verify the script does not reference $1, $2, etc.
-        // 3. Verify the JAR path is an absolute, non-writable path
+    void launcherMustNotPassThroughArguments() throws Exception {
+        List<String> lines = codeLines(LAUNCHER_PATH);
+
+        // No positional parameter or arg-list expansion
+        for (String line : lines) {
+            // Exclude substring expansions like ${VAR:offset} which use :
+            assertThat(line).as("launcher uses $@/$*/$1/$2: " + line)
+                .doesNotContain("$@", "$*", "$1", "$2", "${1}", "${2}");
+        }
+
+        assertThat(full(LAUNCHER_PATH)).contains("exec java");
+        assertThat(full(LAUNCHER_PATH)).contains("-jar");
     }
 
     @Test
-    @Disabled("PR-1: launcher artifact not yet built")
-    void launcherMustSanitizeEnvironment() {
-        // Design doc §6.2: sudoers uses "env_reset,!setenv"
-        //
-        // The sudo invocation must reset the environment. User-controlled
-        // environment variables (PATH, LD_LIBRARY_PATH, JAVA_HOME,
-        // CLASSPATH, etc.) must NOT propagate to the Java process.
-        //
-        // The only environment variables the Java process receives must
-        // come from the root-only /etc/clawkit/ops-mcp.env file.
-        //
-        // Test approach (PR-1):
-        // 1. Verify sudoers contains "env_reset" and "!setenv"
-        // 2. Verify secure_path is explicitly set
-        // 3. Verify system properties like -Djava.security.egd are not
-        //    controllable from the user environment
+    void launcherMustSanitizeEnvironment() throws Exception {
+        String content = full(SETUP_PATH);
+
+        // sudoers defaults must enforce env sanitization
+        assertThat(content).contains("env_reset");
+        assertThat(content).contains("!setenv");
+        assertThat(content).contains("secure_path");
+
+        // NOPASSWD grant must reference the launcher (via variable or literal)
+        assertThat(content).contains("NOPASSWD:");
+
+        // The launcher path must appear somewhere in the script
+        // (it's either in variable definition or echo/final content)
+        assertThat(content).contains(LAUNCHER_DST);
+
+        // SUDOERS_DEFAULTS is written before SUDOERS_CONTENT in the file output
+        // — check the printf/echo that generates the final file
+        assertThat(content).containsPattern(
+            "SUDOERS_DEFAULTS.*SUDOERS_CONTENT|DEFAULTS.*CONTENT");
     }
 
     @Test
-    @Disabled("PR-1: launcher artifact not yet built")
-    void launcherMustEnforceFixedJarPath() {
-        // Design doc §6.2: "校验 JAR 路径固定且不可写"
-        //
-        // The launcher must verify that the JAR file it is about to exec
-        // exists at a known, absolute path and is not writable by opsro.
-        // If the file is missing, modified, or writable by a non-root user,
-        // the launcher must refuse to start and exit with a non-zero code.
-        //
-        // Test approach (PR-1):
-        // 1. Verify the JAR path is absolute (starts with /)
-        // 2. Verify ownership/permissions: root-owned, 0755 or 0644
-        // 3. Verify opsro cannot write to the JAR path
-        // 4. Remove the JAR and verify launcher exits non-zero
+    void launcherMustEnforceFixedJarPath() throws Exception {
+        List<String> lines = codeLines(LAUNCHER_PATH);
+
+        // JAR variable must be an absolute path
+        assertThat(lines).anyMatch(l -> l.startsWith("JAR=") && l.contains("\"/"));
+
+        // Must check file existence
+        assertThat(lines).anyMatch(l ->
+            (l.contains("test -f") || l.contains("[[ ! -f") || l.contains("[ ! -f"))
+            && l.contains("JAR"));
+
+        // Must check permissions (group/other not writable)
+        assertThat(lines).anyMatch(l -> l.contains("stat") && l.contains("JAR"));
+        assertThat(lines).anyMatch(l -> l.contains("PERMS")
+            || l.contains("writable"));
+
+        // Must exit non-zero if JAR bad
+        assertThat(lines).anyMatch(l -> l.contains("exit 1"));
     }
 
-    // ── sudoers security ──
+    // ── sudoers security (§6.2) ──
 
     @Test
-    @Disabled("PR-1: sudoers artifact not yet created")
-    void sudoersMustOnlyAllowExactFixedLauncherPath() {
-        // Design doc §6.2: "opsro ALL=(root) NOPASSWD: /usr/local/sbin/clawkit-ops-mcp-stdio"
-        //
-        // The sudoers grant must be scoped to the exact, absolute launcher
-        // path with no arguments, no wildcards, and no parameter passing.
-        //
-        // Test approach (PR-1):
-        // 1. Verify sudoers entry contains the exact path
-        // 2. Verify no wildcard (*) in the command path
-        // 3. Verify no argument passthrough (no "" at end of command)
-        // 4. Verify "NOPASSWD" only applies to this single command
+    void sudoersMustOnlyAllowExactFixedLauncherPath() throws Exception {
+        String content = full(SETUP_PATH);
+
+        // The generated sudoers entry must reference the exact launcher
+        assertThat(content).contains(LAUNCHER_DST);
+
+        // SUDOERS_CONTENT line must not use wildcards
+        // Find the SUDOERS_CONTENT= line
+        for (String line : content.split("\n")) {
+            if (line.contains("SUDOERS_CONTENT=")) {
+                assertThat(line).doesNotContain("*");
+                assertThat(line).doesNotContain("\"\"");
+            }
+        }
     }
 
+    // ── Gateway: shell/SFTP/SCP rejection (§6.1) ──
+
     @Test
-    @Disabled("PR-1: gateway artifact not yet built")
-    void gatewayMustRejectShellSftpScpPortForwarding() {
-        // Design doc §6.1: "restrict" keyword in authorized_keys disables
-        // PTY, port forwarding, agent forwarding, X11, and user rc.
-        //
-        // Test approach (PR-1):
-        // 1. Attempt: ssh opsro@target              → refused / gateway only
-        // 2. Attempt: sftp opsro@target              → refused
-        // 3. Attempt: scp file opsro@target:/tmp/    → refused
-        // 4. Attempt: ssh -L 8080:localhost:80 ...   → refused
-        // 5. Attempt: ssh -t opsro@target bash       → refused
-        //
-        // All must fail before reaching the gateway process.
-        // These are tested in the remote smoke (PR-1 §真实 smoke).
+    void gatewayMustRejectShellSftpScpPortForwarding() throws Exception {
+        List<String> lines = codeLines(SETUP_PATH);
+
+        // authorized_keys line must use "restrict" keyword
+        assertThat(lines).anyMatch(l -> l.contains("restrict") && l.contains("command="));
+
+        // sshd_config heredoc must disable PTY, forwarding, user rc
+        // The setup script writes these into sshd_config:
+        String content = full(SETUP_PATH);
+
+        // Find the SSHEOF block
+        int sshStart = content.indexOf("<<'SSHEOF'");
+        if (sshStart < 0) sshStart = content.indexOf("<<SSHEOF");
+        int sshEnd = content.indexOf("SSHEOF", sshStart + 10);
+        if (sshEnd < 0) sshEnd = content.length();
+        String sshBlock = content.substring(sshStart, sshEnd);
+
+        assertThat(sshBlock).contains("PermitTTY no");
+        assertThat(sshBlock).contains("DisableForwarding yes");
+        assertThat(sshBlock).contains("PermitUserRC no");
     }
 
     // ── Environment / config isolation ──
 
     @Test
-    void opsMcpMainDoesNotReadSshOriginalCommand() {
-        // Verify that OpsMcpMain (the current stdio entrypoint) does not
-        // read SSH_ORIGINAL_COMMAND. This is a precondition for the gateway
-        // approach: the MCP server must not depend on any SSH-specific
-        // environment variables for its security decisions.
-        //
-        // Already true: OpsMcpMain only reads CLAWKIT_OPS_* variables.
-        String sshOriginalCommand = System.getenv("SSH_ORIGINAL_COMMAND");
-        // If set, it must not affect server behavior
-        if (sshOriginalCommand != null) {
-            // Document: the value exists but is not consumed by OpsMcpMain
-            assertThat(sshOriginalCommand).isNotNull(); // tautology; documents the env var existence
+    void opsMcpMainDoesNotReadSshOriginalCommand() throws Exception {
+        // Verify that no Java source in the ops-mcp module reads
+        // SSH_ORIGINAL_COMMAND. The MCP server must not depend on
+        // any SSH-specific environment variables.
+        Path srcDir = PROJECT_ROOT.resolve(
+            "extensions/clawkit-ops-mcp/src/main/java");
+        if (!Files.isDirectory(srcDir)) {
+            // Module path differs when running from IDE — skip
+            return;
         }
-        // This test passes regardless — it documents the invariant.
+        try (var stream = Files.walk(srcDir)) {
+            List<Path> javaFiles = stream
+                .filter(p -> p.toString().endsWith(".java"))
+                .toList();
+            for (Path f : javaFiles) {
+                String content = Files.readString(f);
+                assertThat(content)
+                    .as(f.getFileName() + " reads SSH_ORIGINAL_COMMAND")
+                    .doesNotContain("SSH_ORIGINAL_COMMAND");
+            }
+            assertThat(javaFiles).as("no Java source found to scan").isNotEmpty();
+        }
     }
 }

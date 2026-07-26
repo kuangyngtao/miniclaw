@@ -22,8 +22,8 @@ fi
 
 # JAR must not be writable by group or others
 JAR_PERMS=$(stat -c '%a' "$JAR" 2>/dev/null || echo "000")
-JAR_GROUP_W=$((${JAR_PERMS:1:1} % 2))
-JAR_OTHER_W=$((${JAR_PERMS:2:1} % 2))
+JAR_GROUP_W=$((${JAR_PERMS:1:1} & 2))
+JAR_OTHER_W=$((${JAR_PERMS:2:1} & 2))
 if [[ "$JAR_GROUP_W" -ne 0 || "$JAR_OTHER_W" -ne 0 ]]; then
     echo "fatal: JAR is group/other writable: $JAR (perms=$JAR_PERMS)" >&2
     exit 1

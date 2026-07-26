@@ -474,7 +474,7 @@ ops-fixtures/
 
 进入条件：OPS-0A/0B 本地门禁通过，Fixture 可幂等重建和清理，D0 的 Docker/Release 可用。
 
-定版实施方案、PR 合同、测试矩阵和反向评审见 [docs/ops-mvp1-secure-remote-discovery-design.md](docs/ops-mvp1-secure-remote-discovery-design.md)。实施主体固定为 **Claude Code Agent（内部使用 DeepSeek 模型）**，不是 Claude 与 DeepSeek 两个独立主体。每个 PR 必须经过“实现 Agent 会话 → 确定性门禁 → 全新只读评审会话 → 修正会话 → 全新隔离复审 → 人工/Codex 验收”；各会话使用同一 Claude Code Agent + DeepSeek 技术栈，但实现与评审上下文和工具权限隔离。存在 Blocking 或评审未完成时不得进入下一 PR。实施顺序固定为：安全护栏测试 → P0 forced-command 远端接口 → 单 SSH/MCP session 生命周期 → 切换远程主路径 → Discovery/部分失败 → DeepSeek Diagnosis Gate → 远程 E2E → 删除旧路径。
+定版架构见 [docs/ops-mvp1-secure-remote-discovery-design.md](docs/ops-mvp1-secure-remote-discovery-design.md)；针对 2026-07-26 复核缺口的逐 PR 修复合同见 [docs/ops-mvp1-completion-execution-plan.md](docs/ops-mvp1-completion-execution-plan.md)。实施主体固定为 **Claude Code Agent（内部使用 DeepSeek 模型）**，不是 Claude 与 DeepSeek 两个独立主体。每个 PR 必须经过“实现 Agent 会话 → 确定性门禁 → 全新只读评审会话 → 修正会话 → 全新隔离复审 → 人工/Codex 验收”；各会话使用同一 Claude Code Agent + DeepSeek 技术栈，但实现与评审上下文和工具权限隔离。存在 Blocking 或评审未完成时不得进入下一 PR。实施顺序固定为：安全脚本与真实护栏 → 严格 Handshake/Session → Profile 驱动 Discovery → 手动入口与旧路径退场 → DeepSeek Diagnosis Gate → 远程 E2E 收口。
 
 - **[x] SSH 执行后端**（clawkit-ops-mcp）
   新增 `SshTargetConfig`（host/port/user/auth/known_hosts/ControlMaster）和 `SshCommandExecutor`（实现 `CommandExecutor`，通过系统 `ssh` CLI 远程执行命令；连接复用、并发限制、输出截断；分类 CONNECTION_FAILED/AUTH_FAILED/HOST_KEY_REJECTED/COMMAND_NOT_FOUND）。`OpsMcpMain` 和 `OpsMcpHttpMain` 检测 `CLAWKIT_OPS_SSH_HOST` 后自动切换 `SshCommandExecutor` + `DockerOpsBackend`；`DockerOpsBackend` 接口不变。密码认证通过 `sshpass -e` 支持但不推荐。

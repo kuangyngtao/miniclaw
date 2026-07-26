@@ -3,7 +3,9 @@ package com.clawkit.ops.loop;
 import com.clawkit.tools.control.ExecutionControl;
 import com.clawkit.tools.mcp.McpCallResult;
 import com.clawkit.tools.mcp.McpClient;
+import com.clawkit.tools.mcp.McpInitializeResult;
 import com.clawkit.tools.mcp.McpToolDef;
+import com.clawkit.tools.mcp.McpTransport;
 import com.clawkit.tools.mcp.StdioTransport;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -27,8 +29,12 @@ import org.slf4j.LoggerFactory;
  * Manages the lifecycle of a single SSH/MCP stdio session to a remote
  * OPS target.
  *
- * <p>Design doc §7.3–§7.4. One session = one SSH connection, reused across
- * all tools in a single Discovery. State machine:
+ * <p>Design doc §7.3–§7.4, PR-M2 §4. Strict attestation on every start:
+ * protocolVersion, serverName, probeVersion, capabilityProfile,
+ * initialize toolSetHash, tools/list toolSetHash, and annotations.
+ * Any mismatch → FAILED, transport closed immediately.
+ *
+ * <p>State machine:
  *
  * <pre>{@code
  *   NEW -> STARTING -> INITIALIZING -> READY
@@ -36,16 +42,15 @@ import org.slf4j.LoggerFactory;
  *   Any  -> DRAINING -> CLOSED
  * }</pre>
  *
- * <p>After handshake, validates the remote server's protocol version,
- * probe version, capability profile, and tool-set hash against the
- * expected values from {@link RemoteTargetDescriptor}.
- *
- * <p>The session does NOT use {@code ControlMaster}. It maintains exactly
- * one in-flight request at a time.
+ * <p>DEFAULT_REQUEST_TIMEOUT is applied via {@link ExecutionControl}
+ * for initialize, listTools, and callTool. The session does NOT use
+ * {@code ControlMaster}.
  */
 public final class RemoteOpsSession implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(RemoteOpsSession.class);
+    static final String PROTOCOL_VERSION = "2024-11-05";
+    static final String OPS_SERVER_NAME = "clawkit-ops-mcp";
 
     public enum State {
         NEW, STARTING, INITIALIZING, READY, DRAINING, FAILED, CLOSED
@@ -57,10 +62,14 @@ public final class RemoteOpsSession implements AutoCloseable {
     private final AtomicReference<State> state = new AtomicReference<>(State.NEW);
     private final List<RemoteOpsError> errors = new ArrayList<>();
 
-    private StdioTransport transport;
+    private McpTransport transport;
     private McpClient client;
     private Instant startedAt;
     private RemoteOpsError firstError;
+    private Duration requestTimeout;
+    private int maxOutputBytes;
+
+    // ── Constructors ──
 
     public RemoteOpsSession(RemoteTargetDescriptor target, SshConnectionConfig connectionConfig) {
         this(target, connectionConfig, Clock.systemUTC());
@@ -70,6 +79,25 @@ public final class RemoteOpsSession implements AutoCloseable {
         this.target = target;
         this.connectionConfig = connectionConfig;
         this.clock = clock;
+        this.requestTimeout = connectionConfig.requestTimeout();
+        this.maxOutputBytes = connectionConfig.maxOutputBytes();
+    }
+
+    /**
+     * Test-only: create a session with a pre-built transport and client.
+     * Skips SSH process creation — useful for fake-transport testing.
+     */
+    RemoteOpsSession(RemoteTargetDescriptor target, SshConnectionConfig connectionConfig,
+                     Clock clock, McpTransport transport, McpClient client) {
+        this.target = target;
+        this.connectionConfig = connectionConfig;
+        this.clock = clock;
+        this.transport = transport;
+        this.client = client;
+        this.requestTimeout = connectionConfig.requestTimeout();
+        this.maxOutputBytes = connectionConfig.maxOutputBytes();
+        // Transport is already started; jump to INITIALIZING
+        state.set(State.INITIALIZING);
     }
 
     // ── State accessors ──
@@ -78,16 +106,13 @@ public final class RemoteOpsSession implements AutoCloseable {
     public String targetId() { return target.targetId(); }
     public RemoteTargetDescriptor target() { return target; }
     public List<RemoteOpsError> errors() { return List.copyOf(errors); }
-    public McpClient client() {
-        if (state.get() != State.READY) throw new IllegalStateException("session not ready: " + state.get());
-        return client;
-    }
+    public RemoteOpsError firstError() { return firstError; }
 
-    // ── Lifecycle ──
+    // ── Production lifecycle ──
 
     /**
-     * Start the SSH transport, perform MCP handshake, and attests the remote
-     * server's capability boundary against {@link #target}.
+     * Start the SSH transport, perform MCP handshake, and strictly attest
+     * the remote server against {@link #target}.
      *
      * @throws IOException if transport, handshake, or attestation fails
      */
@@ -108,31 +133,30 @@ public final class RemoteOpsSession implements AutoCloseable {
         } catch (IOException e) {
             RemoteOpsError err = classifyTransportStartError(e);
             transitionToFailed(err);
-            throw new IOException("[ops-session:" + target.targetId() + "] ssh start failed: "
-                + err.safeMessage(), e);
+            throw e;
         }
 
         state.set(State.INITIALIZING);
         client = new McpClient(transport, target.targetId());
 
-        // 2. MCP handshake
+        // 2. Strict MCP handshake (§4.2)
         try {
-            client.initialize();
+            doInitialize();
         } catch (IOException e) {
             RemoteOpsError err = classifyInitializeError(e);
             transitionToFailed(err);
-            throw new IOException("[ops-session:" + target.targetId() + "] initialize failed: "
-                + err.safeMessage(), e);
+            closeTransport();
+            throw e;
         }
 
-        // 3. Attestation (§7.2): verify tool set
+        // 3. Tool-set attestation (§4.3)
         try {
             attestToolSet();
         } catch (IOException e) {
             RemoteOpsError err = classifyAttestationError(e);
             transitionToFailed(err);
-            throw new IOException("[ops-session:" + target.targetId() + "] attestation failed: "
-                + err.safeMessage(), e);
+            closeTransport();
+            throw e;
         }
 
         state.set(State.READY);
@@ -141,13 +165,76 @@ public final class RemoteOpsSession implements AutoCloseable {
     }
 
     /**
-     * Call a tool on the remote server.
-     *
-     * @param toolName  allowlisted tool name
-     * @param arguments tool arguments
-     * @return the MCP call result
-     * @throws IOException if the call fails or session is not ready
+     * Test-only: complete the handshake + attestation on the injected transport.
+     * Same fail-closed behavior as {@link #start()}: any mismatch transitions to
+     * FAILED, closes transport, and throws IOException.
      */
+    void doInitializeAndAttest() throws IOException {
+        if (state.get() != State.INITIALIZING) {
+            throw new IllegalStateException("not in INITIALIZING: " + state.get());
+        }
+        startedAt = clock.instant();
+        try {
+            doInitialize();
+        } catch (IOException e) {
+            transitionToFailed(classifyInitializeError(e));
+            closeTransport();
+            throw e;
+        }
+        try {
+            attestToolSet();
+        } catch (IOException e) {
+            transitionToFailed(classifyAttestationError(e));
+            closeTransport();
+            throw e;
+        }
+        state.set(State.READY);
+    }
+
+    private void doInitialize() throws IOException {
+        ExecutionControl control = ExecutionControl.none();
+        McpInitializeResult info = client.initialize(control);
+
+        // Strict: protocolVersion MUST be 2024-11-05 (§4.3.1)
+        if (!PROTOCOL_VERSION.equals(info.protocolVersion())) {
+            throw new IOException("protocol version mismatch: expected "
+                + PROTOCOL_VERSION + " but got " + info.protocolVersion());
+        }
+
+        // Strict: serverName MUST be clawkit-ops-mcp (§4.3.2)
+        if (!OPS_SERVER_NAME.equals(info.serverName())) {
+            throw new IOException("server name mismatch: expected "
+                + OPS_SERVER_NAME + " but got " + info.serverName());
+        }
+
+        // Strict: probeVersion MUST match expected (§4.3.3)
+        String probeVersion = info.serverInfoText("probeVersion");
+        if (!target.expectedProbeVersion().equals(probeVersion)) {
+            throw new IOException("probeVersion mismatch: expected "
+                + target.expectedProbeVersion() + " but got " + probeVersion);
+        }
+
+        // Strict: capabilityProfile MUST match expected (§4.3.4)
+        String capabilityProfile = info.serverInfoText("capabilityProfile");
+        if (!target.capabilityProfile().equals(capabilityProfile)) {
+            throw new IOException("capabilityProfile mismatch: expected "
+                + target.capabilityProfile() + " but got " + capabilityProfile);
+        }
+
+        // Strict: initialize toolSetHash MUST match pinned hash (§4.3.5)
+        String initHash = info.serverInfoText("toolSetHash");
+        if (!target.expectedToolSetHash().equals(initHash)) {
+            throw new IOException("initialize toolSetHash mismatch: expected "
+                + target.expectedToolSetHash() + " but got " + initHash);
+        }
+
+        log.info("[ops-session:{}] attestation: protocol={}, server={}, probe={}, profile={}",
+            target.targetId(), info.protocolVersion(), info.serverName(),
+            probeVersion, capabilityProfile);
+    }
+
+    // ── Tool calls ──
+
     public McpCallResult callTool(String toolName, ObjectNode arguments) throws IOException {
         return callTool(toolName, arguments, ExecutionControl.none());
     }
@@ -161,21 +248,20 @@ public final class RemoteOpsSession implements AutoCloseable {
 
         Instant start = clock.instant();
         try {
-            McpCallResult result = client.callTool(toolName, arguments, control);
-            log.debug("[ops-session:{}] {} → success ({}ms)",
-                target.targetId(), toolName,
-                Duration.between(start, clock.instant()).toMillis());
-            return result;
+            return client.callTool(toolName, arguments, control);
         } catch (IOException e) {
             RemoteOpsError err = classifyToolError(toolName, e, start);
             errors.add(err);
-            throw new IOException("[ops-session:" + target.targetId() + "] " + toolName
-                + " failed: " + err.safeMessage(), e);
+            throw new IOException("[ops-session:" + target.targetId() + "] "
+                + toolName + " failed: " + err.safeMessage(), e);
         }
     }
 
+    // ── Close ──
+
     /**
      * Gracefully drain and close the session. Idempotent.
+     * If the session was in FAILED, firstError is preserved.
      */
     @Override
     public void close() {
@@ -183,26 +269,20 @@ public final class RemoteOpsSession implements AutoCloseable {
         if (current == State.CLOSED) return;
 
         state.set(State.DRAINING);
-        log.info("[ops-session:{}] draining → closing", target.targetId());
-
-        if (transport != null) {
-            try {
-                // StdioTransport.stop() does: close stdin → SIGTERM → SIGKILL
-                transport.stop();
-            } catch (Exception e) {
-                log.warn("[ops-session:{}] error during transport stop", target.targetId(), e);
-            }
-            try {
-                transport.close();
-            } catch (Exception e) {
-                log.warn("[ops-session:{}] error during transport close", target.targetId(), e);
-            }
-        }
-
+        closeTransport();
         state.set(State.CLOSED);
+
         long duration = startedAt != null
             ? Duration.between(startedAt, clock.instant()).toMillis() : 0;
-        log.info("[ops-session:{}] closed ({}ms total)", target.targetId(), duration);
+        log.info("[ops-session:{}] closed ({}ms total), firstError={}",
+            target.targetId(), duration, firstError != null ? firstError.code() : "none");
+    }
+
+    private void closeTransport() {
+        if (transport != null) {
+            try { transport.stop(); } catch (Exception ignored) { }
+            try { transport.close(); } catch (Exception ignored) { }
+        }
     }
 
     // ── Attestation ──
@@ -211,16 +291,14 @@ public final class RemoteOpsSession implements AutoCloseable {
         List<McpToolDef> tools = client.listTools();
         Set<String> names = tools.stream().map(McpToolDef::name).collect(Collectors.toSet());
 
-        // Verify tool names match expected profile
-        // — validate against the profile implied by expectedToolSetHash
-        String actualHash = computeToolSetHashFromNames(names);
-        if (!target.expectedToolSetHash().equals(actualHash)) {
-            throw new IOException("tool-set hash mismatch: expected "
-                + target.expectedToolSetHash() + " but got " + actualHash
-                + " (tools: " + names + ")");
+        // Re-compute hash from actual tool list (§4.3.6)
+        String listHash = computeToolSetHashFromNames(names);
+        if (!target.expectedToolSetHash().equals(listHash)) {
+            throw new IOException("tools/list hash mismatch: expected "
+                + target.expectedToolSetHash() + " but got " + listHash);
         }
 
-        // Verify every tool has safe annotations (§6.3)
+        // Every tool must have safe annotations (§4.3.7)
         for (McpToolDef tool : tools) {
             JsonNode a = tool.annotations();
             if (a == null
@@ -232,7 +310,7 @@ public final class RemoteOpsSession implements AutoCloseable {
         }
     }
 
-    private static String computeToolSetHashFromNames(Set<String> names) {
+    static String computeToolSetHashFromNames(Set<String> names) {
         String[] sorted = names.toArray(String[]::new);
         java.util.Arrays.sort(sorted);
         try {
@@ -251,7 +329,6 @@ public final class RemoteOpsSession implements AutoCloseable {
 
     private RemoteOpsError classifyTransportStartError(IOException e) {
         String msg = e.getMessage() != null ? e.getMessage() : "";
-
         if (msg.contains("Cannot run program \"ssh\"")) {
             return RemoteOpsError.sshClientMissing(target.targetId(), "ssh binary not found");
         }
@@ -261,7 +338,6 @@ public final class RemoteOpsSession implements AutoCloseable {
             }
             return RemoteOpsError.sshClientMissing(target.targetId(), msg);
         }
-        // Transport-level IO failure during start
         return RemoteOpsError.sshConnectionRefused(target.targetId(),
             startedAt != null ? startedAt : clock.instant(),
             Duration.between(startedAt != null ? startedAt : clock.instant(), clock.instant()).toMillis());
@@ -269,7 +345,20 @@ public final class RemoteOpsSession implements AutoCloseable {
 
     private RemoteOpsError classifyInitializeError(IOException e) {
         String msg = e.getMessage() != null ? e.getMessage() : "";
-
+        if (msg.contains("protocol version mismatch")) {
+            return RemoteOpsError.remoteMcpProtocolError(target.targetId(), msg);
+        }
+        if (msg.contains("server name mismatch")) {
+            return RemoteOpsError.remoteProfileMismatch(target.targetId(), "", "");
+        }
+        if (msg.contains("probeVersion mismatch") || msg.contains("capabilityProfile mismatch")) {
+            return RemoteOpsError.remoteProfileMismatch(target.targetId(),
+                target.expectedProbeVersion(), msg);
+        }
+        if (msg.contains("toolSetHash mismatch") || msg.contains("hash mismatch")) {
+            return RemoteOpsError.remoteToolsetMismatch(target.targetId(),
+                target.expectedToolSetHash(), msg);
+        }
         if (msg.contains("initialize failed")) {
             return RemoteOpsError.remoteMcpStartFailed(target.targetId(), msg);
         }
@@ -282,20 +371,23 @@ public final class RemoteOpsSession implements AutoCloseable {
 
     private RemoteOpsError classifyAttestationError(IOException e) {
         String msg = e.getMessage() != null ? e.getMessage() : "";
-
-        if (msg.contains("tool-set hash mismatch") || msg.contains("profile mismatch")) {
+        if (msg.contains("hash mismatch") || msg.contains("profile mismatch")) {
             return RemoteOpsError.remoteToolsetMismatch(target.targetId(),
                 target.expectedToolSetHash(), "actual");
         }
         if (msg.contains("unsafe") || msg.contains("annotations")) {
             return RemoteOpsError.remoteMcpProtocolError(target.targetId(), msg);
         }
-        return RemoteOpsError.remoteProfileMismatch(target.targetId(), "", "");
+        if (msg.contains("protocol version") || msg.contains("capabilityProfile")
+            || msg.contains("probeVersion")) {
+            return RemoteOpsError.remoteProfileMismatch(target.targetId(),
+                target.expectedProbeVersion(), msg);
+        }
+        return RemoteOpsError.remoteMcpProtocolError(target.targetId(), msg);
     }
 
     private RemoteOpsError classifyToolError(String toolName, IOException e, Instant start) {
         String msg = e.getMessage() != null ? e.getMessage() : "";
-
         if (msg.contains("timed out") || msg.contains("Timed out")) {
             return RemoteOpsError.sshRequestTimeout(target.targetId(), start,
                 Duration.between(start, clock.instant()).toMillis());
@@ -304,20 +396,12 @@ public final class RemoteOpsSession implements AutoCloseable {
             return RemoteOpsError.sshTransportClosed(target.targetId(), start,
                 Duration.between(start, clock.instant()).toMillis(), -1);
         }
-        if (msg.contains("cancelled") || msg.contains("interrupted")) {
-            return RemoteOpsError.sshTransportClosed(target.targetId(), start,
-                Duration.between(start, clock.instant()).toMillis(), -1);
-        }
         return RemoteOpsError.remoteToolFailed(target.targetId(), toolName, msg);
     }
 
-    // ── State transition helper ──
-
     private void transitionToFailed(RemoteOpsError error) {
         state.set(State.FAILED);
-        firstError = error;
+        if (firstError == null) firstError = error;
         errors.add(error);
     }
-
-    public RemoteOpsError firstError() { return firstError; }
 }

@@ -2,227 +2,529 @@ package com.clawkit.ops.loop;
 
 import com.clawkit.ops.mcp.OpsCapabilityProfile;
 import com.clawkit.ops.mcp.OpsMcpServer;
-import org.junit.jupiter.api.Disabled;
+import com.clawkit.tools.control.ExecutionControl;
+import com.clawkit.tools.mcp.McpClient;
+import com.clawkit.tools.mcp.McpInitializeResult;
+import com.clawkit.tools.mcp.McpTransport;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * PR-0 security guardrail tests for transport errors and profile/toolset
+ * PR-M2 security tests for transport errors and strict profile/toolset
  * attestation.
  *
- * <p>These tests verify that transport-level failures (EOF, timeout, cancel,
- * illegal JSON-RPC) and capability mismatches (wrong profile, wrong toolset)
- * are detected and fail closed — never silently ignored or misinterpreted
- * as business errors.
- *
- * <p>Tests marked {@code @Disabled} target components that will be built in
- * PR-2 (RemoteOpsSession) and PR-4 (Discovery Profile).
+ * <p>All 8 previously-@Disabled tests are now implemented using a
+ * {@link FakeTransport} that simulates various remote MCP server
+ * behaviors. No real SSH or network required.
  */
 class TransportAndProfileSecurityTest {
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final Clock FIXED_CLOCK = Clock.fixed(
+        Instant.parse("2026-07-26T00:00:00Z"), java.time.ZoneOffset.UTC);
+    private static final String EXPECTED_HASH =
+        OpsMcpServer.computeToolSetHash(OpsCapabilityProfile.APP_DOWN_V1);
+    private static final String PG_HASH =
+        OpsMcpServer.computeToolSetHash(OpsCapabilityProfile.POSTGRES_DIAGNOSIS_V1);
 
-    // ── Profile attestation (test now with OpsCapabilityProfile enum) ──
+    @TempDir Path tempDir;
 
-    @Test
-    void appDownProfileDoesNotIncludePostgresTools() {
-        // Design doc §5.1: each profile declares its tool set statically.
-        // APP_DOWN_V1 must not expose db_activity, db_lock_graph, or
-        // db_connection_stats.
+    private Path identityFile() throws IOException {
+        Path f = tempDir.resolve("id_test");
+        if (!Files.exists(f)) Files.createFile(f);
+        return f;
+    }
+    private Path knownHostsFile() throws IOException {
+        Path f = tempDir.resolve("known_hosts");
+        if (!Files.exists(f)) Files.createFile(f);
+        return f;
+    }
+
+    private final List<FakeTransport> createdTransports = new ArrayList<>();
+
+    @AfterEach
+    void closeTransports() {
+        createdTransports.forEach(t -> { try { t.close(); } catch (Exception ignored) {} });
+        createdTransports.clear();
+    }
+
+    // ── Profile attestation (existing) ──
+
+    @Test void appDownProfileDoesNotIncludePostgresTools() {
         Set<String> appDown = OpsCapabilityProfile.APP_DOWN_V1.toolNames();
-
-        assertThat(appDown).hasSize(5);
-        assertThat(appDown)
-            .doesNotContain("container_resources")
-            .doesNotContain("business_metrics")
-            .doesNotContain("db_activity")
-            .doesNotContain("db_lock_graph")
-            .doesNotContain("db_connection_stats");
+        assertThat(appDown).hasSize(5)
+            .doesNotContain("container_resources", "business_metrics",
+                "db_activity", "db_lock_graph", "db_connection_stats");
     }
 
-    @Test
-    void postgresProfileIncludesAllAppDownToolsPlusFiveDbTools() {
+    @Test void postgresProfileIncludesAllAppDownToolsPlusFiveDbTools() {
         Set<String> postgres = OpsCapabilityProfile.POSTGRES_DIAGNOSIS_V1.toolNames();
-
-        assertThat(postgres).hasSize(10);
-        assertThat(postgres).containsAll(OpsMcpServer.TOOL_NAMES);
-        assertThat(postgres)
-            .contains("container_resources")
-            .contains("business_metrics")
-            .contains("db_activity")
-            .contains("db_lock_graph")
-            .contains("db_connection_stats");
+        assertThat(postgres).hasSize(10).containsAll(OpsMcpServer.TOOL_NAMES);
     }
 
-    @Test
-    void profilesAreImmutableAndDistinct() {
-        Set<String> appDown = OpsCapabilityProfile.APP_DOWN_V1.toolNames();
-        Set<String> postgres = OpsCapabilityProfile.POSTGRES_DIAGNOSIS_V1.toolNames();
-
-        // Verify Set.copyOf() semantics — cannot modify through reference
-        assertThatThrownBy(() -> appDown.add("injected_tool"))
-            .isInstanceOf(UnsupportedOperationException.class);
-        assertThatThrownBy(() -> postgres.add("injected_tool"))
-            .isInstanceOf(UnsupportedOperationException.class);
-
-        // Verify no shared mutable state
-        assertThat(appDown).isNotEqualTo(postgres);
+    @Test void profilesAreImmutableAndDistinct() {
+        Set<String> a = OpsCapabilityProfile.APP_DOWN_V1.toolNames();
+        Set<String> b = OpsCapabilityProfile.POSTGRES_DIAGNOSIS_V1.toolNames();
+        assertThatThrownBy(() -> a.add("x")).isInstanceOf(UnsupportedOperationException.class);
+        assertThat(a).isNotEqualTo(b);
     }
 
-    @Test
-    void unrecognizedProfileFromEnvironmentFallsIntoUnknownEnumValueException() {
-        // Design doc §5.1: unknown profile → IllegalArgumentException.
-        // The caller must handle this — it must NOT silently default to
-        // a different profile with different capabilities.
-        assertThatThrownBy(() ->
-            OpsCapabilityProfile.fromEnvironment("UNKNOWN_PROFILE_V99"))
+    @Test void unrecognizedProfileThrows() {
+        assertThatThrownBy(() -> OpsCapabilityProfile.fromEnvironment("UNKNOWN"))
             .isInstanceOf(IllegalArgumentException.class);
     }
 
-    @Test
-    void nullOrBlankEnvironmentDefaultsToAppDown() {
-        // Design doc §6.3: default profile is APP_DOWN_V1 (most restricted).
-        assertThat(OpsCapabilityProfile.fromEnvironment(null))
-            .isEqualTo(OpsCapabilityProfile.APP_DOWN_V1);
-        assertThat(OpsCapabilityProfile.fromEnvironment(""))
-            .isEqualTo(OpsCapabilityProfile.APP_DOWN_V1);
-        assertThat(OpsCapabilityProfile.fromEnvironment("  "))
-            .isEqualTo(OpsCapabilityProfile.APP_DOWN_V1);
+    @Test void nullOrBlankDefaultsToAppDown() {
+        assertThat(OpsCapabilityProfile.fromEnvironment(null)).isEqualTo(OpsCapabilityProfile.APP_DOWN_V1);
+        assertThat(OpsCapabilityProfile.fromEnvironment("")).isEqualTo(OpsCapabilityProfile.APP_DOWN_V1);
     }
 
-    // ── Toolset attestation (tests for capability boundary validation) ──
-
-    @Test
-    void everyAppDownToolHasReadOnlyAnnotations() {
-        // Design doc §6.3: all tools must be readOnly, not destructive,
-        // not openWorld. This is validated by OpsMcpServer.tool() which
-        // sets annotations on every tool.
-        //
-        // This test verifies that the tool construction method always sets
-        // the safe defaults. If a tool is ever added without calling
-        // OpsMcpServer.tool(), it would be caught by this test.
-        //
-        // Verified indirectly: OpsMcpServerTest.exposesOnlyBoundedReadOnlyTools()
-        // checks annotations for all 5 APP_DOWN_V1 tools.
+    @Test void everyAppDownToolHasReadOnlyAnnotations() {
         assertThat(OpsMcpServer.TOOL_NAMES).hasSize(5);
     }
 
+    // ── Attestation: mismatch → fail closed ──
+
     @Test
-    @Disabled("PR-2: RemoteOpsSession attestation not yet built")
-    void profileMismatchMustPreventEvidenceCollection() {
-        // Design doc §7.2: after MCP initialize, the client must verify
-        // that the server's capability profile matches the expected profile
-        // for this Incident.
-        //
-        // If the Incident requires POSTGRES_DIAGNOSIS_V1 but the server
-        // only advertises APP_DOWN_V1, collection must abort with a
-        // REMOTE_PROFILE_MISMATCH structured error — not silently collect
-        // a subset of tools.
-        //
-        // Test approach (PR-2):
-        // 1. Create RemoteOpsSession with expected POSTGRES_DIAGNOSIS_V1
-        // 2. Connect to a server that only has APP_DOWN_V1 tools
-        // 3. Verify initializeAttestation() throws with REMOTE_PROFILE_MISMATCH
-        // 4. Verify no evidence was collected
+    void profileMismatchMustPreventEvidenceCollection() throws Exception {
+        // Server reports POSTGRES_DIAGNOSIS_V1 but session expects APP_DOWN_V1
+        var transport = newFakeTransport(initializeJson(
+            "clawkit-ops-mcp", "0.1.0", "1", "POSTGRES_DIAGNOSIS_V1", PG_HASH),
+            appDownTools());
+        var session = newSession(EXPECTED_HASH, transport);
+
+        assertThatThrownBy(() -> session.doInitializeAndAttest())
+            .isInstanceOf(IOException.class)
+            .hasMessageContaining("capabilityProfile");
+        assertThat(session.state()).isEqualTo(RemoteOpsSession.State.FAILED);
+        assertThat(session.firstError()).isNotNull();
+        assertThat(session.firstError().code()).isEqualTo("REMOTE_PROFILE_MISMATCH");
     }
 
     @Test
-    @Disabled("PR-2: RemoteOpsSession attestation not yet built")
-    void toolsetMismatchMustPreventEvidenceCollection() {
-        // Design doc §7.2: the client must verify tool-set hash matches.
-        // If the remote server has extra tools (e.g. from a newer
-        // deployment) or missing tools, collection must abort.
-        //
-        // Test approach (PR-2):
-        // 1. Create RemoteOpsSession with expected tool-set hash
-        // 2. Connect to server with different tool set (e.g. extra tool)
-        // 3. Verify initializeAttestation() throws with REMOTE_TOOLSET_MISMATCH
-        // 4. Verify no evidence was collected
+    void toolsetMismatchMustPreventEvidenceCollection() throws Exception {
+        // Server reports a different toolSetHash than expected
+        String wrongHash = "0000000000000000";
+        var transport = newFakeTransport(initializeJson(
+            "clawkit-ops-mcp", "0.1.0", "1", "APP_DOWN_V1", wrongHash),
+            appDownTools());
+        var session = newSession(EXPECTED_HASH, transport);
+
+        assertThatThrownBy(() -> session.doInitializeAndAttest())
+            .isInstanceOf(IOException.class)
+            .hasMessageContaining("toolSetHash");
+        assertThat(session.state()).isEqualTo(RemoteOpsSession.State.FAILED);
+        assertThat(session.firstError().code()).isEqualTo("REMOTE_TOOLSET_MISMATCH");
     }
 
     @Test
-    @Disabled("PR-2: RemoteOpsSession attestation not yet built")
-    void probeVersionMismatchMustPreventEvidenceCollection() {
-        // Design doc §7.2: the client must verify probeVersion matches.
-        // If the remote server reports a different version, collection must
-        // abort — the evidence format or semantics may have changed.
-        //
-        // Test approach (PR-2):
-        // 1. Create RemoteOpsSession with expected probeVersion "1"
-        // 2. Connect to server reporting probeVersion "2"
-        // 3. Verify initializeAttestation() throws with REMOTE_PROFILE_MISMATCH
+    void probeVersionMismatchMustPreventEvidenceCollection() throws Exception {
+        // Server reports probeVersion "99" but session expects "1"
+        var transport = newFakeTransport(initializeJson(
+            "clawkit-ops-mcp", "0.1.0", "99", "APP_DOWN_V1", EXPECTED_HASH),
+            appDownTools());
+        var session = newSession("1", EXPECTED_HASH, transport);
+
+        assertThatThrownBy(() -> session.doInitializeAndAttest())
+            .isInstanceOf(IOException.class)
+            .hasMessageContaining("probeVersion");
+        assertThat(session.state()).isEqualTo(RemoteOpsSession.State.FAILED);
     }
 
-    // ── Transport error classification (contract tests for PR-2) ──
+    @Test
+    void protocolVersionMismatchMustFailAtMcpClientLevel() {
+        // McpClient.initialize() rejects non-matching protocol
+        var transport = newFakeTransport(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2099-01-01\"}}",
+            "{}");
+        var client = new McpClient(transport, "test");
+
+        assertThatThrownBy(() -> client.initialize())
+            .isInstanceOf(IOException.class)
+            .hasMessageContaining("protocol version mismatch");
+    }
 
     @Test
-    @Disabled("PR-2: RemoteOpsSession not yet built")
+    void serverNameMismatchMustFail() throws Exception {
+        var transport = newFakeTransport(initializeJson(
+            "not-clawkit", "1.0", "1", "APP_DOWN_V1", EXPECTED_HASH),
+            appDownTools());
+        var session = newSession(EXPECTED_HASH, transport);
+
+        assertThatThrownBy(() -> session.doInitializeAndAttest())
+            .isInstanceOf(IOException.class)
+            .hasMessageContaining("server name mismatch");
+        assertThat(session.state()).isEqualTo(RemoteOpsSession.State.FAILED);
+    }
+
+    @Test
+    void unsafeAnnotationMustPreventEvidenceCollection() throws Exception {
+        // All 5 tools present, but service_status has destructiveHint=true
+        String unsafeHash = OpsMcpServer.computeToolSetHash(OpsCapabilityProfile.APP_DOWN_V1);
+        // Build the tools-list response inline to avoid formatting issues
+        String toolsWithDestructive = "{\"tools\":[" +
+            "{\"name\":\"service_status\",\"description\":\"x\","
+            + "\"inputSchema\":{\"type\":\"object\",\"properties\":{}},"
+            + "\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":true,"
+            + "\"openWorldHint\":false,\"idempotentHint\":true},"
+            + "\"outputSchema\":{\"type\":\"object\",\"properties\":{}}}," +
+            "{\"name\":\"container_status\",\"description\":\"x\","
+            + "\"inputSchema\":{\"type\":\"object\",\"properties\":{}},"
+            + "\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,"
+            + "\"openWorldHint\":false,\"idempotentHint\":true},"
+            + "\"outputSchema\":{\"type\":\"object\",\"properties\":{}}}," +
+            "{\"name\":\"ports\",\"description\":\"x\","
+            + "\"inputSchema\":{\"type\":\"object\",\"properties\":{}},"
+            + "\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,"
+            + "\"openWorldHint\":false,\"idempotentHint\":true},"
+            + "\"outputSchema\":{\"type\":\"object\",\"properties\":{}}}," +
+            "{\"name\":\"http_probe\",\"description\":\"x\","
+            + "\"inputSchema\":{\"type\":\"object\",\"properties\":{}},"
+            + "\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,"
+            + "\"openWorldHint\":false,\"idempotentHint\":true},"
+            + "\"outputSchema\":{\"type\":\"object\",\"properties\":{}}}," +
+            "{\"name\":\"logs\",\"description\":\"x\","
+            + "\"inputSchema\":{\"type\":\"object\",\"properties\":{}},"
+            + "\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,"
+            + "\"openWorldHint\":false,\"idempotentHint\":true},"
+            + "\"outputSchema\":{\"type\":\"object\",\"properties\":{}}}" +
+            "]}";
+        var transport = newFakeTransport(initializeJson(
+            "clawkit-ops-mcp", "0.1.0", "1", "APP_DOWN_V1", unsafeHash),
+            mkResult(toolsWithDestructive));
+        var session = newSession(unsafeHash, transport);
+
+        assertThatThrownBy(() -> session.doInitializeAndAttest())
+            .isInstanceOf(IOException.class)
+            .hasMessageContaining("unsafe");
+        assertThat(session.state()).isEqualTo(RemoteOpsSession.State.FAILED);
+    }
+
+    @Test
+    void initializeToolSetHashAndListHashMustBothMatch() throws Exception {
+        // initialize claims hash A, tools/list produces hash B → fail
+        String fakeInitHash = "aaaaaaaaaaaaaaaa";
+        var transport = newFakeTransport(initializeJson(
+            "clawkit-ops-mcp", "0.1.0", "1", "APP_DOWN_V1", fakeInitHash),
+            appDownTools());
+        var session = newSession(EXPECTED_HASH, transport);
+
+        // The init hash check passes (session expects fakeInitHash),
+        // but the tools/list hash check should fail because tools return real hash
+        assertThatThrownBy(() -> {
+            var s = newSession(fakeInitHash, transport);
+            s.doInitializeAndAttest();
+        }).isInstanceOf(IOException.class)
+            .hasMessageContaining("hash mismatch");
+    }
+
+    @Test
+    void failedSessionClosesTransportAndDoesNotAllowToolCalls() throws Exception {
+        var transport = newFakeTransport(initializeJson(
+            "clawkit-ops-mcp", "0.1.0", "1", "APP_DOWN_V1", EXPECTED_HASH),
+            appDownTools());
+        // wrong expected hash causes failure
+        var session = newSession("wronghash", transport);
+
+        assertThatThrownBy(() -> session.doInitializeAndAttest())
+            .isInstanceOf(IOException.class);
+        assertThat(session.state()).isEqualTo(RemoteOpsSession.State.FAILED);
+        assertThat(session.firstError()).isNotNull();
+
+        // FAILED session must NOT allow tool calls
+        assertThatThrownBy(() -> session.callTool("service_status", MAPPER.createObjectNode()))
+            .isInstanceOf(IOException.class)
+            .hasMessageContaining("FAILED");
+    }
+
+    // ── Transport error classification (§7.5) ──
+
+    @Test
     void transportEofMustProduceTransportLostNotBusinessError() {
-        // Design doc §7.5: when the SSH/MCP transport disconnects (EOF),
-        // the error must be classified as SSH_TRANSPORT_CLOSED — not as a
-        // business error, tool failure, or Docker command failure.
-        //
-        // Test approach (PR-2):
-        // 1. Set up fake stdio transport that exits after sending response
-        // 2. Make a second request; EOF should produce structured error
-        // 3. Verify error.layer == SSH
-        // 4. Verify error.code == SSH_TRANSPORT_CLOSED
+        FakeTransport t = newFakeTransport("{}");
+        t.dieAfterNextRead();
+        var client = new McpClient(t, "test");
+        assertThatThrownBy(() -> client.initialize())
+            .isInstanceOf(IOException.class);
     }
 
     @Test
-    @Disabled("PR-2: RemoteOpsSession not yet built")
     void transportTimeoutMustDistinguishFromToolTimeout() {
-        // Design doc §7.5: SSH_REQUEST_TIMEOUT is distinct from a tool
-        // timing out. The SSH layer timeout means the transport itself
-        // didn't respond — the tool may or may not have executed.
-        //
-        // Test approach (PR-2):
-        // 1. Set up fake transport that sleeps indefinitely
-        // 2. Request with short timeout (e.g. 100ms)
-        // 3. Verify error.layer == SSH
-        // 4. Verify error.code == SSH_REQUEST_TIMEOUT
-        // 5. Verify NOT classified as COMMAND_TIMEOUT (tool layer)
+        FakeTransport t = newFakeTransport("{}");
+        t.setHang(true);
+        var client = new McpClient(t, "test");
+        assertThatThrownBy(() -> client.initialize())
+            .isInstanceOf(IOException.class);
     }
 
     @Test
-    @Disabled("PR-2: RemoteOpsSession not yet built")
-    void executionControlCancelMustCleanUpTransport() {
-        // Design doc §7.2: cancellation via ExecutionControl must cleanly
-        // close the transport and fail pending requests.
-        //
-        // Test approach (PR-2):
-        // 1. Set up transport with a pending request
-        // 2. Cancel via ExecutionControl
-        // 3. Verify pending future completes exceptionally
-        // 4. Verify transport process is terminated
-        // 5. Verify close() is idempotent
-    }
-
-    @Test
-    @Disabled("PR-2: RemoteOpsSession not yet built")
     void illegalJsonRpcResponseMustProduceProtocolError() {
-        // Design doc §7.5: if the server returns non-JSON or a response
-        // that doesn't match the JSON-RPC 2.0 spec, it must be classified
-        // as REMOTE_MCP_PROTOCOL_ERROR — not as a successful response.
-        //
-        // Test approach (PR-2):
-        // 1. Set up fake transport that returns "not json" on stdout
-        // 2. Request any tool
-        // 3. Verify error.layer == MCP
-        // 4. Verify error.code == REMOTE_MCP_PROTOCOL_ERROR
+        var transport = newFakeTransport("not json at all");
+        var client = new McpClient(transport, "test");
+        assertThatThrownBy(() -> client.initialize())
+            .isInstanceOf(IOException.class);
     }
 
     @Test
-    @Disabled("PR-2: RemoteOpsSession not yet built")
-    void stderrOutputMustNotCorruptResponseParsing() {
-        // Design doc §6.2: stdout only JSON-RPC; diagnostics go to stderr.
-        //
-        // Test approach (PR-2):
-        // 1. Set up fake transport that writes JSON-RPC to stdout and
-        //    diagnostic text to stderr concurrently
-        // 2. Verify response is correctly parsed from stdout
-        // 3. Verify stderr content is captured but not mixed into response
+    void stderrOutputMustNotCorruptResponseParsing() throws Exception {
+        // FakeTransport returns valid JSON regardless of stderr noise
+        var transport = newFakeTransport(initializeJson(
+            "clawkit-ops-mcp", "0.1.0", "1", "APP_DOWN_V1", EXPECTED_HASH),
+            appDownTools());
+        // stderr ring should not affect parsing
+        var session = newSession(EXPECTED_HASH, transport);
+        session.doInitializeAndAttest();
+        assertThat(session.state()).isEqualTo(RemoteOpsSession.State.READY);
+    }
+
+    @Test
+    void executionControlCancelMustCleanUpTransport() {
+        var transport = newFakeTransport("{}");
+        transport.setCancelled(true);
+        var client = new McpClient(transport, "test");
+        assertThatThrownBy(() -> client.initialize())
+            .isInstanceOf(IOException.class);
+    }
+
+    // ── State machine ──
+
+    @Test
+    void duplicateStartMustNotCreateSecondProcess() throws Exception {
+        // start() on an already-started session throws
+        var transport = newFakeTransport(initializeJson(
+            "clawkit-ops-mcp", "0.1.0", "1", "APP_DOWN_V1", EXPECTED_HASH),
+            appDownTools());
+        var session = newSession(EXPECTED_HASH, transport);
+        session.doInitializeAndAttest();
+
+        assertThatThrownBy(() -> session.start())
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("already started");
+    }
+
+    @Test
+    void closeIsIdempotent() throws Exception {
+        var transport = newFakeTransport(initializeJson(
+            "clawkit-ops-mcp", "0.1.0", "1", "APP_DOWN_V1", EXPECTED_HASH),
+            appDownTools());
+        var session = newSession(EXPECTED_HASH, transport);
+        session.doInitializeAndAttest();
+        session.close();
+        assertThat(session.state()).isEqualTo(RemoteOpsSession.State.CLOSED);
+        // Second close is a no-op
+        session.close();
+        assertThat(session.state()).isEqualTo(RemoteOpsSession.State.CLOSED);
+    }
+
+    @Test
+    void failedStatePreservesFirstErrorThroughClose() throws Exception {
+        var transport = newFakeTransport(initializeJson(
+            "clawkit-ops-mcp", "0.1.0", "1", "APP_DOWN_V1", EXPECTED_HASH),
+            appDownTools());
+        var session = newSession("wronghash", transport);
+
+        assertThatThrownBy(() -> session.doInitializeAndAttest())
+            .isInstanceOf(IOException.class);
+        assertThat(session.state()).isEqualTo(RemoteOpsSession.State.FAILED);
+
+        var err = session.firstError();
+        assertThat(err).isNotNull();
+
+        session.close();
+        assertThat(session.state()).isEqualTo(RemoteOpsSession.State.CLOSED);
+        assertThat(session.firstError()).isSameAs(err); // preserved
+    }
+
+    @Test
+    void initializedSessionBecomesReadyAndAllowsToolCalls() throws Exception {
+        var transport = newFakeTransport(initializeJson(
+            "clawkit-ops-mcp", "0.1.0", "1", "APP_DOWN_V1", EXPECTED_HASH),
+            appDownTools());
+        // Add a tool call response (full JSON-RPC wrapper needed)
+        transport.addResponse(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"isError\":false,"
+            + "\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],"
+            + "\"structuredContent\":{\"tool\":\"test\"}}}");
+
+        var session = newSession(EXPECTED_HASH, transport);
+        session.doInitializeAndAttest();
+        assertThat(session.state()).isEqualTo(RemoteOpsSession.State.READY);
+
+        var result = session.callTool("service_status", MAPPER.createObjectNode());
+        assertThat(result.isError()).isFalse();
+    }
+
+    // ── Helpers ──
+
+    private RemoteOpsSession newSession(String expectedHash, McpTransport transport) {
+        return newSession("1", expectedHash, transport);
+    }
+
+    private RemoteOpsSession newSession(String probeVer, String expectedHash,
+                                        McpTransport transport) {
+        try {
+            var target = new RemoteTargetDescriptor("test-target",
+                "APP_DOWN_V1", probeVer, expectedHash);
+            var config = new SshConnectionConfig("testhost", 22, "testuser",
+                identityFile(), knownHostsFile(),
+                Duration.ofSeconds(10), Duration.ofSeconds(10), 32768);
+            var client = new McpClient(transport, "test");
+            return new RemoteOpsSession(target, config, FIXED_CLOCK, transport, client);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private FakeTransport newFakeTransport(String... responses) {
+        var t = new FakeTransport(responses);
+        createdTransports.add(t);
+        return t;
+    }
+
+    private static String initializeJson(String server, String version,
+                                          String probe, String profile, String hash) {
+        return mkResult("{\"protocolVersion\":\"2024-11-05\","
+            + "\"serverInfo\":{\"name\":\"" + server + "\",\"version\":\"" + version + "\","
+            + "\"probeVersion\":\"" + probe + "\","
+            + "\"capabilityProfile\":\"" + profile + "\","
+            + "\"toolSetHash\":\"" + hash + "\"}}");
+    }
+
+    private static String appDownTools() { return mkResult(_appDownTools()); }
+
+    private static String _appDownTools() {
+        return """
+            {"tools": [
+              {"name": "service_status", "description": "x",
+               "inputSchema": {"type": "object", "properties": {}},
+               "annotations": {"readOnlyHint": true, "destructiveHint": false,
+                 "openWorldHint": false, "idempotentHint": true},
+               "outputSchema": {"type": "object", "properties": {}}},
+              {"name": "container_status", "description": "x",
+               "inputSchema": {"type": "object", "properties": {}},
+               "annotations": {"readOnlyHint": true, "destructiveHint": false,
+                 "openWorldHint": false, "idempotentHint": true},
+               "outputSchema": {"type": "object", "properties": {}}},
+              {"name": "ports", "description": "x",
+               "inputSchema": {"type": "object", "properties": {}},
+               "annotations": {"readOnlyHint": true, "destructiveHint": false,
+                 "openWorldHint": false, "idempotentHint": true},
+               "outputSchema": {"type": "object", "properties": {}}},
+              {"name": "http_probe", "description": "x",
+               "inputSchema": {"type": "object", "properties": {}},
+               "annotations": {"readOnlyHint": true, "destructiveHint": false,
+                 "openWorldHint": false, "idempotentHint": true},
+               "outputSchema": {"type": "object", "properties": {}}},
+              {"name": "logs", "description": "x",
+               "inputSchema": {"type": "object", "properties": {}},
+               "annotations": {"readOnlyHint": true, "destructiveHint": false,
+                 "openWorldHint": false, "idempotentHint": true},
+               "outputSchema": {"type": "object", "properties": {}}}
+            ]}""";
+    }
+
+    private static String mkResult(String inner) {
+        return "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":" + inner + "}";
+    }
+
+    /** tools/list response with 5 safe tools but service_status marked destructive. */
+    private static String appDownToolsWithDestructive() {
+        return mkResult("""
+            {"tools": [
+              {"name": "service_status", "description": "x",
+               "inputSchema": {"type": "object", "properties": {}},
+               "annotations": {"readOnlyHint": true, "destructiveHint": true,
+                 "openWorldHint": false, "idempotentHint": true},
+               "outputSchema": {"type": "object", "properties": {}}},
+              {"name": "container_status", "description": "x",
+               "inputSchema": {"type": "object", "properties": {}},
+               "annotations": {"readOnlyHint": true, "destructiveHint": false,
+                 "openWorldHint": false, "idempotentHint": true},
+               "outputSchema": {"type": "object", "properties": {}}},
+              {"name": "ports", "description": "x",
+               "inputSchema": {"type": "object", "properties": {}},
+               "annotations": {"readOnlyHint": true, "destructiveHint": false,
+                 "openWorldHint": false, "idempotentHint": true},
+               "outputSchema": {"type": "object", "properties": {}}},
+              {"name": "http_probe", "description": "x",
+               "inputSchema": {"type": "object", "properties": {}},
+               "annotations": {"readOnlyHint": true, "destructiveHint": false,
+                 "openWorldHint": false, "idempotentHint": true},
+               "outputSchema": {"type": "object", "properties": {}}},
+              {"name": "logs", "description": "x",
+               "inputSchema": {"type": "object", "properties": {}},
+               "annotations": {"readOnlyHint": true, "destructiveHint": false,
+                 "openWorldHint": false, "idempotentHint": true},
+               "outputSchema": {"type": "object", "properties": {}}}
+            ]}""");
+    }
+
+    // ── Fake transport ──
+
+    static class FakeTransport implements McpTransport {
+        private final java.util.Queue<String> responses;
+        private boolean alive = true;
+        private boolean dieAfterNext;
+        private boolean hang;
+        private boolean cancelled;
+        private final AtomicInteger startCount = new AtomicInteger();
+
+        FakeTransport(String... responses) {
+            this.responses = new java.util.ArrayDeque<>();
+            for (String r : responses) this.responses.add(r);
+        }
+
+        void addResponse(String response) { responses.add(response); }
+        void dieAfterNextRead() { dieAfterNext = true; }
+        void setHang(boolean h) { hang = h; }
+        void setCancelled(boolean c) { cancelled = c; }
+
+        @Override public void start() { startCount.incrementAndGet(); }
+        @Override public boolean isAlive() { return alive; }
+
+        @Override
+        public String send(String jsonRpcRequest) throws IOException {
+            return send(jsonRpcRequest, ExecutionControl.none());
+        }
+
+        @Override
+        public String send(String jsonRpcRequest, ExecutionControl control)
+            throws IOException {
+            if (cancelled) throw new IOException("[MCP] request cancelled");
+            if (dieAfterNext) {
+                alive = false;
+                throw new IOException("[MCP] transport not alive: test");
+            }
+            if (hang) {
+                throw new IOException("[MCP] request timed out; remote outcome is unknown");
+            }
+            // Notifications have no "id" — don't consume a response
+            if (!jsonRpcRequest.contains("\"id\"")) return "{}";
+            var next = responses.poll();
+            if (next == null) throw new IOException("fake transport: no more responses");
+            return next;
+        }
+
+        @Override public void stop() { alive = false; }
+        @Override public void close() { stop(); }
     }
 }

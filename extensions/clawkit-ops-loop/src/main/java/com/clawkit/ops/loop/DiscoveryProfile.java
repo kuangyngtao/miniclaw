@@ -2,6 +2,7 @@ package com.clawkit.ops.loop;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 
 /**
  * A versioned discovery profile that declares which evidence to collect
@@ -38,36 +39,38 @@ public record DiscoveryProfile(
         List.of(
             EvidenceSpec.required("service_status", EvidenceType.SERVICE_STATUS,
                 "compose/gateway", "service_status", 1,
-                Duration.ofSeconds(10), Duration.ofMinutes(2)),
+                Duration.ofSeconds(10), Duration.ofMinutes(2),
+                Map.of("service", "gateway")),
             EvidenceSpec.required("service_status", EvidenceType.SERVICE_STATUS,
                 "compose/demo-api", "service_status", 2,
-                Duration.ofSeconds(10), Duration.ofMinutes(2)),
+                Duration.ofSeconds(10), Duration.ofMinutes(2),
+                Map.of("service", "demo-api")),
             EvidenceSpec.required("container_status", EvidenceType.CONTAINER_STATUS,
                 "container/gateway", "container_status", 3,
-                Duration.ofSeconds(10), Duration.ofMinutes(2)),
+                Duration.ofSeconds(10), Duration.ofMinutes(2),
+                Map.of("service", "gateway")),
             EvidenceSpec.required("container_status", EvidenceType.CONTAINER_STATUS,
                 "container/demo-api", "container_status", 4,
-                Duration.ofSeconds(10), Duration.ofMinutes(2)),
+                Duration.ofSeconds(10), Duration.ofMinutes(2),
+                Map.of("service", "demo-api")),
             EvidenceSpec.required("ports", EvidenceType.PORT_BINDING,
                 "compose/gateway:80", "ports", 5,
-                Duration.ofSeconds(10), Duration.ofMinutes(2)),
+                Duration.ofSeconds(10), Duration.ofMinutes(2),
+                Map.of("service", "gateway", "containerPort", 80)),
             EvidenceSpec.required("http_probe", EvidenceType.HTTP_PROBE,
                 "endpoint/gateway-health", "http_probe", 6,
-                Duration.ofSeconds(15), Duration.ofMinutes(2)),
-            EvidenceSpec.required("container_resources", EvidenceType.CONTAINER_RESOURCE,
-                "container/gateway", "container_resources", 7,
-                Duration.ofSeconds(10), Duration.ofMinutes(2)),
-            EvidenceSpec.required("container_resources", EvidenceType.CONTAINER_RESOURCE,
-                "container/demo-api", "container_resources", 8,
-                Duration.ofSeconds(10), Duration.ofMinutes(2)),
+                Duration.ofSeconds(15), Duration.ofMinutes(2),
+                Map.of("endpoint", "gateway-health")),
             EvidenceSpec.optional("logs", EvidenceType.LOGS,
-                "container/gateway", "logs", 9,
-                Duration.ofSeconds(30), Duration.ofMinutes(5)),
+                "container/gateway", "logs", 7,
+                Duration.ofSeconds(30), Duration.ofMinutes(5),
+                Map.of("service", "gateway", "windowSeconds", 300, "tail", 100)),
             EvidenceSpec.optional("logs", EvidenceType.LOGS,
-                "container/demo-api", "logs", 10,
-                Duration.ofSeconds(30), Duration.ofMinutes(5))
+                "container/demo-api", "logs", 8,
+                Duration.ofSeconds(30), Duration.ofMinutes(5),
+                Map.of("service", "demo-api", "windowSeconds", 300, "tail", 100))
         ),
-        7 // all required specs must succeed
+        6 // all 6 required specs must succeed
     );
 
     public static final DiscoveryProfile REMOTE_POSTGRES_DIAGNOSIS_V1 = new DiscoveryProfile(
