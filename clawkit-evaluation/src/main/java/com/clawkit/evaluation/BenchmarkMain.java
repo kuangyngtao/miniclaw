@@ -15,7 +15,7 @@ import java.util.List;
  * <pre>{@code
  * mvn -pl clawkit-evaluation -am -Pbenchmark verify -Dbenchmark.mode=run
  * mvn -pl clawkit-evaluation -am -Pbenchmark verify -Dbenchmark.mode=compare
- * mvn -pl clawkit-evaluation -am exec:java -Dexec.mainClass=... -Dexec.args="baseline"
+ * mvn -pl clawkit-evaluation -am -Pbenchmark verify "-Dexec.args=baseline"
  * }</pre>
  *
  * <p>安全语义：

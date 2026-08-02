@@ -13,6 +13,7 @@ COPY clawkit-cli/pom.xml clawkit-cli/pom.xml
 COPY clawkit-evaluation/pom.xml clawkit-evaluation/pom.xml
 COPY extensions/clawkit-ops-mcp/pom.xml extensions/clawkit-ops-mcp/pom.xml
 COPY extensions/clawkit-ops-loop/pom.xml extensions/clawkit-ops-loop/pom.xml
+COPY extensions/clawkit-ops-delivery/pom.xml extensions/clawkit-ops-delivery/pom.xml
 RUN mvn -B -ntp -pl clawkit-cli -am dependency:go-offline
 COPY clawkit-tools clawkit-tools
 COPY clawkit-reliability clawkit-reliability
@@ -22,6 +23,9 @@ COPY clawkit-memory clawkit-memory
 COPY clawkit-observability clawkit-observability
 COPY clawkit-engine clawkit-engine
 COPY clawkit-im clawkit-im
+COPY extensions/clawkit-ops-mcp extensions/clawkit-ops-mcp
+COPY extensions/clawkit-ops-loop extensions/clawkit-ops-loop
+COPY extensions/clawkit-ops-delivery extensions/clawkit-ops-delivery
 COPY clawkit-cli clawkit-cli
 RUN mvn -B -ntp -pl clawkit-cli -am package -DskipTests
 RUN find clawkit-cli/target -maxdepth 1 -name 'clawkit-cli-*.jar' ! -name 'original-*' \

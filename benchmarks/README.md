@@ -39,10 +39,10 @@ mvn -pl clawkit-evaluation -am -Pbenchmark verify "-Dbenchmark.mode=run"
 mvn -pl clawkit-evaluation -am -Pbenchmark verify "-Dbenchmark.mode=compare"
 
 # Generate candidate baseline (never overwrites formal baseline)
-mvn -pl clawkit-evaluation -am exec:java -Dexec.mainClass=com.clawkit.evaluation.BenchmarkMain -Dexec.args="baseline"
+mvn -pl clawkit-evaluation -am -Pbenchmark verify "-Dexec.args=baseline"
 
 # List cases
-mvn -pl clawkit-evaluation -am exec:java -Dexec.mainClass=com.clawkit.evaluation.BenchmarkMain -Dexec.args="list"
+mvn -pl clawkit-evaluation -am -Pbenchmark verify "-Dexec.args=list"
 ```
 
 ## Baseline promotion

@@ -118,13 +118,17 @@ API Key 只能通过环境变量提供，禁止写入 `config.yaml`。非敏感�
 | `/mcp` | 管理 MCP Server |
 | `/remote` | 查看当前远程连接状态 |
 | `/remote list` | 查看已登记服务器 |
+| `/remote add --from-ssh <alias>` | 从现有 OpenSSH 配置登记服务器 |
+| `/remote doctor <targetId>` | 检查 SSH、认证、主机身份和远端能力 |
 | `/remote connect <targetId>` | 连接已登记服务器 |
+| `/remote inspect <targetId>` | 查看目标和能力合同详情 |
+| `/remote remove <targetId>` | 删除已登记服务器 |
 | `/remote disconnect` | 断开当前服务器 |
 | `/remote tools` | 查看当前挂载的预定义远程能力 |
 | `/feishu-on`、`/feishu-off` | 开关飞书通道镜像 |
 | `/exit` | 退出 |
 
-当前版本的 Target 导入仍以高级 YAML 配置为主。下一阶段会优先复用 `~/.ssh/config`、SSH Agent 和系统 `known_hosts`，并增加连接诊断和用户向状态展示；在这些能力实现前，不应把目标体验示例误写成当前可用命令。产品方向和体验验收见 [docs/product-direction.md](docs/product-direction.md)。
+普通接入路径会复用 OpenSSH config、SSH Agent 和系统 `known_hosts`；Clawkit 保存逻辑目标和受支持的能力合同，不复制私钥。高级 YAML 导入继续作为兼容入口。首次使用建议依次运行 `/remote add --from-ssh <alias>`、`/remote doctor <targetId>` 和 `/remote connect <targetId>`。完整命令与文档状态见 [docs/README.md](docs/README.md)。
 
 ## MCP 扩展
 
@@ -217,24 +221,23 @@ Built-in Tools / MCP Tools / Safety Interceptors
 
 ## 项目文档
 
+- [docs/README.md](docs/README.md)：完整文档地图、推荐阅读顺序和文档状态说明
 - [CLAUDE.md](./CLAUDE.md)：AI 协作入口、项目边界和强约束
 - [docs/product-direction.md](docs/product-direction.md)：目标用户、产品承诺、核心旅程、技术调研和近期体验路线
 - [DESIGN.md](./DESIGN.md)：架构原则、类设计、接口设计、解耦、测试和代码审查规范
 - [TODO.md](./TODO.md)：当前路线图和重构待办
 - [docs/ops-loop.md](docs/ops-loop.md)：远程运维闭环的架构、安全边界和演进路线
 - [docs/project-deep-dive-guide.md](docs/project-deep-dive-guide.md)：面向个人学习和秋招准备的项目全览
-- [docs/ops-mvp2-business-fixture-report-feishu-plan.md](docs/ops-mvp2-business-fixture-report-feishu-plan.md)：业务故障、事故报告和飞书通知的当前进度与验收标准
-- [docs/project-highlights-and-ops-loop-roadmap.md](docs/project-highlights-and-ops-loop-roadmap.md)：2026-07-17 阶段性历史快照，不作为当前状态来源
 - [SECURITY.md](./SECURITY.md)：安全策略和漏洞报告方式
 
 ## 演进方向
 
 运行底座、远程只读连接和第一个审批修复闭环已经建立。后续顺序以 [TODO.md](./TODO.md) 为准：
 
-1. 打磨服务器接入：复用 OpenSSH 配置和 Agent，提供 doctor、简洁状态与可执行错误提示。
-2. 统一“快速查看”和“深度调查”入口，让普通 CLI 能顺手进入现有 Ops Loop。
-3. 重排审批展示，使用户先看到原因、影响和保护措施，内部 ID 与哈希按需展开。
-4. 通过连续真实使用收集摩擦、耗时和成本，再评审 Observe-only 持续运行与 Shadow；不整体切换 Agent 权限。
+1. 补齐无需 Incident 的 Quick Check，让“服务是否正常、最近有什么错误”成为一句话任务。
+2. 通过真实远端 dogfood 检验现有调查、审批修复和独立验证产品链，优先修复重复出现的摩擦。
+3. 记录首次连接、有效结果、调查耗时、成本和人工决策等最小产品数据。
+4. 数据足够后再评审 Observe-only 持续运行与 Shadow；不整体切换 Agent 权限。
 
 更详细的待办见 [TODO.md](./TODO.md)。
 

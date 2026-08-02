@@ -2190,7 +2190,7 @@ flowchart LR
 
 ### 15.1 PRODUCT-1：先让服务器接入变得自然
 
-REMOTE-0 已经证明本地 CLI 可以通过严格合同连接远端、挂载预定义工具并在断开后清理资源。下一步解决的不是协议问题，而是用户第一次使用的问题：
+REMOTE-0 已经证明本地 CLI 可以通过严格合同连接远端、挂载预定义工具并在断开后清理资源。PRODUCT-1 随后把第一次使用路径接入了普通 CLI：
 
 ```text
 发现已有 SSH Host
@@ -2200,7 +2200,7 @@ REMOTE-0 已经证明本地 CLI 可以通过严格合同连接远端、挂载预
 → 给出 READY 或可执行的修复建议
 ```
 
-普通用户不手写 YAML、密钥路径和工具合同哈希。实现上复用 OpenSSH config、SSH Agent、known_hosts 和 `ssh -G` 的解析结果；Clawkit 只保存目标别名与非秘密元数据。详细 hash、generation、profile 和工具清单进入 `inspect`，不占据默认 `status`。
+普通用户不手写 YAML、密钥路径和工具合同哈希。实现上复用 OpenSSH config、SSH Agent、known_hosts 和 `ssh -G` 的解析结果；Clawkit 只保存目标别名与非秘密元数据。详细 hash、generation、profile 和工具清单进入 `inspect`，不占据默认 `status`。当前剩余工作不是继续扩展 SSH 抽象，而是用真实远端首次接入验证提示是否足够清楚。
 
 ### 15.2 PRODUCT-2：把 Quick Check 和 OPS 调查连起来
 
@@ -2216,6 +2216,8 @@ REMOTE-0 已经证明本地 CLI 可以通过严格合同连接远端、挂载预
 ```
 
 REMOTE 负责“连到哪里、允许调用什么”，OPS Loop 负责“问题是什么、证据是否充分、下一步怎么办”。这是同一个产品的入口和核心，而不是两条竞争路线。
+
+其中 Investigation、持久 Incident、最近调查和继续处理已经接入 CLI；当前缺口是前半段 Quick Check，即在不创建 Incident 的情况下回答一次简单状态问题。
 
 ### 15.3 PRODUCT-3：让审批闭环真正可用
 

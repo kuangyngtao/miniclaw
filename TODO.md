@@ -2,7 +2,7 @@
 
 > 状态：`[ ]` 未开始，`[~]` 部分完成或正在迁移，`[x]` 已满足全部验收标准。
 
-本文档只维护当前事实、实施顺序和验收标准。项目边界看 [CLAUDE.md](CLAUDE.md)，稳定工程规范看 [DESIGN.md](DESIGN.md)，项目现状和技术亮点看 [docs/project-highlights-and-ops-loop-roadmap.md](docs/project-highlights-and-ops-loop-roadmap.md)，Ops 目标架构和门禁看 [docs/ops-loop.md](docs/ops-loop.md)。
+本文档只维护当前事实、实施顺序和验收标准。项目边界看 [CLAUDE.md](CLAUDE.md)，稳定工程规范看 [DESIGN.md](DESIGN.md)，文档地图看 [docs/README.md](docs/README.md)，产品方向看 [docs/product-direction.md](docs/product-direction.md)，Ops 目标架构和门禁看 [docs/ops-loop.md](docs/ops-loop.md)。
 
 ## 维护规则
 
@@ -15,7 +15,7 @@
 
 ## 当前代码事实
 
-截至 2026-07-29：
+截至 2026-08-02：
 
 - 全量回归覆盖 14 个 Reactor 模块并通过；真实网络 E2E 与普通 CI 已分组隔离。具体历史数字只保留在下方验证记录，不用累计测试数量代替产品完成度。
 - 新增 `clawkit-reliability` 模块（可靠性内核）+ `clawkit-ops-delivery` 模块（OPS 报告/通知 composition）。
@@ -33,13 +33,15 @@
 - 远端验证（122.51.51.118）：Fixture 部署成功、HOT_ACCOUNT_CONTENTION_V1 真实锁竞争确认（db_lock_graph 11 行阻塞链、5 活跃 Lock wait）、E2E 20/20 轮全部通过、业务不变量 100 账户全部通过。
 - OPS MVP-3 已完成审批修复、fresh precheck、受限执行、独立验证和严格证据包；最终 20/20 `VERIFIED_SUCCESS`，机器汇总 `passed=true`。
 - REMOTE-0 交付（2026-07-29）：`clawkit-tools` 新增通用 remote 类型；`clawkit-cli` 完成 Target Store、ConnectionService、自然语言连接、generation-bound 动态工具挂载和完整 ToolExecution 链；服务端/客户端双层脱敏、合同 pin、证据引用、退出清理和 CI E2E 隔离已完成。当前远端 `POSTGRES_DIAGNOSIS_V1` E2E 为 10/10；`APP_DOWN_V1` 五工具真机切换验证作为非阻塞兼容性补测保留。
+- PRODUCT-1 已完成 OpenSSH alias 导入、Target onboarding、doctor、状态展示、合同校验和安装引导；本地产品 E2E 与跨模块合同测试通过，真实远端 v2 产品 E2E 作为非阻塞 dogfood 证据保留。
+- OPS-PRODUCT-LOOP-1 已把普通 CLI 接到调查、人工审批、受限修复和独立验证主链；本地产品 E2E 13/13 与全量回归通过，里程碑冻结为 `CONDITIONAL_PASS / FROZEN`，等待首次真实远端产品链 dogfood。
 
 ## 当前执行顺序
 
 当前不再扩展新的 Runtime 底层抽象，也不继续以工具数量和测试数量推动路线。产品方向见 [docs/product-direction.md](docs/product-direction.md)，当前顺序固定为：
 
 1. **[x] PRODUCT-0：产品方向冻结**：明确目标用户是管理少量 Linux 服务的个人开发者；Remote 是可信入口，Ops Loop 是查看、调查、处置和验证的核心问题解决流程。
-2. **[ ] PRODUCT-1：服务器接入体验**：复用 OpenSSH config/Agent/known_hosts，增加导入向导、doctor、简洁 status 和高级 inspect；普通路径不手写 YAML、key path 或工具 hash。
+2. **[x] PRODUCT-1：服务器接入体验**：已交付 OpenSSH config/Agent/known_hosts 复用、导入向导、doctor、简洁 status 和高级 inspect；普通路径不手写 YAML、key path 或工具 hash。真实远端 v2 产品 E2E 作为非阻塞 dogfood 证据保留。
 3. **[~] PRODUCT-2：快速查看与 Ops 调查统一入口**：一句自然语言可以完成 Quick Check；明确调查请求或发现异常时进入现有 `RemoteDiscoveryWorkflow` 和 Incident，不重写 Ops 状态机。
    OPS-PRODUCT-LOOP-1 已交付调查入口、中文报告、Incident 持久化和 recent/inspect/continue 命令。Quick Check 用户任务尚未实现。
 4. **[~] PRODUCT-3：审批体验与个人真实使用**：按”发现、建议、原因、影响、执行前保护、执行后验证”展示 MVP-3；连续使用至少 7 天，先修复真实摩擦。
@@ -85,21 +87,25 @@
 
 实施切片、安全门禁和反方评审统一见 [docs/product-1-implementation-plan.md](docs/product-1-implementation-plan.md)；本节只维护任务状态和验收结果。
 
-- **[ ] 复用 OpenSSH 目标与认证**（cli / tools）
+- **[x] 复用 OpenSSH 目标与认证**（cli / tools）
   从用户级、系统级和 Include 形成的 SSH config 图列出 Host alias；静态安全审计通过后，使用 `ssh -G` 获取展开后的 host/user/port/identity/ProxyJump；支持 SSH Agent。Clawkit 只保存逻辑 targetId、SSH alias 和 profile manifest ID，不保存私钥内容或另存 host key 信任状态。
   验收：已有 SSH alias 的用户不重复填写 endpoint；带口令密钥可通过 Agent 使用；Clawkit 强制的禁 PTY/forwarding、strict host key 等安全参数不能被用户配置放宽。
+  ✅ 2026-08-02 — OpenSSH alias 解析、安全审计和受控连接参数已进入生产路径并通过机械测试。
 
-- **[ ] Target 添加向导与 profile manifest**（cli / tools / ops-mcp）
+- **[x] Target 添加向导与 profile manifest**（cli / tools / ops-mcp）
   `/remote add` 默认进入交互选择或支持 `--from-ssh <alias>`；内置受支持 profile 的 server/protocol/tool contract manifest，普通用户不填写 toolSetHash/contractHash；高级 YAML 导入继续兼容。
   验收：普通路径不手写 YAML、hash、known_hosts 路径和 key path；远端合同漂移仍 fail closed；自定义 profile 不隐式信任。
+  ✅ 2026-08-02 — `/remote add --from-ssh`、显式确认/取消、内置 profile catalog 和完整 cross-contract test 已交付。
 
-- **[ ] `/remote doctor` 与渐进式状态展示**（cli）
+- **[x] `/remote doctor` 与渐进式状态展示**（cli）
   doctor 检查 OpenSSH 配置、Agent、host key、连接、远端组件和 capability；status 默认只展示目标、连接状态、只读/可写范围和可用能力，inspect 才展示完整 attestation。
   验收：已知错误 100% 展示原因、影响和下一步；所有远程结果显示当前 target；应用退出无 SSH 或工具挂载残留。
+  ✅ 2026-08-02 — doctor 分阶段检查、结构化错误、JSON/verbose 输出和退出清理已通过测试。
 
-- **[ ] 远端组件安装与撤销引导**（docs / ops-mcp）
+- **[x] 远端组件安装与撤销引导**（docs / ops-mcp）
   给出可审查、可验证、可撤销的服务器侧安装路径。Clawkit 不静默执行 sudo；安装缺失时 doctor 给出明确步骤。
   验收：从已有 SSH 到第一个只读检查的文档路径可重复；安装和撤销脚本不扩大现有 opsro/opsfix 权限。
+  ✅ 2026-08-02 — CLI 首用帮助、既有安装/验证/撤销脚本和安全边界说明已接通；不静默执行 sudo。
 
 ### PRODUCT-2：快速查看与 Ops 调查
 
@@ -107,13 +113,15 @@
   将“看看 order-api 是否正常”“总结最近十分钟错误”组织为用户任务，模型按需调用预定义工具并输出目标、状态、影响、证据时间和下一步。Quick Check 不强制创建 Incident。
   验收：一句自然语言产生带真实 run/tool evidence ref 的摘要；用户不需要知道工具名；无已连接目标时只请求选择或连接，不构造任意 IP。
 
-- **[ ] Investigation 产品入口**（cli / ops-loop / ops-delivery）
+- **[x] Investigation 产品入口**（cli / ops-loop / ops-delivery）
   明确的“调查/诊断”请求，或 Quick Check 发现满足规则的异常后，进入现有 `RemoteDiscoveryWorkflow`。Incident、Evidence、Diagnosis、Repair 和 Verification 仍留在 OPS，不复制到 CLI。
   验收：一句“调查 test-server 上 order-api 为什么 500”生成持久 Incident；默认按“问题、影响、结论、反证、缺失证据、下一步”展示；证据不足时返回 INCONCLUSIVE。
+  ✅ 2026-08-02 — `/ops investigate`、自然语言窄路由、持久 Incident 和中文报告已交付并通过产品 E2E。
 
-- **[ ] 最近调查与继续处理**（cli / ops）
+- **[x] 最近调查与继续处理**（cli / ops）
   提供最近 Incident、继续最近调查、查看证据和待审批入口；用户默认不需要复制 incidentId，审计层仍使用稳定 ID。
   验收：CLI 重启后可以找到最近调查；多个 Incident 时必须明确选择，不能猜测目标。
+  ✅ 2026-08-02 — `/ops recent`、`inspect` 和 fail-closed `continue` 已进入生产路径；继续处理保持同一 Incident。
 
 ### PRODUCT-3：审批体验与真实使用
 

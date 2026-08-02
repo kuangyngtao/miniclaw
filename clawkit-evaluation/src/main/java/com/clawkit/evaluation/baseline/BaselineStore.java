@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Optional;
@@ -22,7 +23,10 @@ public class BaselineStore {
 
     public static void save(Path path, BaselineData baseline) throws IOException {
         Files.createDirectories(path.getParent());
-        MAPPER.writeValue(path.toFile(), baseline);
+        String json = MAPPER.writeValueAsString(baseline)
+            .replace("\r\n", "\n")
+            .replace('\r', '\n');
+        Files.writeString(path, json + "\n", StandardCharsets.UTF_8);
     }
 
     public static Optional<BaselineData> load(Path path) {

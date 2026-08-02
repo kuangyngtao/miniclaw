@@ -2,7 +2,7 @@
 
 > 决策日期：2026-07-30
 >
-> 状态：待实现
+> 状态：已实现并封板；本文保留为技术方案与反方评审记录，当前状态以 [TODO.md](../TODO.md) 为准
 >
 > 产品目标见 [product-direction.md](product-direction.md)，稳定工程约束见 [DESIGN.md](../DESIGN.md)，当前状态见 [TODO.md](../TODO.md)
 > 本方案只覆盖 PRODUCT-1，不实现 Quick Check、Incident、Repair、持续调度或自动修复

@@ -12,6 +12,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
@@ -75,6 +76,19 @@ class RegressionComparatorTest {
         // SHA-256 fingerprints should be 64 hex chars
         assertThat(loaded.get().caseSetFingerprint()).hasSize(64);
         assertThat(loaded.get().scriptScorerFingerprint()).hasSize(64);
+    }
+
+    @Test
+    void shouldWritePortableLfTerminatedJson() throws Exception {
+        var baseline = BaselineData.from(
+            makeReport("test-case", true, 3, 5, 1, 200, 3),
+            specsFor("test-case"), "abc123");
+        Path path = tempDir.resolve("portable-baseline.json");
+
+        BaselineStore.save(path, baseline);
+
+        String json = Files.readString(path);
+        assertThat(json).doesNotContain("\r").endsWith("\n");
     }
 
     @Test

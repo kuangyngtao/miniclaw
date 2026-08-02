@@ -404,15 +404,15 @@ flowchart TB
 
 | 用户任务 | 当前状态 | 主要摩擦 |
 | --- | --- | --- |
-| 添加服务器 | 已有 YAML 导入 | 要理解并填写过多内部字段 |
-| 使用 SSH 凭据 | file/env 引用 | 未优先复用 SSH config 和 Agent |
-| 首次检查 | 可以连接和挂载工具 | 缺少 doctor、远端安装引导和完整快速开始 |
-| 查看连接 | 可以 status/show/tools | 默认输出偏实现细节，缺少简洁状态 |
-| 自然语言连接 | 已有窄格式路由 | 只覆盖连接管理，缺少完整用户任务入口 |
+| 添加服务器 | 支持从 OpenSSH alias 导入，YAML 为高级兼容入口 | 真实远端首次接入仍需 dogfood 验证 |
+| 使用 SSH 凭据 | 复用 SSH config、Agent 和 known_hosts | 带口令密钥依赖用户已配置 Agent |
+| 首次检查 | 已有 add → doctor → connect 引导 | 远端组件缺失时仍需用户按提示安装 |
+| 查看连接 | 已有简洁 status 和高级 inspect/tools | 需继续用真实使用反馈压缩信息量 |
+| 自然语言连接 | 已有连接和调查的窄格式路由 | 缺少无需 Incident 的 Quick Check |
 | 查看日志 | 工具链已通 | 用户仍需知道要调用哪些证据 |
-| 深度调查 | Ops Loop 已实现 | 尚未成为普通 CLI 中顺手的产品入口 |
-| 审批修复 | MVP-3 已实现 | 展示仍偏工程验收流程，需面向决策重排信息 |
-| 历史与持续关注 | 有 Run/Incident 事实 | 缺少面向个人用户的最近问题和待处理视图 |
+| 深度调查 | 已接入普通 CLI、Incident 和中文报告 | 真实远端产品链尚待 dogfood |
+| 审批修复 | 已接入人工审批、受限修复和独立验证 | 真实使用中的信息密度和恢复体验尚待验证 |
+| 历史与持续关注 | 已有 recent/inspect/continue | 尚无持续 Observe-only 触发和聚合视图 |
 
 ## 10. 近期路线
 
@@ -429,6 +429,8 @@ flowchart TB
 ### PRODUCT-1：服务器接入体验
 
 目标：让已有 SSH 的用户不手写 YAML 和 hash。
+
+状态：已实现并封板；本地产品 E2E 和跨模块合同测试通过，真实远端 v2 产品 E2E 作为非阻塞 dogfood 证据保留。
 
 技术实现、迁移、测试门禁与反方评审见 [product-1-implementation-plan.md](product-1-implementation-plan.md)。
 
@@ -453,6 +455,8 @@ flowchart TB
 
 目标：让用户从一句问题进入快速查看或深度调查。
 
+状态：部分完成；Investigation、Incident、recent/inspect/continue 已交付，Quick Check 尚未实现。
+
 范围：
 
 - 定义 Quick Check 与 Investigation 两种用户任务；
@@ -472,6 +476,8 @@ flowchart TB
 ### PRODUCT-3：审批体验与真实使用
 
 目标：让当前 MVP-3 从“工程闭环”变成用户能放心做决定的产品体验。
+
+状态：部分完成；本地 CLI 审批、受限修复和独立验证已接通，真实远端 dogfood 与连续使用尚未完成。
 
 范围：
 
