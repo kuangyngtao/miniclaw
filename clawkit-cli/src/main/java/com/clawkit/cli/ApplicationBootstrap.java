@@ -14,6 +14,10 @@ import com.clawkit.tools.ToolRegistry;
 import com.clawkit.context.SkillLoader;
 import com.clawkit.tools.impl.*;
 import com.clawkit.tools.mcp.*;
+import com.clawkit.cli.remote.FileRemoteTargetStore;
+import com.clawkit.cli.remote.RemoteConnectionService;
+import com.clawkit.cli.remote.RemoteTargetStore;
+import com.clawkit.ops.delivery.OpsInvestigationFacade;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -165,12 +169,89 @@ public class ApplicationBootstrap {
         sessionService.setProviderGateway(gateway);  // Session 摘要经 gateway
         engine.setSessionService(sessionService);
 
+        // REMOTE-0: Remote target store and connection service
+        Path remoteStorePath = clawkitDir.resolve("remote-targets.yaml");
+        RemoteTargetStore remoteTargetStore = new FileRemoteTargetStore(remoteStorePath);
+        RemoteConnectionService remoteService = new RemoteConnectionService(remoteTargetStore, registry);
+
+        // OPS-PRODUCT-LOOP-1: Investigation facade with session factories
+        // Borrow: reuse PRODUCT-1 connected session (never close)
+        OpsInvestigationFacade.InitialReadSessionProvider borrowProvider = targetId -> {
+            var session = remoteService.getSession();
+            if (session != null && session.isReady()
+                && targetId.equals(remoteService.activeTargetId())) {
+                return new com.clawkit.ops.delivery.RemoteMcpSessionAdapter(session);
+            }
+            throw new java.io.IOException(
+                "目标 " + targetId + " 未连接。请先使用 /remote connect " + targetId);
+        };
+
+        // Fresh: open a new SSH/MCP session using the stored target config
+        OpsInvestigationFacade.FreshReadSessionFactory freshFactory = targetId -> {
+            var reg = remoteTargetStore.getRegistration(targetId);
+            if (reg.isEmpty()) {
+                var targetConfig = remoteTargetStore.get(targetId)
+                    .orElseThrow(() -> new java.io.IOException("target not found: " + targetId));
+                var descriptor = com.clawkit.cli.remote.RemoteTargetResolver
+                    .resolveLegacyDescriptor(targetConfig);
+                var spec = com.clawkit.cli.remote.RemoteTargetResolver
+                    .resolveLegacyConnectionSpec(targetConfig);
+                var session = new com.clawkit.tools.remote.RemoteMcpSession(descriptor, spec);
+                session.start();
+                return new com.clawkit.ops.delivery.RemoteMcpSessionAdapter(session);
+            }
+            var descriptor = com.clawkit.cli.remote.RemoteTargetResolver
+                .resolveDescriptor(reg.get());
+            var spec = com.clawkit.cli.remote.RemoteTargetResolver
+                .resolveConnectionSpec(reg.get());
+            var session = new com.clawkit.tools.remote.RemoteMcpSession(descriptor, spec);
+            session.start();
+            return new com.clawkit.ops.delivery.RemoteMcpSessionAdapter(session);
+        };
+
+        // Fix: build opsfix session from separate env config
+        OpsInvestigationFacade.FixSessionFactory fixFactory = null;
+        String fixHost = System.getenv("CLAWKIT_REMOTE_FIX_HOST");
+        String fixUser = System.getenv("CLAWKIT_REMOTE_FIX_USER");
+        String fixIdentity = System.getenv("CLAWKIT_REMOTE_FIX_IDENTITY_FILE");
+        if (fixHost != null && !fixHost.isBlank()
+            && fixUser != null && !fixUser.isBlank()
+            && fixIdentity != null && !fixIdentity.isBlank()) {
+            String fixPort = System.getenv().getOrDefault("CLAWKIT_REMOTE_FIX_PORT", "22");
+            String fixKnownHosts = System.getenv().getOrDefault(
+                "CLAWKIT_REMOTE_FIX_KNOWN_HOSTS",
+                System.getProperty("user.home") + "/.ssh/known_hosts");
+            fixFactory = targetId -> {
+                var fixProfile = com.clawkit.ops.mcp.OpsCapabilityProfile.FIX_ORDER_API_V1;
+                String fixToolSetHash = com.clawkit.ops.mcp.OpsMcpServer
+                    .computeToolSetHash(fixProfile);
+                String fixContractHash = com.clawkit.ops.mcp.OpsMcpServer
+                    .computeExpectedToolContractHash(fixProfile);
+                // Full 5-field descriptor: targetId, profile, probeVersion, toolSetHash, toolContractHash
+                var fixTarget = new com.clawkit.ops.loop.RemoteTargetDescriptor(
+                    targetId, "FIX_ORDER_API_V1", "1",
+                    fixToolSetHash, fixContractHash);
+                var fixConfig = new com.clawkit.ops.loop.SshConnectionConfig(
+                    fixHost, Integer.parseInt(fixPort), fixUser,
+                    java.nio.file.Path.of(fixIdentity),
+                    java.nio.file.Path.of(fixKnownHosts),
+                    java.time.Duration.ofSeconds(15), java.time.Duration.ofSeconds(30), 65536);
+                var session = new com.clawkit.ops.loop.repair.OpsFixSession(fixTarget, fixConfig);
+                session.start();
+                return session;
+            };
+        }
+
+        OpsInvestigationFacade opsFacade = new OpsInvestigationFacade(
+            clawkitDir, borrowProvider, freshFactory, fixFactory, ProviderFactory::create);
+
         return new ApplicationContext(
             engine, provider, registry, sessionService, skillLoader,
             mcpManager, memoryService, runReader,
             null, // reader — 由 ClawkitApp 创建（需要 Terminal 初始化）
             new java.util.ArrayList<>(), // imChannels
-            workDir, effective.model(), mode, effective);
+            workDir, effective.model(), mode, effective,
+            remoteService, remoteTargetStore, opsFacade);
     }
 
     // ── 静态工具方法 ─────────────────────────────────────────────────

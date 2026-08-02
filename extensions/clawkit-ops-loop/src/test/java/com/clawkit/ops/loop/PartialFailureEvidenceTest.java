@@ -348,7 +348,8 @@ class PartialFailureEvidenceTest {
         Path khFile = tempDir.resolve("known_hosts");
         Files.createFile(idFile);
         Files.createFile(khFile);
-        var target = new RemoteTargetDescriptor("test", "APP_DOWN_V1", "1", HASH);
+        var target = new RemoteTargetDescriptor("test", "APP_DOWN_V1", "1", HASH,
+            "fb8239b41bfbbdb2d4bba7b3fa24d2fecc1f7df975f988f509d1fd6c97993ed2");
         var config = new SshConnectionConfig("h", 22, "u", idFile, khFile,
             Duration.ofSeconds(10), Duration.ofSeconds(10), 32768);
         var client = new McpClient(transport, "test");

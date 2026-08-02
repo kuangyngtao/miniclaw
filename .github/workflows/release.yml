@@ -30,7 +30,7 @@ jobs:
           if ("v$version" -ne "${{ github.ref_name }}") { throw "Tag must be v$version" }
           "VERSION=$version" >> $env:GITHUB_ENV
       - name: Clean verify
-        run: mvn -B -ntp clean verify
+        run: mvn -B -ntp clean verify -Dgroups='!e2e'
       - name: Package release
         shell: pwsh
         run: .\scripts\package-release.ps1 -Version "$env:VERSION"

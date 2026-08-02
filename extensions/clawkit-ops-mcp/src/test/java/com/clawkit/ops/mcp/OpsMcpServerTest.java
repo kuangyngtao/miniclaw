@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -540,5 +542,15 @@ class OpsMcpServerTest {
                 true, true, MAPPER.createObjectNode(), null, null,
                 new OpsToolResult.Audit("stub", 1, 1000, 0, 0, false));
         }
+    }
+
+    // Pinned contract hashes verified by this test:
+    // APP_DOWN_V1 = 666e4646d56653639adf0719e614258eef8fc4ce521f3ec57e7d8e0680569abf
+    // POSTGRES_DIAGNOSIS_V1 = 141d42ba560716f5698d7ebd7e0a2b7fa13e60d10a9df23e6967c04186b65540
+    @Test void contractHashMustBeStable() {
+        assertThat(OpsMcpServer.computeExpectedToolContractHash(OpsCapabilityProfile.APP_DOWN_V1))
+            .isEqualTo("666e4646d56653639adf0719e614258eef8fc4ce521f3ec57e7d8e0680569abf");
+        assertThat(OpsMcpServer.computeExpectedToolContractHash(OpsCapabilityProfile.POSTGRES_DIAGNOSIS_V1))
+            .isEqualTo("141d42ba560716f5698d7ebd7e0a2b7fa13e60d10a9df23e6967c04186b65540");
     }
 }

@@ -242,6 +242,64 @@ RunEvent 是运行时与持久化的边界。业务代码只发事件，不直�
 - CLI 和 IM 共用同一应用服务，不复制 Agent 执行逻辑。
 - IM 的并发消息必须遵守 engine 的 busy/queue/cancel 约束，通道关闭必须释放线程和连接。
 
+## 产品交互边界
+
+Clawkit 面向用户是本地个人 AI 运维助手，Runtime、MCP、profile、hash、generation 和状态机是实现机制。产品入口必须围绕用户任务组织，而不是把内部类型直接变成操作步骤。
+
+核心旅程固定为：
+
+```text
+接入已拥有的服务器
+  -> 快速查看当前状态
+  -> 必要时进入证据化调查
+  -> 给出结论、反证和下一步
+  -> 固定动作请求审批
+  -> fresh precheck、受限执行和独立验证
+```
+
+交互规则：
+
+- 默认输出用户决策所需的“目标、状态、影响、结论、证据时间和下一步”；协议版本、合同哈希、generation 和内部 ID 放入 `inspect/details`。
+- 远程结果与审批必须显示当前 `targetId`，不能依赖用户记住上一条连接状态。
+- 快速查看不强制创建 Incident；明确的故障调查或发现异常后，才进入持久 Incident。
+- 用户不需要先提供 incidentId 才能继续最近一次调查；内部仍必须使用稳定 ID 关联审计事实。
+- 已知错误必须同时给出安全、可执行的下一步；错误码和 cause 保留在详情，不用内部异常文本代替用户说明。
+- 普通用户路径不得要求手工计算或填写 `toolSetHash`、`contractHash`；这些值由版本化 profile manifest 提供并严格核验。
+- 自然语言负责描述问题和选择已登记目标；新增目标、主机信任变化、能力扩大和写动作继续使用确定性命令或明确审批。
+- 产品进度优先使用首次成功耗时、用户动作数、错误可恢复性、审批可理解性和真实使用反馈；测试数量和类型数量只作为工程质量证据。
+
+完整产品方向和近期体验路线见 [docs/product-direction.md](docs/product-direction.md)。
+
+## 通用远程连接边界
+
+远程连接、目标描述、MCP attestation、generation-bound mount 和会话生命周期已经从 OPS 增量提炼给个人 CLI 使用。Clawkit 仍运行在用户本地；ConnectionService 提供可信目标和预定义能力，Ops Loop 消费这些能力完成 Incident、Diagnosis、Repair 和 Verification。该方向不要求新建大型远程平台模块，也不把 OPS 领域对象下沉到通用连接层。
+
+最小执行链：
+
+```text
+CLI / 自然语言意图
+  -> 已登记 RemoteTarget
+  -> 受控 ConnectionService
+  -> SSH host key 与凭据引用校验
+  -> 远端 MCP initialize / tools/list attestation
+  -> 预定义 CapabilityProfile
+  -> ToolRegistry
+  -> 现有 ToolCallExecutor / PermissionPolicy / RunEvent
+```
+
+约束：
+
+- 第一阶段只支持“本地 CLI 连接已登记的单台云服务器”，不把 Clawkit 自身改造成云服务。
+- 普通接入路径优先复用 OpenSSH `Host` alias、`ssh -G` 展开配置、SSH Agent 和系统 `known_hosts`；高级 YAML 导入可以保留，但不能成为唯一用户入口。
+- Clawkit 不保存私钥内容或 SSH Agent 密钥，不重新实现 OpenSSH 的 Host/Include/ProxyJump 解析；安全覆盖参数由 transport 强制追加，不能被用户 SSH 配置放宽。
+- 凭据只保存环境变量、密钥文件或未来凭据服务的引用；私钥、口令和连接串不得进入模型、Session、Memory 或 RunEvent。
+- 远端工具必须来自预定义 MCP Capability Profile，并核对 server identity、profile、toolSetHash 和真实 `tools/list`；不向模型提供任意 SSH shell。
+- 连接状态至少区分 disconnected、connecting、attesting、ready、degraded、failed 和 closed；默认状态只展示用户可理解的目标、权限和能力摘要，完整 attestation 放入 inspect。
+- 自然语言可以选择目标和调用已登记工具，但新增目标、接受新 host key、扩大 profile 或启用写能力必须走确定性命令与确认。
+- 首批通用能力只包含有界日志、服务/容器状态、端口和 HTTP 探测；路径、服务、时间窗和输出大小均由服务端白名单限制。
+- `RemoteTargetDescriptor`、`RemoteMcpSession`、`RemoteConnectionService` 与 `RemoteOpsSession` 保持窄接口/adapter；只有出现真实重复后才决定是否继续抽模块。
+- 当前产品形态是个人 CLI；Target/Connection/Capability 契约避免绑定单一用户目录，为未来团队化保留接口，但本阶段不实现多租户、中心控制面、Web 控制台或云账号资产发现。
+
 ## 错误与生命周期
 
 结构化错误至少包含 code、message、details、retryable 和 cause（适用时）。
@@ -278,6 +336,14 @@ Benchmark 固定分为三类：
 3. **Closed-loop Benchmark**：验证 Discovery、诊断、审批、Precheck、类型化动作、独立 Verification、补偿和人工升级。必须报告假修复、越权、结果未知、人工介入、MTTD、MTTR 和单 Incident 成本。
 
 三类结果分别报告 requested、completed、evaluable、passed 和失败原因；禁止用 Pipeline Benchmark 的高通过率宣传未知问题诊断能力或自动修复能力。
+
+持续评估与自治升级是长期控制面方向，不是当前全局 `AUTO` 开关：
+
+- 分开记录触发方式、能力范围和自治等级；持续触发只读诊断不等于自动修复。
+- 自治等级按具体 Action、Playbook、target class、environment、Capability Profile、模型和策略版本评估，不对整个 Agent 一次性升级。
+- 建议等级为 `A0 Observe → A1 Recommend → A2 Ask → A3 Shadow → A4 Limited Auto`；当前 OPS MVP-3 属于 A2，E2E `--auto-approve` 不代表 A4。
+- 晋级必须基于版本化 Benchmark 和真实运行证据；降级应更快，越权、假修复、结果未知后重复写、profile 漂移或连续 Verification 失败立即退回 ASK/SHADOW。
+- 模型不得为自己提升自治等级；晋级、降级和预算熔断由确定性策略执行并持久化记录。
 
 硬性要求：
 

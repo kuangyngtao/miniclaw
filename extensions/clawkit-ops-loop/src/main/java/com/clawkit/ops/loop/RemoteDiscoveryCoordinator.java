@@ -29,14 +29,14 @@ public final class RemoteDiscoveryCoordinator {
     private static final Logger log = LoggerFactory.getLogger(RemoteDiscoveryCoordinator.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    private final RemoteOpsSession session;
+    private final OpsReadSession session;
     private final Clock clock;
 
-    public RemoteDiscoveryCoordinator(RemoteOpsSession session) {
+    public RemoteDiscoveryCoordinator(OpsReadSession session) {
         this(session, Clock.systemUTC());
     }
 
-    public RemoteDiscoveryCoordinator(RemoteOpsSession session, Clock clock) {
+    public RemoteDiscoveryCoordinator(OpsReadSession session, Clock clock) {
         this.session = session;
         this.clock = clock;
     }

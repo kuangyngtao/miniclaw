@@ -18,6 +18,16 @@ import com.clawkit.memory.MemoryType;
 import com.clawkit.memory.impl.DiskMemoryService;
 import com.clawkit.tools.ToolRegistry;
 import com.clawkit.tools.mcp.McpManager;
+import com.clawkit.cli.remote.RemoteCommandHandler;
+import com.clawkit.cli.remote.RemoteConnectionService;
+import com.clawkit.cli.remote.RemoteDoctorService;
+import com.clawkit.cli.remote.RemoteIntentRouter;
+import com.clawkit.cli.remote.RemoteOnboardingService;
+import com.clawkit.cli.remote.RemoteTargetStore;
+import com.clawkit.cli.ops.OpsCommandHandler;
+import com.clawkit.cli.ops.OpsCommandParser;
+import com.clawkit.cli.ops.JLineInvestigationInteraction;
+import com.clawkit.ops.delivery.OpsInvestigationFacade;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -76,6 +86,12 @@ public class ClawkitApp implements Runnable {
     private DiskMemoryService memoryService;
     private CliCommandHandlers commandHandlers;
     private EffectiveConfig effectiveConfig;
+    private RemoteConnectionService remoteService;
+    private RemoteTargetStore remoteTargetStore;
+    private RemoteIntentRouter remoteIntentRouter;
+    private RemoteCommandHandler remoteCommandHandler;
+    private OpsInvestigationFacade opsFacade;
+    private OpsCommandHandler opsCommandHandler;
 
     @Override
     public void run() {
@@ -95,6 +111,15 @@ public class ClawkitApp implements Runnable {
         this.runReader = ctx.runReader();
         this.resolvedWorkDir = ctx.workDir();
         this.effectiveConfig = ctx.effectiveConfig();
+        this.remoteService = ctx.remoteService();
+        this.remoteTargetStore = ctx.remoteTargetStore();
+        this.opsFacade = ctx.opsFacade();
+        this.remoteIntentRouter = new RemoteIntentRouter(remoteTargetStore);
+        var sshFacade = new com.clawkit.cli.remote.SystemOpenSshFacade();
+        var onboardingService = new RemoteOnboardingService(remoteTargetStore, sshFacade);
+        var doctorService = new RemoteDoctorService(remoteTargetStore, sshFacade);
+        this.remoteCommandHandler = new RemoteCommandHandler(remoteService, remoteTargetStore,
+            registry, onboardingService, doctorService);
         ThinkingMode mode = ctx.thinkingMode();
 
         // 加载工作区 rules（Bootstrap 已设置基础 rules，此处补充 CLI 特定逻辑）
@@ -133,8 +158,14 @@ public class ClawkitApp implements Runnable {
         engine.setApprovalHandler(new ApprovalConsole(() -> {
             try { return reader.readLine(""); } catch (Exception e) { return null; }
         }).asHandler());
+
+        // Create OPS interaction + command handler (needs LineReader)
+        var opsInteraction = new JLineInvestigationInteraction(reader);
+        this.opsCommandHandler = new OpsCommandHandler(opsFacade, remoteTargetStore, opsInteraction);
+
         this.commandHandlers = new CliCommandHandlers(engine, sessionService, skillLoader,
-            mcpManager, registry, memoryService, runReader, reader);
+            mcpManager, registry, memoryService, runReader, reader,
+            remoteCommandHandler, opsCommandHandler);
 
         // SubAgent 回调 — 委托给 ConsoleRenderer
         engine.onSubAgentSpawn(event -> renderer.onSubAgentSpawn(
@@ -150,7 +181,9 @@ public class ClawkitApp implements Runnable {
 
         printBanner(effectiveConfig.model(), registry.count(), resolvedWorkDir.toString());
 
-        while (true) {
+        boolean shouldExit = false;
+        try {
+        while (!shouldExit) {
             String input;
             try {
                 input = reader.readLine("> ");
@@ -165,7 +198,22 @@ public class ClawkitApp implements Runnable {
 
             // 斜杠命令分派 → 提取为独立方法（可独立测试）
             if (input.startsWith("/")) {
-                if (dispatchCommand(input)) return;
+                if (dispatchCommand(input)) { shouldExit = true; break; }
+                continue;
+            }
+
+            // REMOTE-0: Check for narrow-format NL connection intents
+            var intent = remoteIntentRouter.resolve(input);
+            if (intent.intent() != RemoteIntentRouter.Intent.NONE) {
+                handleRemoteIntent(intent);
+                continue;
+            }
+
+            // OPS-PRODUCT-LOOP-1: Check for narrow-format NL ops investigation intents
+            var opsTarget = OpsCommandParser.resolveNaturalLanguage(input,
+                new java.util.HashSet<>(remoteTargetStore.list()));
+            if (opsTarget != null) {
+                opsCommandHandler.handle("investigate " + opsTarget + " order-api");
                 continue;
             }
 
@@ -202,7 +250,10 @@ public class ClawkitApp implements Runnable {
             }
         }
 
-        if (mcpManager != null) mcpManager.shutdown();
+        } finally {
+            if (mcpManager != null) mcpManager.shutdown();
+            if (remoteService != null) remoteService.close();
+        }
         log.info("clawkit exiting normally.");
         System.out.println("Goodbye.");
     }
@@ -331,9 +382,20 @@ public class ClawkitApp implements Runnable {
             }
             case "context" -> printContext(engine);
             case "config" -> printConfig();
+            case "remote" -> remoteCommandHandler.handle(args);
+            case "ops" -> opsCommandHandler.handle(args);
             default -> System.out.println("未知命令，输入 / 查看菜单。\n");
         }
         return false;
+    }
+
+    private void handleRemoteIntent(RemoteIntentRouter.ResolvedIntent intent) {
+        switch (intent.intent()) {
+            case CONNECT -> remoteCommandHandler.handle("connect " + intent.targetId());
+            case DISCONNECT -> remoteCommandHandler.handle("disconnect");
+            case STATUS -> remoteCommandHandler.handle("status");
+            case NONE -> { /* unreachable — filtered before call */ }
+        }
     }
 
     /** Load hierarchical CLAUDE.md: ~/.clawkit/CLAUDE.md + ./CLAUDE.md (fallback AGENTS.md). */
@@ -432,6 +494,7 @@ public class ClawkitApp implements Runnable {
         System.out.println(ConsoleRenderer.GRAY + "  /trace      run event trace     /memory  list memories" + ConsoleRenderer.RESET);
         System.out.println(ConsoleRenderer.GRAY + "  /session    manage sessions     /skill load/unload" + ConsoleRenderer.RESET);
         System.out.println(ConsoleRenderer.GRAY + "  /mcp        MCP servers         /im-on /im-off /im-status" + ConsoleRenderer.RESET);
+        System.out.println(ConsoleRenderer.GRAY + "  /ops        investigate / recent / inspect / continue" + ConsoleRenderer.RESET);
         System.out.println(ConsoleRenderer.GRAY + "  /help       show all commands   /exit  quit" + ConsoleRenderer.RESET);
         System.out.println();
     }

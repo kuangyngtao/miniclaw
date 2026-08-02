@@ -10,10 +10,10 @@ import java.time.Instant;
 import java.util.Optional;
 
 /** Simple deadline-based ExecutionControl for MCP requests. */
-final class DeadlineControl implements ExecutionControl {
+public final class DeadlineControl implements ExecutionControl {
     private final Instant deadline;
 
-    DeadlineControl(Duration timeout, Instant now) {
+    public DeadlineControl(Duration timeout, Instant now) {
         this.deadline = now.plus(timeout);
     }
 

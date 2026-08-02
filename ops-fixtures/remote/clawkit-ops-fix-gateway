@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# clawkit-ops-fix-gateway — forced-command proxy gateway for opsfix
+#
+# Root-owned. Validates EVERY JSON-RPC request in the session.
+# Forwards valid requests to the MCP server subprocess and responses back.
+#
+# Allowed methods: initialize, notifications/initialized, ping, tools/list
+# Allowed tool call: tools/call(name=restart_service, arguments.serviceId=order-api)
+#
+# Key behaviors:
+# - notifications/initialized has no id → forwarded, NO response expected
+# - All other requests → forwarded, response read and returned
+# - Per-request validation: method, tool name, serviceId
+# - Malformed JSON → parse error with original id, connection continues
+# - SSH_ORIGINAL_COMMAND, SFTP, SCP, PTY → rejected immediately
+
+set -euo pipefail
+
+# ── Reject SSH_ORIGINAL_COMMAND (SFTP, SCP, arbitrary commands) ──
+if [[ -n "${SSH_ORIGINAL_COMMAND:-}" ]]; then
+    echo '{"jsonrpc":"2.0","error":{"code":-32000,"message":"SSH_ORIGINAL_COMMAND rejected"},"id":null}'
+    exit 1
+fi
+
+LAUNCHER="/usr/local/sbin/clawkit-ops-fix-stdio"
+
+# ── Start MCP server as background coproc ──
+cleanup() {
+    kill %1 2>/dev/null || true
+    wait 2>/dev/null || true
+}
+trap cleanup EXIT
+
+coproc MCP_SERVER {
+    exec sudo -u root "$LAUNCHER" 2>/dev/null
+}
+# Give the MCP server a moment to start
+sleep 0.1
+
+# ── JSON helpers using python3 ──
+
+# Extract method from a JSON-RPC line
+extract_method() {
+    python3 -c "
+import json,sys
+try:
+    r = json.loads(sys.stdin.read())
+    print(r.get('method',''))
+except: print('__PARSE_ERROR__')
+" 2>/dev/null <<< "$1"
+}
+
+# Extract id preserving its JSON type (string, number, null)
+extract_id_json() {
+    python3 -c "
+import json,sys
+try:
+    r = json.loads(sys.stdin.read())
+    rid = r.get('id')
+    if rid is None: print('null')
+    elif isinstance(rid,str): print(json.dumps(rid))
+    else: print(str(rid))
+except: print('null')
+" 2>/dev/null <<< "$1"
+}
+
+# Check if a line has no id (notification)
+has_no_id() {
+    python3 -c "
+import json,sys
+try:
+    r = json.loads(sys.stdin.read())
+    print('true' if r.get('id') is None else 'false')
+except: print('false')
+" 2>/dev/null <<< "$1"
+}
+
+# Extract tool name from tools/call params
+extract_tool_name() {
+    python3 -c "
+import json,sys
+try:
+    r = json.loads(sys.stdin.read())
+    print(r.get('params',{}).get('name',''))
+except: print('')
+" 2>/dev/null <<< "$1"
+}
+
+# Extract serviceId from tools/call arguments
+extract_service_id() {
+    python3 -c "
+import json,sys
+try:
+    r = json.loads(sys.stdin.read())
+    args = r.get('params',{}).get('arguments',{})
+    if isinstance(args, dict):
+        print(args.get('serviceId',''))
+    elif isinstance(args, str):
+        a = json.loads(args)
+        print(a.get('serviceId',''))
+    else:
+        print('')
+except: print('')
+" 2>/dev/null <<< "$1"
+}
+
+# Build a safe JSON-RPC error response
+build_error() {
+    local req_id_json="$1" code="$2" message="$3"
+    python3 -c "
+import json
+print(json.dumps({'jsonrpc':'2.0','error':{'code':${code},'message':$(echo "$message" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().rstrip("\n")))')},'id':${req_id_json}}))
+" 2>/dev/null || echo "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"internal gateway error\"},\"id\":null}"
+}
+
+# ── Main proxy loop ──
+
+while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+
+    # Parse request fields
+    METHOD=$(extract_method "$line")
+    REQ_ID_JSON=$(extract_id_json "$line")
+
+    # Malformed JSON
+    if [[ "$METHOD" == "__PARSE_ERROR__" ]]; then
+        echo "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32700,\"message\":\"Parse error: invalid JSON\"},\"id\":null}"
+        continue
+    fi
+
+    # Notification (no id) — forward without expecting response
+    IS_NOTIF=$(has_no_id "$line")
+    if [[ "$IS_NOTIF" == "true" ]]; then
+        # Only allow notifications/initialized
+        if [[ "$METHOD" != "notifications/initialized" ]]; then
+            build_error "$REQ_ID_JSON" -32601 "fix gateway: notification method not allowed: ${METHOD}"
+            continue
+        fi
+        # Forward to MCP server, don't wait for response
+        echo "$line" >&"${MCP_SERVER[1]}" || {
+            build_error "$REQ_ID_JSON" -32603 "MCP server pipe closed"
+            continue
+        }
+        continue
+    fi
+
+    # Validate method
+    case "$METHOD" in
+        "initialize"|"ping"|"tools/list")
+            # Safe methods — forward directly
+            ;;
+        "tools/call")
+            TOOL_NAME=$(extract_tool_name "$line")
+            if [[ "$TOOL_NAME" != "restart_service" ]]; then
+                build_error "$REQ_ID_JSON" -32602 "fix gateway: only restart_service allowed, got ${TOOL_NAME}"
+                continue
+            fi
+            SERVICE_ID=$(extract_service_id "$line")
+            if [[ "$SERVICE_ID" != "order-api" ]]; then
+                build_error "$REQ_ID_JSON" -32602 "fix gateway: only serviceId=order-api allowed, got ${SERVICE_ID}"
+                continue
+            fi
+            ;;
+        *)
+            build_error "$REQ_ID_JSON" -32601 "fix gateway: method not allowed: ${METHOD}"
+            continue
+            ;;
+    esac
+
+    # Forward to MCP server
+    echo "$line" >&"${MCP_SERVER[1]}" || {
+        build_error "$REQ_ID_JSON" -32603 "MCP server pipe closed"
+        continue
+    }
+
+    # Read response (with timeout)
+    read -r -t 30 response <&"${MCP_SERVER[0]}" || {
+        build_error "$REQ_ID_JSON" -32603 "MCP server response timeout"
+        continue
+    }
+    echo "$response"
+done
+
+# Cleanup (trap also handles this)
+cleanup

@@ -82,6 +82,15 @@ public class McpClient {
     public List<McpToolDef> listTools() throws IOException {
         String resp = sendRequest("tools/list", MAPPER.createObjectNode());
         JsonNode root = MAPPER.readTree(resp);
+
+        // JSON-RPC error → throw, do NOT silently return empty list
+        if (root.has("error")) {
+            JsonNode error = root.get("error");
+            throw new IOException("[MCP:" + serverName + "] tools/list"
+                + " error (code=" + error.path("code").asInt(-1) + "): "
+                + error.path("message").asText("unknown"));
+        }
+
         JsonNode tools = root.path("result").path("tools");
         if (!tools.isArray()) return List.of();
 
@@ -116,11 +125,20 @@ public class McpClient {
 
         String resp = sendRequest("tools/call", params, control);
         JsonNode root = MAPPER.readTree(resp);
+
+        // JSON-RPC error → tool-level error, NOT transport failure (§5.5)
+        if (root.has("error")) {
+            JsonNode error = root.get("error");
+            return McpCallResult.error(
+                "JSON-RPC error (code=" + error.path("code").asInt(-1) + "): "
+                + error.path("message").asText("unknown"), List.of());
+        }
+
         JsonNode result = root.path("result");
         if (result.isMissingNode()) {
-            JsonNode error = root.get("error");
-            throw new IOException("[MCP:" + serverName + "] " + toolName + " failed: "
-                + (error != null ? error.toPrettyString() : root.toString()));
+            throw new IOException("[MCP:" + serverName + "] " + toolName
+                + " failed: malformed response (no result, no error): "
+                + root.toString());
         }
 
         // 检查 isError
@@ -165,14 +183,8 @@ public class McpClient {
         String resp = transport.send(body, control);
         log.debug("[MCP:{}] ← {}", serverName, method);
 
-        // 检查 JSON-RPC error 字段
-        JsonNode respNode = MAPPER.readTree(resp);
-        if (respNode.has("error")) {
-            JsonNode error = respNode.get("error");
-            throw new IOException("[MCP:" + serverName + "] " + method
-                + " error (code=" + error.path("code").asInt(-1) + "): "
-                + error.path("message").asText("unknown"));
-        }
+        // Do NOT throw for JSON-RPC error here — let callers handle
+        // application-level errors (e.g., invalid params) vs transport errors.
         return resp;
     }
 

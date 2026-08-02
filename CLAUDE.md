@@ -2,7 +2,7 @@
 
 本文档是项目定位、架构边界和 AI 协作规则的权威入口。它回答“项目是什么、边界在哪里、协作时必须遵守什么”。
 
-具体工程设计看 [DESIGN.md](DESIGN.md)，当前实施顺序和完成状态看 [TODO.md](TODO.md)，用户使用方式看 [README.md](README.md)。
+具体产品方向看 [docs/product-direction.md](docs/product-direction.md)，工程设计看 [DESIGN.md](DESIGN.md)，当前实施顺序和完成状态看 [TODO.md](TODO.md)，用户使用方式看 [README.md](README.md)。
 
 ## 文档职责
 
@@ -10,6 +10,7 @@
 | --- | --- | --- |
 | `README.md` | 安装、配置、运行、示例、用户入口 | 内部重构计划 |
 | `CLAUDE.md` | 项目定位、产品边界、模块原则、协作强约束 | 详细接口规范和任务状态 |
+| `docs/product-direction.md` | 目标用户、产品承诺、核心旅程、体验原则和产品路线 | 逐项代码完成状态 |
 | `DESIGN.md` | 稳定的架构、契约、安全、测试和审查规范 | 临时方案、完成记录和优先级 |
 | `TODO.md` | 当前事实、未完成任务、依赖顺序、验收标准 | 长篇设计原则 |
 
@@ -22,7 +23,7 @@
 | 任务 | 必读 |
 | --- | --- |
 | 修 bug、加功能、修改工具/Provider/CLI | `DESIGN.md` + 相关代码 |
-| 底层重构、调整优先级、更新路线 | `TODO.md` + `DESIGN.md` + 相关代码 |
+| 底层重构、调整优先级、更新路线 | `docs/product-direction.md` + `TODO.md` + `DESIGN.md` + 相关代码 |
 | 改模块依赖、公共契约或项目边界 | 本文 + `DESIGN.md` + `TODO.md` |
 | 改 README、示例、CI、Docker、发布 | `README.md` + `TODO.md` |
 | 改权限、文件写入、命令执行、MCP、审计 | `SECURITY.md` + `DESIGN.md` |
@@ -39,9 +40,11 @@
 
 ## 项目定位
 
-clawkit 是 Java 21 实现的本地 Agent Runtime，主要运行形态是 CLI，也支持 IM 通道镜像。编程助手是基础交互入口；Evidence-gated Ops Loop 是当前用于验证 Runtime 可靠性、安全性和可评测性的旗舰垂直应用。
+clawkit 面向用户是一个**本地优先的个人 AI 运维助手**：连接用户已经拥有的服务器，帮助理解服务为什么异常；需要采取动作时先解释、再审批，最后重新验证是否真的恢复。主要运行形态是本地 CLI，当前服务于拥有少量 Linux 云服务器的个人开发者和小团队服务负责人。
 
-核心价值不是某个垂类效果，而是提供通用、可控、可测、可靠、可观测、可扩展的 Agent runtime：
+远程连接不是独立的 SSH 管理产品，而是用户进入运维任务的可信入口；Evidence-gated Ops Loop 不是一次性技术演示，而是产品完成“查看 → 调查 → 建议 → 审批处置 → 独立验证”的核心问题解决流程。
+
+Java 21 Agent Runtime 是承载该产品的通用底座。它继续提供可控、可测、可靠、可观测、可扩展的执行能力：
 
 - 本地工作区内的代码分析、文件操作、命令执行和任务编排。
 - ReAct、Plan-and-Execute、SubAgent 和慢思考等执行模式。
@@ -49,22 +52,24 @@ clawkit 是 Java 21 实现的本地 Agent Runtime，主要运行形态是 CLI，
 - 上下文预算、压缩、会话、记忆和 Skill 注入。
 - OpenAI-compatible Provider 的适配、重试、熔断和流式解析。
 
-项目按三层表达：
+项目按四层表达：
 
 ```text
-Clawkit Agent Runtime
-  -> Safe Ops Capability Layer（clawkit-ops-mcp / clawkit-ops-loop）
+Clawkit Personal Ops CLI（连接 / 查看 / 调查 / 审批）
+  -> Clawkit Agent Runtime
+  -> Safe Ops Capability Layer（remote / clawkit-ops-mcp / clawkit-ops-loop）
   -> Ops Delivery Composition（clawkit-ops-delivery）
   -> Ops Arena（Fixture / Hidden Ground Truth / Evaluator）
 ```
 
-Runtime 是通用底座，Ops Loop 是上层 Agentic SRE 应用，Ops Arena 是可重复、可评分、可清理的验证环境。Ops 的领域逻辑不得反向进入核心引擎。
+CLI 是用户产品入口，Runtime 是通用底座，Ops Loop 是调查与处置引擎，Ops Arena 是可重复、可评分、可清理的验证环境。Ops 的领域逻辑不得反向进入核心引擎。详细产品决策以 [docs/product-direction.md](docs/product-direction.md) 为准。
 
 ## 产品边界
 
 项目做：
 
-- 本地 CLI/IM 输入输出适配。
+- 本地 CLI 中的已登记服务器接入、连接状态和用户友好的运维任务入口。
+- 预定义只读能力上的快速查看，以及由 Ops Loop 承担的证据化调查、报告、审批处置和独立验证。
 - Agent loop、计划执行、工具编排和人工审批。
 - Provider、工具、上下文、记忆、观测等底座能力。
 - 通过 MCP、Skill、工具包和 workflow 接入扩展。
@@ -73,6 +78,8 @@ Runtime 是通用底座，Ops Loop 是上层 Agentic SRE 应用，Ops Arena 是�
 
 - 中心化 Gateway 或多租户调度平台。
 - Web 前端和通用运维控制台。
+- 通用 SSH 终端、SFTP、任意 sudo/Docker/SQL 或云 CLI。
+- 重新实现 OpenSSH 配置、SSH Agent 和私钥保管。
 - 将浏览器自动化或某个业务领域写死到核心引擎。
 - 在权限、审计和回滚不完整时提供自动高风险远程写操作。
 

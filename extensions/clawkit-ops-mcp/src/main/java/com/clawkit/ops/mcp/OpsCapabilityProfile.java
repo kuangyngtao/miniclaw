@@ -8,7 +8,8 @@ public enum OpsCapabilityProfile {
     POSTGRES_DIAGNOSIS_V1(Set.of(
         "service_status", "container_status", "ports", "http_probe", "logs",
         "container_resources", "business_metrics", "db_activity", "db_lock_graph",
-        "db_connection_stats"));
+        "db_connection_stats")),
+    FIX_ORDER_API_V1(Set.of("restart_service"));
 
     private final Set<String> toolNames;
 

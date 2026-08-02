@@ -42,6 +42,8 @@ public final class SlashCommandRouter {
             case "/memory" -> "memory";
             case "/remember" -> "remember";
             case "/session" -> "session";
+            case "/remote" -> "remote";
+            case "/ops" -> "ops";
             default -> null;
         };
     }

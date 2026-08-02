@@ -1,565 +1,221 @@
-# OPS MVP-2：业务数据驱动 Fixture、报告聚合与飞书单向通知
+# OPS MVP-2：业务故障、事故报告与飞书通知
 
-> 日期：2026-07-26  
-> 执行主体：Claude Code Agent（内部模型为 DeepSeek）  
-> 前置版本：OPS MVP-1 `93d993b`  
-> 目标：在单靶机只读 Discovery 之上，完成合成业务数据诱发故障、确定性人类报告和飞书固定群单向通知
+> 修订日期：2026-07-26
+>
+> 当前结论：本地实现和自动化测试通过，远端 20 轮与真实飞书联调待完成。
+>
+> 执行方式：Claude Code Agent 内使用 DeepSeek 模型，连续执行，分阶段提交。
 
-## 1. 结论与实施顺序
+## 1. 这一阶段要交付什么
 
-阶段二严格按以下顺序实施：
+MVP-1 已经解决“如何安全地从远端读取事实”。MVP-2 在它之上补三件事：
 
-```text
-Gate-0 完整 Discovery → Diagnosis 实测
-  → PR-1 Fixture Contract 与业务不变量
-  → PR-2 HOT_ACCOUNT_CONTENTION_V1
-  → PR-3 远端部署与只读 PostgreSQL Profile
-  → PR-4 远端 20 轮业务故障 E2E
-  → PR-5 人类友好报告聚合
-  → PR-6 飞书固定群通知与 Outbox
-  → PR-7 全链路 E2E、文档和退出门禁
-```
+1. 用合成订单和账户数据制造真实的数据库锁竞争；
+2. 把采集结果和模型判断整理成人能快速读懂的事故报告；
+3. 把脱敏摘要可靠地发送到一个固定飞书群。
 
-不能跳过 Gate-0。当前代码中 `DeepSeekDiagnosisGate` 已存在，但
-`RemoteDiscoveryMain` 仍只保存 `DiscoveryResult`，尚未形成可执行的
-Discovery → Diagnosis 主链。报告和通知不得建立在这一缺口之上。
-
-阶段二不包含：
-
-- 多主机调度。
-- 飞书入站消息、双向对话或飞书审批。
-- 自动修复。
-- 模型选择目标、工具、SQL、Fixture Case或收件人。
-- 复制真实生产订单、用户、日志和凭据。
-- Docker TCP API、远程 Shell或自由 SQL。
-
-## 2. 总体架构
-
-```mermaid
-flowchart LR
-    Admin["fixture-admin<br/>确定性控制面"] --> Fixture["nginx → order-api → PostgreSQL<br/>合成业务数据 + k6"]
-    Fixture -->|"业务指标/容器/DB只读事实"| OpsMcp["forced-command Ops MCP"]
-    OpsMcp --> Discovery["Remote Discovery"]
-    Discovery --> Bundle["Frozen Evidence Bundle"]
-    Bundle --> Gate["Completeness + Freshness Gate"]
-    Gate --> Diagnosis["DeepSeek Diagnosis"]
-    Diagnosis --> Assembler["IncidentReportAssembler<br/>确定性"]
-    Bundle --> Assembler
-    Assembler --> JSON["完整脱敏 JSON"]
-    Assembler --> Markdown["人类友好 Markdown"]
-    Assembler --> Summary["FeishuSummaryRenderer"]
-    Summary --> Outbox["Durable Notification Outbox"]
-    Outbox --> Feishu["Bot → 固定 chat_id"]
-```
-
-三条权限线必须独立：
-
-| 平面 | 身份 | 能力 | 禁止 |
-|---|---|---|---|
-| Fixture控制面 | `fixture-admin`/root | deploy、seed、inject、reset、destroy | 暴露给opsro或模型 |
-| 诊断面 | `opsro` forced-command | 固定只读MCP工具 | 控制接口、Docker socket、任意SQL |
-| 通知面 | Feishu bot | 向固定群发消息/回复 | 动态选群、读消息、审批、触发修复 |
-
-## 3. Gate-0：先关闭 MVP-1 主链缺口
-
-### 目标
-
-在开始远程 PostgreSQL Fixture之前，实际跑通一次：
+完整过程是：
 
 ```text
-RemoteDiscoveryMain
-  → RemoteOpsSession
-  → RemoteDiscoveryCoordinator
-  → DeepSeekDiagnosisGate
-  → RemoteIncidentResult
+生成合成业务数据
+  → 产生热点账户锁竞争
+  → 远端只读采证
+  → 证据完整性检查
+  → 模型诊断
+  → 生成事故报告
+  → 写入待发送队列
+  → 飞书固定群
 ```
 
-### 必须实现
+这不是生产自动修复。系统只观察、诊断和通知，不执行任何修复动作。
 
-1. 新增稳定聚合结果：
+## 2. 当前进度
+
+| 能力 | 已完成 | 尚缺 |
+| --- | --- | --- |
+| 诊断主链 | 采证结果会进入模型诊断，并保存为统一事故结果 | 真实远端样本 |
+| 业务故障 | 固定数据、热点流量、对账锁竞争和金额守恒检查 | 远端连续 20 轮 |
+| 部署安全 | 路径校验、只读数据库账号、失败即停止、幂等初始化 | 真机部署复验 |
+| 事故报告 | 完整数据、Markdown 和飞书摘要共用同一份事实 | 人工检查真实报告 |
+| 飞书通知 | 固定群、首次发送、后续回复、幂等和并发保护 | 真实测试群联调 |
+
+因此，当前只能写：
+
+> 本地实现通过，外部验收待完成。
+
+在远端 20 轮和真实飞书联调完成前，不得写“最终通过”。
+
+## 3. 业务故障怎么产生
+
+### 3.1 两种场景
+
+只保留两种场景：
+
+- **直接持锁**：由隐藏控制接口直接持有数据库行锁，用于快速验证部署和采证链路。
+- **热点账户竞争**：订单流量大量集中到一个账户，对账任务周期性锁住同一行，正常业务事务因此自然排队。这是本阶段的主验收场景。
+
+CPU 消耗、连接池直接耗尽和旧日志干扰仍可作为本地对抗测试，但不计入远端主验收。
+
+### 3.2 合成业务数据
+
+测试环境包含一个热点账户和九十九个普通账户。所有数据由固定种子生成，不复制任何生产订单或用户信息。
+
+每笔成功订单必须满足：
 
 ```text
-RemoteIncidentResult(
-  discovery,
-  diagnosis,
-  providerCalled,
-  diagnosisFailureCode,
-  completedAt
-)
+账户初始余额 = 当前余额 + 去重后的成功订单金额总和
 ```
 
-2. `RemoteDiscoveryMain`：
-   - COMPLETE且required Evidence有效时调用Diagnosis Gate。
-   - INCOMPLETE/TRANSPORT_FAILED不调用Provider并返回INCONCLUSIVE。
-   - 原子保存聚合结果，而不是只保存DiscoveryResult。
-   - API key缺失时不得丢失Discovery；记录Provider未配置并返回明确退出码。
+这条等式要逐账户检查，不能只检查总账。重复请求不能二次扣款，失败事务不能留下订单或余额变化。
 
-3. 使用当前 APP_DOWN远端 Fixture完成一次真实 Discovery → Diagnosis。
-4. 保存脱敏E2E产物；不得只在文字总结中声称通过。
-5. APP_DOWN产物中必须证明模型看到了脱敏 Evidence facts，而不只是ID。
+### 3.3 固定负载
 
-### Gate-0通过条件
+主场景使用固定参数：
 
-- 自动测试0失败、0跳过。
-- providerCalled与Discovery状态一致。
-- Diagnosis引用的Evidence ID存在、当前有效。
-- claimedResolved=false。
-- 输出不包含host、user、key、token和连接串。
+- 85% 请求落到热点账户；
+- 每秒 20 个请求；
+- 持续 90 秒；
+- 数据库连接池大小为 6；
+- 对账每 3 秒运行一次，持锁约 2 秒。
 
-## 4. 业务数据驱动 Fixture Contract
+参数校准后冻结，模型无权动态修改。
 
-### 4.1 Case
+### 3.4 如何证明故障真的发生
 
-阶段二只交付两个版本化Case：
+仅看到接口变慢不够，必须同时保存：
 
-1. `LOCK_INJECTED_V1`
-   - 保留现有隐藏控制接口直接启动持锁事务。
-   - 用于验证部署、采证、诊断和清理链路。
-   - 报告必须明确这是直接注入Case。
+- 数据库中谁在等待、谁在阻塞；
+- 连接池等待情况；
+- 正常期和故障期的延迟、错误率差异；
+- 故障结束后的恢复证据；
+- 故障前后的金额守恒结果。
 
-2. `HOT_ACCOUNT_CONTENTION_V1`
-   - 正常订单流量按固定种子产生账户倾斜。
-   - 版本化“余额对账事务”锁定热点账户行。
-   - 正常订单事务与对账事务自然竞争同一热点行。
-   - 故障事实必须来自真实HTTP、连接池和PostgreSQL事务。
+标准答案和控制状态只留在故障实验管理端，不能进入远端采证、模型输入、报告或飞书消息。
 
-不得增加第三个Case，CPU、连接池直接耗尽和stale-log继续作为本地对抗测试，不进入本阶段远端主验收。
+## 4. 权限边界
 
-### 4.2 数据模型
+系统分成三条互不借权的通道：
 
-扩展现有 schema：
+| 通道 | 可以做什么 | 明确禁止 |
+| --- | --- | --- |
+| 故障控制 | 安装、初始化、启动场景、重置和销毁测试数据 | 向诊断端暴露标准答案 |
+| 远端诊断 | 调用固定的只读服务和数据库检查 | 终端、任意命令、任意 SQL、容器管理接口 |
+| 飞书通知 | 向一个固定群发送或回复脱敏摘要 | 读群消息、动态选人、审批、触发修复 |
+
+数据库观察账号只能读取活动会话、锁关系和连接统计。配置由 root 持有，远端只读账号不能查看。
+
+## 5. 事故报告
+
+报告由程序按固定规则组装，模型只提供受约束的诊断结论，不能改写事实。
+
+一份报告至少包含：
+
+1. “合成业务数据”标记；
+2. 事故编号、逻辑目标和时间范围；
+3. 当前是否仍在故障中；
+4. 业务影响；
+5. 根因或无法下结论的原因；
+6. 支持证据、反证和缺失证据；
+7. 关键时间线；
+8. 只读下一步建议或人工升级建议。
+
+完整数据、Markdown 和飞书摘要必须来自同一份展示模型，不能各写一套事实逻辑。
+
+报告不得包含：
+
+- SSH 主机、用户、密钥和本地路径；
+- 数据库地址、账号和密码；
+- 飞书应用密钥、访问令牌和群号；
+- 故障控制令牌或隐藏答案；
+- 完整日志、订单号和账户号。
+
+## 6. 飞书单向通知
+
+飞书只作为通知出口：
+
+- 使用机器人身份；
+- 机器人预先加入一个固定测试群；
+- 首次报告发送新消息；
+- 同一事故的后续版本回复原消息；
+- 重复执行使用同一个幂等编号；
+- 网络超时、限流和服务端错误可以重试；
+- 参数或权限错误停止重试并转人工处理；
+- 飞书失败不能改变事故、采证或诊断状态。
+
+待发送队列必须先记录发送意图，再调用飞书。即使进程在“飞书已收到、程序尚未记成功”之间崩溃，也要用同一个幂等编号恢复，避免重复通知。
+
+真实联调只能向用户明确授权的测试群执行。
+
+## 7. 剩余验收
+
+### 7.1 本地容器全链路
+
+需要真实运行一次：
 
 ```text
-accounts(
-  account_id,
-  opening_balance_cents,
-  balance_cents,
-  account_class = HOT | NORMAL
-)
-
-orders(
-  request_id,
-  account_id,
-  amount_cents,
-  created_at
-)
-
-reconciliation_runs(
-  reconciliation_id,
-  account_id,
-  started_at,
-  completed_at,
-  status
-)
+构建订单服务
+  → 启动数据库和网关
+  → 建立正常基线
+  → 运行热点账户场景
+  → 采证和诊断
+  → 生成报告
+  → 停止故障
+  → 检查恢复和金额守恒
+  → 清理容器与数据卷
 ```
 
-订单事务：
+### 7.2 远端连续 20 轮
 
-1. `SELECT account FOR UPDATE`。
-2. `INSERT order ON CONFLICT DO NOTHING`。
-3. 只有首次插入才扣减余额。
-4. duplicate请求不得二次扣款。
-5. commit。
+每轮都要执行初始化、故障、采证、诊断、报告、恢复和清理，并保留以下原始计数：
 
-确定性不变量：
+- 请求轮数、完成轮数和可评估轮数；
+- 模型、协议和网络失败；
+- 不变量失败；
+- 清理失败；
+- 越权尝试；
+- 隐藏答案泄漏；
+- 错误宣称已恢复。
 
-```text
-opening_balance_cents
-  = balance_cents + SUM(unique orders.amount_cents)
-```
+补跑可以验证修复，但不能覆盖原始失败数。
 
-每个账户必须分别满足，不只验证总表。
+### 7.3 飞书真实联调
 
-### 4.3 数据与负载
+在指定测试群验证：
 
-Case manifest必须包含：
+- 第一次只发送一条；
+- 后续版本只回复，不新建主消息；
+- 相同幂等编号重试不产生重复消息；
+- 权限错误不会改变事故状态；
+- 日志中没有群号、消息号或凭据明文。
 
-- `caseVersion`
-- `seed`
-- 热点账户数量和普通账户数量
-- 热点流量占比
-- 请求速率、持续时间、VU边界
-- DB pool size
-- 对账事务周期和持锁时间
-- 数据schema版本
-- 期望退化阈值
+## 8. 最终通过条件
 
-建议初始参数：
+只有同时满足以下条件才能标记最终通过：
 
-```text
-seed: ops-mvp2-v1
-hotAccounts: 1
-normalAccounts: 99
-hotTrafficRatio: 0.85
-rate: 20 req/s
-duration: 90s
-poolSize: 6
-reconcileEvery: 3s
-reconcileHold: 2s
-```
+- 全量自动化测试通过；
+- 本地容器全链路通过；
+- 远端热点账户场景连续 20 轮完成；
+- 每轮金额守恒且清理无残留；
+- 远端只读账号没有越权；
+- 报告包含事实、反证、不确定性和时间线；
+- 飞书首次发送、后续回复和幂等重试通过；
+- 凭据、隐藏答案和完整敏感日志泄漏为零。
 
-这些参数必须通过本地校准后冻结，不能由模型动态调整。
+如果外部条件不具备，应明确写“条件通过”以及未运行项目，不能用单元测试代替真实联调。
 
-### 4.4 Ground Truth隔离
+## 9. 实现索引
 
-- manifest和控制token仅在Fixture Runner控制面。
-- gateway继续对 `/internal/control` 返回404。
-- 控制接口只允许容器内部或root执行的Fixture Runner访问。
-- `opsro`、远端MCP、Discovery、DeepSeek、报告和飞书均不得读取Case类型或Ground Truth。
-- 报告只允许知道数据标签 `SYNTHETIC_BUSINESS_DATA`，不知道控制面注入状态。
+正文不展开类名，排查代码时使用以下入口：
 
-## 5. 远端部署与只读采证
+| 领域 | 代码入口 |
+| --- | --- |
+| 远端采证与诊断 | `extensions/clawkit-ops-loop` |
+| 远端只读接口 | `extensions/clawkit-ops-mcp` |
+| 事故报告 | `extensions/clawkit-ops-loop/.../report` |
+| 通知状态与发送编排 | `extensions/clawkit-ops-loop/.../notify` |
+| 飞书接口 | `clawkit-im/.../feishu` |
+| 合成业务和负载 | `ops-fixtures/postgres-lock` |
+| 远端部署脚本 | `ops-fixtures/remote/postgres` |
+| 机械化评分 | `clawkit-evaluation` |
 
-### 5.1 部署
-
-新增幂等脚本：
-
-```text
-ops-fixtures/remote/postgres/
-  install.sh
-  seed.sh
-  run-case.sh
-  verify.sh
-  reset.sh
-  destroy.sh
-```
-
-规则：
-
-- 只能由root/fixture-admin运行。
-- `install/seed/reset/destroy`可重复执行。
-- artifact和compose配置root-owned。
-- reset/destroy前解析并验证目标项目名和目录，禁止通配和宽目录删除。
-- 每次Case结束自动运行数据不变量和残留检查。
-
-### 5.2 远端MCP
-
-切换到 `POSTGRES_DIAGNOSIS_V1`：
-
-- root-only env保存observer JDBC配置。
-- observer只拥有 `pg_read_all_stats` 和必要元数据读权限。
-- 不授予表写权限、DDL、pg_signal_backend、COPY PROGRAM或扩展安装。
-- 所有SQL继续固定在 `JdbcPostgresDiagnosticBackend`。
-
-Discovery Profile固定采集：
-
-- service/container状态。
-- gateway HTTP。
-- order-api业务指标。
-- order-api/postgres资源。
-- PostgreSQL活动会话。
-- lock graph。
-- connection stats。
-- order-api/postgres有界日志。
-
-`EvidenceSpec.arguments`必须为固定值；当前 PostgreSQL Profile中没有参数的工具必须补齐并做profile/tool schema一致性测试。
-
-## 6. PR任务拆分
-
-### PR-1：Fixture Contract与确定性不变量
-
-允许范围：
-
-- `ops-fixtures/postgres-lock`
-- `clawkit-evaluation`中只与新Case合同相关的代码
-
-任务：
-
-- schema升级和固定种子。
-- 多账户订单API。
-- 幂等扣款。
-- conservation、重复订单、成功率、P95断言。
-- Case manifest schema。
-- gateway继续隐藏控制接口。
-
-验收：
-
-- 正常态全部不变量通过。
-- 同requestId并发重复不会重复扣款。
-- 失败事务不留下订单或余额变化。
-- 不出现真实数据。
-
-### PR-2：HOT_ACCOUNT_CONTENTION_V1
-
-任务：
-
-- k6固定种子热点分布。
-- typed reconciliation任务。
-- `LOCK_INJECTED_V1`和`HOT_ACCOUNT_CONTENTION_V1`共用Case Runner，但实现路径可区分。
-- 控制面生成Ground Truth，Agent工作目录不可见。
-
-验收：
-
-- 热点请求比例在容差内。
-- 正常态P95/成功率达标。
-- 热点Case稳定产生锁等待、pending连接和业务退化。
-- 清理后指标恢复。
-- 金额守恒和幂等在故障期间仍成立。
-
-### PR-3：远端部署与PostgreSQL只读Profile
-
-任务：
-
-- install/seed/run/verify/reset/destroy脚本。
-- root-only observer凭据。
-- MCP `POSTGRES_DIAGNOSIS_V1` attestation。
-- 补全Profile固定参数。
-- setup失败回滚，不影响MVP-1的APP_DOWN配置备份。
-
-验收：
-
-- opsro仍不能访问Docker socket、env和控制接口。
-- observer写SQL、DDL和危险函数全部失败。
-- MCP固定DB工具成功。
-- shell/SFTP/SCP/forwarding继续失败。
-
-### PR-4：远端业务故障E2E与Benchmark
-
-顺序：
-
-1. 正常态基线5轮。
-2. `LOCK_INJECTED_V1`冒烟3轮。
-3. `HOT_ACCOUNT_CONTENTION_V1`连续20轮。
-4. 每轮reset并验证无残留。
-
-每轮保存脱敏：
-
-- manifest hash，不保存manifest内容。
-- Evidence Bundle。
-- Diagnosis。
-- 确定性业务断言。
-- 采证完整度、Provider调用和时延。
-
-通过条件：
-
-- 20轮全部完成清理。
-- 越权和Ground Truth泄露为0。
-- 成功Evidence不因单项失败丢失。
-- 无证据或冲突时返回INCONCLUSIVE。
-- 不要求模型每轮都猜中根因；准确率进入Benchmark报告，不篡改结果。
-
-### PR-5：人类友好报告聚合
-
-新增：
-
-```text
-HumanIncidentReport
-IncidentReportAssembler
-ReportEvidenceView
-ReportTimelineEvent
-MarkdownIncidentRenderer
-JsonIncidentRenderer
-FeishuSummaryRenderer
-```
-
-报告必须由确定性代码生成，DeepSeek的自由文本不能改写Evidence。
-
-结构：
-
-1. 一屏摘要。
-2. 影响与数据标签。
-3. 当前状态。
-4. 根因或不确定性。
-5. 关键证据。
-6. 反证。
-7. 缺失信息。
-8. 建议动作。
-9. 时间线。
-10. Evidence引用和完整JSON路径。
-
-规则：
-
-- 标题和首屏明确 `SYNTHETIC_BUSINESS_DATA`。
-- Severity由确定性规则映射，不由模型自由生成。
-- supporting/contradicting ID必须解析成Evidence视图。
-- 过期、失败和缺失证据显式展示。
-- 日志只展示脱敏有界片段和引用。
-- `INCONCLUSIVE`不得渲染成确定根因。
-- `claimedResolved=false`不得出现“已恢复”。
-- Markdown和JSON共享同一展示模型，禁止两套事实逻辑。
-- 每份报告包含 `schemaVersion`、`reportVersion`、`contentHash`。
-
-### PR-6：飞书固定群通知与Outbox
-
-复用 `clawkit-im` 的 `FeishuApi`，不要创建独立webhook客户端。
-
-扩展：
-
-```text
-sendChatMessage(chatId, content, idempotencyKey)
-replyMessage(messageId, content, idempotencyKey)
-```
-
-经 `lark-cli --dry-run` 核实的API形态：
-
-```text
-POST /open-apis/im/v1/messages?receive_id_type=chat_id
-body: receive_id, msg_type, content, uuid
-
-POST /open-apis/im/v1/messages/{message_id}/reply
-body: msg_type, content, uuid
-```
-
-身份与权限：
-
-- 只使用bot身份和tenant access token。
-- bot必须加入固定群。
-- 最小scope为发送消息所需的 `im:message`。
-- 不执行user `auth login`。
-- `FEISHU_APP_SECRET`只允许环境变量，不写YAML、日志和事件。
-- `FEISHU_OPS_CHAT_ID`为固定配置，不允许Agent或Incident输入覆盖。
-
-新增持久化Outbox：
-
-```text
-PENDING
-  → SENDING
-  → SENT
-  → RETRYABLE_FAILED
-  → PERMANENT_FAILED
-```
-
-幂等键：
-
-```text
-sha256(incidentId | reportVersion | chatId | eventType)
-```
-
-转换为稳定UUID并放入飞书请求 `uuid` 字段。
-
-规则：
-
-- 首次报告发固定群，持久化返回的message_id。
-- 同Incident后续reportVersion回复原message_id。
-- 崩溃发生在“飞书已收、SENT未落盘”时，以相同uuid重试。
-- 飞书失败只改变Delivery状态，不改变Incident、Discovery和Diagnosis状态。
-- 429/5xx/timeout可重试；4xx权限/参数错误永久失败并升级人工。
-- 不记录token、appSecret、完整请求体和chatId明文；日志只记录chat hash。
-- MVP只发送脱敏一屏摘要；完整报告仅在有稳定安全链接时附链接。
-- 不上传本地文件，不发送本地路径。
-
-不实现：
-
-- 读取群消息。
-- edit/recall。
-- 动态建群或拉人。
-- read receipt。
-- 飞书审批。
-- 飞书消息触发修复。
-
-### PR-7：全链路E2E与收口
-
-场景：
-
-1. 正常态：报告为健康/无活动故障，按策略可不通知。
-2. 热点锁竞争：报告展示业务影响、锁图、连接等待和反证，飞书发送一条。
-3. Evidence不足：报告明确INCONCLUSIVE，飞书发送人工升级摘要。
-4. 飞书timeout：Incident不变，Outbox重试且不重复发送。
-5. 飞书权限错误：Delivery永久失败，Incident不变。
-6. reportVersion增加：回复原消息，不新建主消息。
-
-## 7. 报告与通知数据边界
-
-飞书允许出现：
-
-- incidentId、逻辑targetId。
-- `SYNTHETIC_BUSINESS_DATA`。
-- 影响指标、状态码、P95、失败率。
-- 根因码、诊断状态、置信度。
-- Evidence ID和脱敏短摘要。
-- 建议的只读下一步或人工升级。
-
-飞书禁止出现：
-
-- SSH host/user/key/known_hosts。
-- DB URL/user/password。
-- appId/appSecret/token。
-- chat_id/message_id原文日志。
-- Fixture control token、Case manifest、Ground Truth。
-- 完整日志、订单ID、账户ID和本地文件路径。
-
-## 8. 测试矩阵
-
-### Fixture
-
-- 固定种子重现。
-- 正常/热点分布。
-- 并发duplicate。
-- 事务回滚。
-- 金额守恒。
-- k6阈值。
-- setup/reset/destroy幂等。
-- 控制接口外部404。
-
-### Discovery与Diagnosis
-
-- 正常、锁等待、连接堆积、HTTP退化。
-- required/optional缺失。
-- 过期、冲突和自恢复证据。
-- profile/tool/arguments一致。
-- Ground Truth不进入prompt。
-
-### Report
-
-- ACTIVE、RECOVERED、UNKNOWN。
-- CONFIRMED、PROBABLE、INCONCLUSIVE。
-- Evidence失败/过期。
-- 日志截断和脱敏。
-- Markdown/JSON事实一致。
-- contentHash稳定。
-
-### Feishu
-
-- chat_id请求。
-- 初次send和后续reply。
-- uuid稳定。
-- timeout/429/5xx重试。
-- 4xx永久失败。
-- crash-after-send恢复。
-- 重复workflow不重复通知。
-- secret/chatId不进日志。
-
-## 9. 退出门禁
-
-最终必须满足：
-
-```text
-mvn -B -ntp clean verify
-git diff --check
-git status --short
-```
-
-以及：
-
-- Gate-0完整 Discovery → Diagnosis真实产物存在。
-- HOT_ACCOUNT连续20轮无清理残留。
-- 数据不变量20轮全部通过。
-- opsro越权为0。
-- Ground Truth泄露为0。
-- 报告包含事实、反证、不确定性和时间线。
-- 飞书同Incident首发1条，后续只回复。
-- 飞书失败不改变Incident状态。
-- 凭据和完整敏感日志泄露为0。
-- 真实飞书联调只向用户明确指定的测试群执行。
-
-## 10. Claude Code Agent + DeepSeek执行协议
-
-每次只实现一个PR：
-
-1. 实现会话读取本文合同和允许范围。
-2. 先写失败测试。
-3. 实现最小diff。
-4. 运行确定性门禁。
-5. 新建只读Claude Code Agent + DeepSeek会话反向评审。
-6. 固定输出 `Blocking / Missing Tests / Scope Cuts / Conclusion`。
-7. Blocking未关闭不得进入下一PR。
-
-任何会话提出以下内容立即停止：
-
-- 让模型控制Fixture。
-- 把Ground Truth加入Evidence。
-- 允许任意SQL或Docker命令。
-- 使用飞书incoming webhook绕过bot身份和幂等。
-- 根据模型置信度自动修复。
-- 动态选择飞书接收人。
-
+具体协议字段、类名和测试名称以源码为准，不再放进路线正文逐项罗列。

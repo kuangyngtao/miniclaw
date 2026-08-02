@@ -114,7 +114,7 @@ class TransportAndProfileSecurityTest {
 
         assertThatThrownBy(() -> session.doInitializeAndAttest())
             .isInstanceOf(IOException.class)
-            .hasMessageContaining("capabilityProfile");
+            .hasMessageContaining("capability profile");
         assertThat(session.state()).isEqualTo(RemoteOpsSession.State.FAILED);
         assertThat(session.firstError()).isNotNull();
         assertThat(session.firstError().code()).isEqualTo("REMOTE_PROFILE_MISMATCH");
@@ -131,7 +131,7 @@ class TransportAndProfileSecurityTest {
 
         assertThatThrownBy(() -> session.doInitializeAndAttest())
             .isInstanceOf(IOException.class)
-            .hasMessageContaining("toolSetHash");
+            .hasMessageContaining("tool contract");
         assertThat(session.state()).isEqualTo(RemoteOpsSession.State.FAILED);
         assertThat(session.firstError().code()).isEqualTo("REMOTE_TOOLSET_MISMATCH");
     }
@@ -172,7 +172,7 @@ class TransportAndProfileSecurityTest {
 
         assertThatThrownBy(() -> session.doInitializeAndAttest())
             .isInstanceOf(IOException.class)
-            .hasMessageContaining("server name mismatch");
+            .hasMessageContaining("server identity");
         assertThat(session.state()).isEqualTo(RemoteOpsSession.State.FAILED);
     }
 
@@ -234,7 +234,7 @@ class TransportAndProfileSecurityTest {
             var s = newSession(fakeInitHash, transport);
             s.doInitializeAndAttest();
         }).isInstanceOf(IOException.class)
-            .hasMessageContaining("hash mismatch");
+            .hasMessageContaining("tool contract");
     }
 
     @Test
@@ -375,6 +375,10 @@ class TransportAndProfileSecurityTest {
 
     // ── Helpers ──
 
+    // Contract hash of the appDownTools fake definitions (empty schemas, 5 tools)
+    private static final String TEST_APP_DOWN_CONTRACT_HASH =
+        "fb8239b41bfbbdb2d4bba7b3fa24d2fecc1f7df975f988f509d1fd6c97993ed2";
+
     private RemoteOpsSession newSession(String expectedHash, McpTransport transport) {
         return newSession("1", expectedHash, transport);
     }
@@ -383,7 +387,8 @@ class TransportAndProfileSecurityTest {
                                         McpTransport transport) {
         try {
             var target = new RemoteTargetDescriptor("test-target",
-                "APP_DOWN_V1", probeVer, expectedHash);
+                "APP_DOWN_V1", probeVer, expectedHash,
+                TEST_APP_DOWN_CONTRACT_HASH);
             var config = new SshConnectionConfig("testhost", 22, "testuser",
                 identityFile(), knownHostsFile(),
                 Duration.ofSeconds(10), Duration.ofSeconds(10), 32768);

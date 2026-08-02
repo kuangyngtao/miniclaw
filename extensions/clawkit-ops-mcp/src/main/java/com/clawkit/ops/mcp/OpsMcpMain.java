@@ -17,9 +17,21 @@ public final class OpsMcpMain {
             System.exit(4);
         }
 
-        OpsTargetConfig config = OpsTargetConfig.fromEnvironment(System.getenv());
         OpsCapabilityProfile profile = OpsCapabilityProfile.fromEnvironment(
             System.getenv("CLAWKIT_OPS_PROFILE"));
+
+        DockerFixBackend fixBackend = null;
+
+        if (profile == OpsCapabilityProfile.FIX_ORDER_API_V1) {
+            OpsTargetConfig config = OpsTargetConfig.fromEnvironment(System.getenv());
+            fixBackend = new DockerFixBackend(config, new ProcessCommandExecutor());
+            // For FIX profile, no read-only backend needed
+            OpsMcpServer server = new OpsMcpServer(null, profile, fixBackend);
+            server.serve(System.in, System.out);
+            return;
+        }
+
+        OpsTargetConfig config = OpsTargetConfig.fromEnvironment(System.getenv());
         OpsBackend backend = new DockerOpsBackend(config, new ProcessCommandExecutor(),
             HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build(),
             Clock.systemUTC(), java.util.Map.of());

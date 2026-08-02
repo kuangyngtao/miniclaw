@@ -18,10 +18,23 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** stdio 子进程 MCP 传输。启动子进程，通过 stdin/stdout 交换 JSON-RPC 消息。 */
+/**
+ * stdio subprocess MCP transport. Starts a child process, exchanges
+ * JSON-RPC messages over stdin/stdout.
+ *
+ * <h3>stderr handling (PRODUCT-1 §10.2)</h3>
+ * <ul>
+ *   <li>stderr is sanitized before logging — no raw SSH error messages</li>
+ *   <li>Each line is logged at DEBUG (not INFO) after sanitization</li>
+ *   <li>External consumers get bounded, sanitized diagnostics only</li>
+ *   <li>Raw stderr exists only within the process lifetime for error classification</li>
+ *   <li>Never written to disk, model context, RunEvent, Session, or Memory</li>
+ * </ul>
+ */
 public class StdioTransport implements McpTransport {
 
     private static final Logger log = LoggerFactory.getLogger(StdioTransport.class);
@@ -29,6 +42,26 @@ public class StdioTransport implements McpTransport {
     private static final int SHUTDOWN_CLOSE_STDIN_WAIT_MS = 1000;
     private static final int SHUTDOWN_TERM_WAIT_MS = 2000;
     private static final int STDER_RING_SIZE = 1000;
+    private static final int MAX_DIAGNOSTIC_CHARS = 500;
+
+    // Patterns for sanitizing SSH stderr — remove paths, IPs, host references
+    // Order matters: key/cert paths first, then user directories, then IPs/hosts
+    private static final Pattern KEY_CERT_PATTERN = Pattern.compile(
+        "[/\\\\]\\.ssh[/\\\\][^\\s:\"']+"
+            + "|\\S+\\.(?:pem|key|ppk|cer|der|p12|pfx)\\b",
+        Pattern.CASE_INSENSITIVE);
+    private static final Pattern USER_DIR_PATTERN = Pattern.compile(
+        "(?:/home/|/Users/|C:\\\\Users\\\\)[^\\s:\"\\\\/]+",
+        Pattern.CASE_INSENSITIVE);
+    private static final Pattern ID_KEY_PATTERN = Pattern.compile(
+        "(^|[\\s\"'(])id_[a-zA-Z0-9_]+(\\.[a-zA-Z0-9_]+)?",
+        Pattern.CASE_INSENSITIVE);
+    private static final Pattern SSH_AUTH_SOCK_PATTERN = Pattern.compile(
+        "(?:SSH_AUTH_SOCK|ssh-auth-sock|agent\\.\\d+)[^\\s]*", Pattern.CASE_INSENSITIVE);
+    private static final Pattern IP_PATTERN = Pattern.compile(
+        "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b");
+    private static final Pattern USER_AT_HOST_PATTERN = Pattern.compile(
+        "[\\w.-]+@[\\w.-]+");
 
     private final String command;
     private final List<String> args;
@@ -42,6 +75,7 @@ public class StdioTransport implements McpTransport {
     private Thread stdoutThread;
     private Thread stderrThread;
     private final List<String> stderrRing = Collections.synchronizedList(new RingBuffer<>(STDER_RING_SIZE));
+    private final List<String> sanitizedDiagnostics = Collections.synchronizedList(new ArrayList<>());
 
     public StdioTransport(String command, List<String> args, Map<String, String> env, Path workDir) {
         this.command = command;
@@ -58,7 +92,12 @@ public class StdioTransport implements McpTransport {
         if (args != null && !args.isEmpty()) {
             pb.command().addAll(args);
         }
-        pb.environment().putAll(env);
+        // Use explicit env whitelist instead of inheriting parent process
+        if (!env.isEmpty()) {
+            Map<String, String> processEnv = pb.environment();
+            processEnv.clear();
+            processEnv.putAll(env);
+        }
         pb.redirectErrorStream(false);
         if (workDir != null) {
             pb.directory(workDir.toFile());
@@ -94,13 +133,14 @@ public class StdioTransport implements McpTransport {
                             }
                         }
                     } catch (Exception e) {
-                        log.debug("[MCP] stdout non-JSON: {}", line.substring(0, Math.min(line.length(), 80)));
+                        log.debug("[MCP] stdout non-JSON: {}",
+                            line.substring(0, Math.min(line.length(), 80)));
                     }
                 }
             } catch (IOException e) {
                 log.debug("[MCP] stdout reader exited: {}", e.getMessage());
             }
-            // EOF: 进程意外退出，fail 所有 pending
+            // EOF: process exited unexpectedly, fail all pending
             failAllPending("MCP server exited");
         }, "mcp-stdout-" + command);
         t.setDaemon(true);
@@ -115,7 +155,13 @@ public class StdioTransport implements McpTransport {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     stderrRing.add(line);
-                    log.info("[MCP:{}] {}", command, line);
+                    String sanitized = sanitizeDiagnostic(line);
+                    synchronized (sanitizedDiagnostics) {
+                        sanitizedDiagnostics.add(sanitized);
+                    }
+                    // Log sanitized output at DEBUG only — normal connections
+                    // should not flood INFO with SSH diagnostics
+                    log.debug("[MCP:{}] {}", command, sanitized);
                 }
             } catch (IOException e) {
                 log.debug("[MCP] stderr reader exited: {}", e.getMessage());
@@ -124,6 +170,28 @@ public class StdioTransport implements McpTransport {
         t.setDaemon(true);
         t.start();
         return t;
+    }
+
+    /**
+     * Sanitize a diagnostic line by removing sensitive patterns.
+     *
+     * <p>Removes: user home directories, key/certificate paths,
+     * SSH_AUTH_SOCK references, IP addresses, username@hostname patterns.
+     * Returns a bounded summary.
+     */
+    static String sanitizeDiagnostic(String raw) {
+        if (raw == null || raw.isEmpty()) return "";
+        String s = raw;
+        s = KEY_CERT_PATTERN.matcher(s).replaceAll("[key-path]");
+        s = ID_KEY_PATTERN.matcher(s).replaceAll("$1[id-key]");
+        s = USER_DIR_PATTERN.matcher(s).replaceAll("[user-dir]");
+        s = SSH_AUTH_SOCK_PATTERN.matcher(s).replaceAll("[agent-socket]");
+        s = IP_PATTERN.matcher(s).replaceAll("[ip]");
+        s = USER_AT_HOST_PATTERN.matcher(s).replaceAll("[user@host]");
+        if (s.length() > MAX_DIAGNOSTIC_CHARS) {
+            s = s.substring(0, MAX_DIAGNOSTIC_CHARS) + "…";
+        }
+        return s;
     }
 
     @Override
@@ -147,7 +215,7 @@ public class StdioTransport implements McpTransport {
             throw new IOException("[MCP] failed to parse request: " + e.getMessage(), e);
         }
         if (id < 0) {
-            // 通知类消息，无需等待响应
+            // Notification — no response expected
             writeLine(jsonRpcRequest);
             return "{}";
         }
@@ -177,7 +245,8 @@ public class StdioTransport implements McpTransport {
         } catch (java.util.concurrent.ExecutionException e) {
             pendingRequests.remove(id);
             Throwable cause = e.getCause();
-            throw new IOException("[MCP] request failed: " + (cause != null ? cause.getMessage() : e.getMessage()));
+            throw new IOException("[MCP] request failed: "
+                + (cause != null ? cause.getMessage() : e.getMessage()));
         }
     }
 
@@ -210,6 +279,13 @@ public class StdioTransport implements McpTransport {
         }
 
         failAllPending("MCP server stopped");
+
+        // Clear all stderr buffers — raw stderr must not survive process lifetime
+        stderrRing.clear();
+        synchronized (sanitizedDiagnostics) {
+            sanitizedDiagnostics.clear();
+        }
+
         log.debug("[MCP] stdio transport stopped: {}", command);
     }
 
@@ -236,11 +312,45 @@ public class StdioTransport implements McpTransport {
         return started.get() && process != null && process.isAlive();
     }
 
+    /**
+     * Returns SANITIZED, bounded diagnostics safe for external consumers.
+     * Each line has sensitive patterns (paths, IPs, user@host) removed.
+     * This is the ONLY public stderr accessor.
+     *
+     * <p>Raw stderr exists only for internal error classification and is
+     * cleared on stop/close.
+     */
     public List<String> getStderrLog() {
-        return List.copyOf(stderrRing);
+        synchronized (sanitizedDiagnostics) {
+            return List.copyOf(sanitizedDiagnostics);
+        }
     }
 
-    /** 固定大小的环形缓冲区 */
+    /**
+     * Return bounded, sanitized diagnostic text for structured connection
+     * classification. No raw stderr leaves this transport.
+     */
+    public String sanitizedDiagnosticSummary() {
+        synchronized (sanitizedDiagnostics) {
+            int from = Math.max(0, sanitizedDiagnostics.size() - 8);
+            return String.join("\n", sanitizedDiagnostics.subList(from, sanitizedDiagnostics.size()));
+        }
+    }
+
+    /**
+     * Package-private: get sanitized last N lines for error classification.
+     * Used by {@code RemoteMcpSession} to categorize SSH failures without
+     * exposing raw stderr.
+     */
+    List<String> internalDiagnosticTail(int maxLines) {
+        synchronized (sanitizedDiagnostics) {
+            int size = sanitizedDiagnostics.size();
+            int start = Math.max(0, size - maxLines);
+            return List.copyOf(sanitizedDiagnostics.subList(start, size));
+        }
+    }
+
+    /** Fixed-size ring buffer. */
     private static class RingBuffer<T> extends ArrayList<T> {
         private final int maxSize;
         RingBuffer(int maxSize) { this.maxSize = maxSize; }

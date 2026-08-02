@@ -283,17 +283,17 @@ public class McpManager {
             .toList();
     }
 
-    /** 获取指定 server 的 stderr 日志 */
+    /** 获取指定 server 的诊断日志（已脱敏，仅安全摘要） */
     public List<String> logs(String serverName) {
         McpClientState state = clients.get(serverName);
         if (state == null) return List.of("Server not found: " + serverName);
         if (state.transport() instanceof StdioTransport stdio) {
             List<String> log = stdio.getStderrLog();
-            if (log.isEmpty()) return List.of("(no stderr output)");
+            if (log.isEmpty()) return List.of("(no diagnostics)");
             int start = Math.max(0, log.size() - 50);
             return log.subList(start, log.size());
         }
-        return List.of("stderr logs only available for stdio servers");
+        return List.of("diagnostics only available for stdio servers");
     }
 
     public Map<String, McpClientState> clientStates() { return Map.copyOf(clients); }

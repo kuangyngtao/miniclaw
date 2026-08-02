@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# clawkit-ops-fix-stdio — fix MCP server launcher
+#
+# Root-owned (mode 755). Called by the fix gateway via sudo.
+# Runs the Java MCP server JAR with the FIX_ORDER_API_V1 profile.
+# Does NOT pass through SSH arguments ($@, $*, $1, $2, etc.)
+#
+# The MCP server provides only the restart_service tool for order-api.
+
+set -euo pipefail
+
+JAR="/usr/local/lib/clawkit/ops-fix.jar"
+ENV_FILE="/etc/clawkit/ops-fix.env"
+
+# Validate JAR
+if [[ ! -f "${JAR}" ]]; then
+    echo '{"jsonrpc":"2.0","error":{"code":-32603,"message":"JAR not found"},"id":null}'
+    exit 1
+fi
+
+# JAR must be root-owned and not group/other-writable
+JAR_OWNER=$(stat -c '%U' "${JAR}" 2>/dev/null || echo "NOTROOT")
+if [[ "${JAR_OWNER}" != "root" ]]; then
+    echo '{"jsonrpc":"2.0","error":{"code":-32603,"message":"JAR not root-owned"},"id":null}'
+    exit 1
+fi
+
+JAR_MODE=$(stat -c '%a' "${JAR}" 2>/dev/null || echo "0000")
+JAR_GROUP_WRITABLE=$(( (10#${JAR_MODE} / 10) % 10 ))
+JAR_OTHER_WRITABLE=$(( 10#${JAR_MODE} % 10 ))
+if [[ ${JAR_GROUP_WRITABLE} -ge 6 || ${JAR_OTHER_WRITABLE} -ge 6 ]]; then
+    echo '{"jsonrpc":"2.0","error":{"code":-32603,"message":"JAR permissions too open"},"id":null}'
+    exit 1
+fi
+
+# Source env file (root-only, not readable by opsfix)
+if [[ -f "${ENV_FILE}" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${ENV_FILE}"
+    set +a
+fi
+
+# Never pass through SSH arguments
+exec java -jar "${JAR}"

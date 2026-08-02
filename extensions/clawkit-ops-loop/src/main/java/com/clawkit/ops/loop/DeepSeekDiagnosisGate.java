@@ -128,7 +128,18 @@ public final class DeepSeekDiagnosisGate {
                 ModelRequest request = buildRequest(result, symptom, control);
                 ModelResponse response = provider.generate(request);
 
+                // Extract diagnosis from tool call or text content
                 String content = response.content();
+                if (response.hasToolCalls()) {
+                    // Model called submit_diagnosis — extract args JSON
+                    var submitCall = response.toolCalls().stream()
+                        .filter(tc -> "submit_diagnosis".equals(tc.name()))
+                        .findFirst();
+                    if (submitCall.isPresent()) {
+                        content = submitCall.get().arguments().toString();
+                    }
+                }
+
                 if (content == null || content.isBlank()) {
                     lastFailure = new IOException("empty Provider response");
                     log.info("[diagnosis-gate] empty response, retry {}/{}",
@@ -165,7 +176,10 @@ public final class DeepSeekDiagnosisGate {
     ModelRequest buildRequest(DiscoveryResult result, String symptom, ExecutionControl control) {
         List<Message> messages = buildMessages(result, symptom);
         List<ToolDefinition> tools = List.of(submitDiagnosisToolDef());
-        ModelParameters params = new ModelParameters(0.0, MAX_OUTPUT_TOKENS, false);
+        // Use PROVIDER_DEFAULT reasoning mode — lets DeepSeek V4 use its native
+        // reasoning capabilities rather than forcing thinking=disabled.
+        ModelParameters params = new ModelParameters(0.0, MAX_OUTPUT_TOKENS, false,
+            com.clawkit.provider.ProviderReasoningMode.PROVIDER_DEFAULT);
         return new ModelRequest(messages, tools, params, control);
     }
 
@@ -177,13 +191,43 @@ public final class DeepSeekDiagnosisGate {
     }
 
     private String systemPromptText(DiscoveryResult result, String symptom) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("You are an SRE diagnosing an incident.\n");
-        sb.append("Target: ").append(result.incidentId()).append("\n");
-        sb.append("Symptom: ").append(symptom != null ? symptom : "unspecified").append("\n");
-        sb.append("Profile: ").append(result.profileName()).append("\n\n");
-        sb.append("Evidence:\n");
+        // Pre-compute deterministic diagnostic signals from evidence
+        DiagnosticSignals signals = DiagnosticSignals.extract(
+            result.bundle().evidence());
 
+        StringBuilder sb = new StringBuilder();
+        sb.append("Diagnose this incident using the already collected bounded baseline evidence below. ");
+        sb.append("Do not request additional evidence or call diagnostic tools; submit the result directly.\n\n");
+
+        sb.append("Target: ").append(result.incidentId()).append("\n");
+        sb.append("Symptom: ").append(symptom != null ? symptom : "unspecified").append("\n\n");
+
+        sb.append("Deterministic extracted signals are authoritative under the taxonomy because they are ");
+        sb.append("derived only from bounded evidence, not ground truth. Use candidateRootCause unless ");
+        sb.append("stronger direct evidence establishes another listed cause.\n\n");
+
+        try {
+            sb.append("Signals: ").append(MAPPER.writeValueAsString(signals)).append(".\n\n");
+        } catch (Exception ignored) {}
+
+        sb.append("Valid rootCauseCode values: APP_DOWN, DB_LOCK_WAIT, CPU_PRESSURE, CONNECTION_EXHAUSTION, INCONCLUSIVE. ");
+        sb.append("For CONFIRMED or PROBABLE diagnoses, alternatives must contain at least one other root ");
+        sb.append("cause code considered; only INCONCLUSIVE may use an empty alternatives array. ");
+        sb.append("Valid diagnosisStatus values: CONFIRMED, PROBABLE, INCONCLUSIVE. Valid currentCondition ");
+        sb.append("values: ACTIVE, RECOVERED, UNKNOWN. Valid resolutionAttribution: NONE, SELF_RECOVERED. ");
+        sb.append("An INCONCLUSIVE diagnosis must still cite current supporting evidence ");
+        sb.append("that establishes the symptom or the inability to distinguish the listed causes; do not return ");
+        sb.append("an empty supportingEvidence array. ");
+        sb.append("supportingEvidence and contradictingEvidence must be JSON arrays containing only ");
+        sb.append("evidence ID strings, for example [\"e-1\",\"e-2\"], never objects. ");
+        sb.append("Only cite evidence in supportingEvidence when evidenceCollectionStatus is OBSERVED, ");
+        sb.append("evidenceFreshness is CURRENT. ");
+        sb.append("Set claimedResolved=false. ");
+        sb.append("Include exactly these fields: rootCauseCode, confidence, supportingEvidence, ");
+        sb.append("contradictingEvidence, alternatives, missingEvidence, recommendedActionCode, claimedResolved, ");
+        sb.append("schemaVersion, diagnosisStatus, currentCondition, evaluatedAt, resolutionAttribution.\n\n");
+
+        sb.append("Baseline evidence:\n");
         for (Evidence e : result.bundle().evidence()) {
             sb.append("- [").append(e.evidenceId()).append("] ")
                 .append(e.type()).append(" / ").append(e.scope())
@@ -195,7 +239,7 @@ public final class DeepSeekDiagnosisGate {
             if (e.fact() != null && !e.fact().isEmpty()) {
                 try {
                     String compact = MAPPER.writeValueAsString(e.fact());
-                    if (compact.length() > 2048) compact = compact.substring(0, 2048) + "...";
+                    if (compact.length() > 3072) compact = compact.substring(0, 3072) + "...";
                     sb.append("\n  facts: ").append(compact);
                 } catch (Exception ignored) {}
             }
@@ -210,8 +254,12 @@ public final class DeepSeekDiagnosisGate {
         ObjectNode params = MAPPER.createObjectNode();
         params.put("type", "object");
         ObjectNode props = params.putObject("properties");
-        props.putObject("rootCauseCode").put("type", "string")
-            .put("description", "Root cause code from the allowed enumeration");
+        ObjectNode rcProps = props.putObject("rootCauseCode");
+        rcProps.put("type", "string");
+        rcProps.set("enum", MAPPER.createArrayNode()
+            .add("APP_DOWN").add("DB_LOCK_WAIT").add("CPU_PRESSURE")
+            .add("CONNECTION_EXHAUSTION").add("INCONCLUSIVE"));
+        rcProps.put("description", "Root cause code from the allowed enumeration");
         props.putObject("diagnosisStatus").put("type", "string")
             .put("enum", MAPPER.createArrayNode().add("CONFIRMED").add("PROBABLE").add("INCONCLUSIVE"));
         props.putObject("currentCondition").put("type", "string");

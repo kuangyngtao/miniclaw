@@ -40,8 +40,10 @@ public final class RemoteDiscoveryWorkflow {
         String expectedProbeVersion,
         String expectedToolSetHash,
         String apiKey,
+        String diagnosisModel,
         Duration diagnosisDeadline
     ) {
+        public static final String DEFAULT_DIAGNOSIS_MODEL = "deepseek-v4-pro";
         public static final Duration DEFAULT_DIAGNOSIS_DEADLINE = Duration.ofSeconds(120);
     }
 
@@ -119,14 +121,39 @@ public final class RemoteDiscoveryWorkflow {
                 diagnosisFailureCode = "PROVIDER_NOT_CONFIGURED";
             } else {
                 try {
-                    LLMConfig llmConfig = LLMConfig.builder().apiKey(apiKey).build();
+                    String model = config.diagnosisModel() != null
+                        ? config.diagnosisModel() : Config.DEFAULT_DIAGNOSIS_MODEL;
+                    LLMConfig llmConfig = LLMConfig.builder().apiKey(apiKey)
+                        .model(model).build();
                     LLMProvider llmProvider = ProviderFactory.create(llmConfig);
                     DeepSeekDiagnosisGate gate = new DeepSeekDiagnosisGate(
                         llmProvider, llmConfig.model(), clock);
                     Duration deadline = config.diagnosisDeadline() != null
                         ? config.diagnosisDeadline() : Config.DEFAULT_DIAGNOSIS_DEADLINE;
-                    diagnosis = gate.diagnose(discovery, null, deadline);
+                    Diagnosis modelDiagnosis = gate.diagnose(discovery, null, deadline);
                     providerCalled = true;
+
+                    // ── Reconcile: deterministic signals override model root cause ──
+                    Instant now = clock.instant();
+                    List<Evidence> currentEvidence = discovery.bundle().evidence().stream()
+                        .filter(e -> e.collectionStatus() == Evidence.CollectionStatus.OBSERVED)
+                        .filter(e -> e.freshness() == Evidence.Freshness.CURRENT)
+                        .filter(e -> e.fact().path("success").asBoolean(false))
+                        .filter(e -> e.isCurrentAt(now))
+                        .toList();
+                    DiagnosticSignals signals = DiagnosticSignals.extract(currentEvidence);
+                    Diagnosis reconciled = DiagnosisReconciler.reconcile(
+                        modelDiagnosis, signals, currentEvidence, now);
+
+                    // Log signal-model conflicts — never silently override
+                    if (!"INCONCLUSIVE".equals(signals.candidateRootCause())
+                        && !signals.candidateRootCause().equals(modelDiagnosis.rootCauseCode())) {
+                        log.warn("[diagnosis] signal-model conflict: signal={} model={}",
+                            signals.candidateRootCause(), modelDiagnosis.rootCauseCode());
+                    }
+
+                    // Use reconciled diagnosis (signals provide rootCauseCode when deterministic)
+                    diagnosis = reconciled;
                     if ("INCONCLUSIVE".equals(diagnosis.rootCauseCode())
                         && diagnosis.confidence() == 0.0) {
                         diagnosisFailureCode = "DIAGNOSIS_INCONCLUSIVE";

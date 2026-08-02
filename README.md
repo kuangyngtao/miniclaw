@@ -2,21 +2,21 @@
 
 [![CodeQL](https://github.com/kuangyngtao/miniclaw/actions/workflows/codeql.yml/badge.svg)](https://github.com/kuangyngtao/miniclaw/actions/workflows/codeql.yml)
 
-> Java 21 本地 Agent Runtime，以 Evidence-gated Ops Loop 验证安全执行、失败恢复与独立验收
+> 本地优先的个人 AI 运维助手：连接你的服务器，解释问题，审批后安全处置，并独立验证结果
 
-clawkit 将 LLM Provider、工具调用、权限模式、上下文管理、记忆、会话、可靠性门禁和 MCP 扩展组合成一个本地 Agent Runtime。编程助手是基础入口；当前旗舰应用是 Agentic SRE：在可丢弃环境中完成故障发现、受限采证、结构化诊断、审批动作和独立验证。
+clawkit 运行在用户自己的电脑上，通过受限远程能力连接用户已经登记的 Linux 服务器。用户可以用自然语言查看服务状态、分析有界日志、调查故障；命中经过审核的修复方案后，Clawkit 会说明原因和影响，等待人工批准，执行前重新检查现场，执行后使用独立只读会话确认业务是否真的恢复。
 
-项目仍处于工程化原型阶段。当前重点不是扩展更多通用抽象，而是用 Ops Arena 证明 Runtime 在证据缺失、远程失败和危险副作用下仍然可控、可恢复、可评测。
+Java 21 Agent Runtime、MCP、权限门禁和状态机是实现这些体验的底座，不是用户必须先理解的产品。项目仍处于工程化原型阶段；当前重点是把服务器接入、快速查看、Ops 调查和审批修复打磨成一条顺手的个人使用路径，而不是继续堆工具数量或建设通用 SSH/SRE 平台。
 
 ## 项目概览
 
 | 维度 | 说明 |
 | --- | --- |
-| 项目类型 | Java 多模块 Agent Runtime / Agentic SRE 应用 |
+| 项目类型 | 本地个人 AI 运维助手，内部使用 Java 多模块 Agent Runtime |
 | 运行方式 | 本地 CLI |
-| 核心目标 | 让 Agent 在工具副作用、部分失败和证据不确定条件下安全完成任务 |
-| 关键机制 | ReAct、Plan-and-Execute、MCP、Evidence、Side Effect Gate、独立 Verification、Benchmark |
-| 当前阶段 | OPS-0 本地诊断工程完成；OPS-1 远程只读 Discovery 待完成 |
+| 核心目标 | 让个人开发者更容易理解并安全处理自己服务器上的服务故障 |
+| 关键机制 | 复用本地 SSH、预定义只读能力、证据化调查、人工审批、受限执行和独立复验 |
+| 当前阶段 | REMOTE-0 与 OPS MVP-3 工程闭环已完成；下一步打磨服务器接入和统一调查体验 |
 
 ## 项目目标
 
@@ -35,15 +35,15 @@ clawkit 关注 Agent 的底层运行能力和可验证闭环，而不是单次�
 
 | 能力 | 说明 |
 | --- | --- |
-| Agent 任务循环 | ReAct Loop、慢思考模式、Plan-and-Execute、SubAgent |
-| 工具系统 | 内置工具、MCP 工具、Tool Registry、工具安全拦截 |
+| 任务执行 | 支持边观察边执行、先规划后执行、慢思考和并行子任务 |
+| 工具系统 | 内置工具、外部工具接入、统一登记和安全拦截 |
 | 权限模式 | `plan` / `ask` / `auto`，控制工具执行边界 |
 | 上下文管理 | Token 使用跟踪、阶梯式压缩、消息脱敏、会话持久化 |
 | 记忆系统 | 基于磁盘文件的长期记忆，用于跨任务复用上下文 |
-| Provider 适配 | LLM Provider 抽象、超时、重试、熔断 |
-| IM 通道 | 抽象消息通道，预留飞书、微信等入口 |
-| 可靠性门禁 | 取消、预算、Attempt journal、结果未知、幂等、目标互斥和恢复扫描 |
-| Ops 扩展 | 白名单只读采证、Incident、Evidence、Diagnosis、Flight Recorder 和隐藏答案评测 |
+| 模型通信 | 统一适配、超时、重试和熔断 |
+| 消息通道 | 飞书、微信等消息入口的统一适配层 |
+| 可靠性门禁 | 取消、预算、执行记录、结果未知、幂等、目标互斥和恢复扫描 |
+| 运维扩展 | 白名单只读采证、事故记录、诊断、时间线和隐藏答案评测 |
 
 ## 工程状态
 
@@ -116,8 +116,15 @@ API Key 只能通过环境变量提供，禁止写入 `config.yaml`。非敏感�
 | `/memory` | 查看或管理记忆 |
 | `/skill` | 加载和查看技能 |
 | `/mcp` | 管理 MCP Server |
+| `/remote` | 查看当前远程连接状态 |
+| `/remote list` | 查看已登记服务器 |
+| `/remote connect <targetId>` | 连接已登记服务器 |
+| `/remote disconnect` | 断开当前服务器 |
+| `/remote tools` | 查看当前挂载的预定义远程能力 |
 | `/feishu-on`、`/feishu-off` | 开关飞书通道镜像 |
 | `/exit` | 退出 |
+
+当前版本的 Target 导入仍以高级 YAML 配置为主。下一阶段会优先复用 `~/.ssh/config`、SSH Agent 和系统 `known_hosts`，并增加连接诊断和用户向状态展示；在这些能力实现前，不应把目标体验示例误写成当前可用命令。产品方向和体验验收见 [docs/product-direction.md](docs/product-direction.md)。
 
 ## MCP 扩展
 
@@ -211,20 +218,23 @@ Built-in Tools / MCP Tools / Safety Interceptors
 ## 项目文档
 
 - [CLAUDE.md](./CLAUDE.md)：AI 协作入口、项目边界和强约束
+- [docs/product-direction.md](docs/product-direction.md)：目标用户、产品承诺、核心旅程、技术调研和近期体验路线
 - [DESIGN.md](./DESIGN.md)：架构原则、类设计、接口设计、解耦、测试和代码审查规范
 - [TODO.md](./TODO.md)：当前路线图和重构待办
-- [docs/ops-loop.md](docs/ops-loop.md)：Ops Loop 架构、安全模型、Case 和门禁式演进路线
+- [docs/ops-loop.md](docs/ops-loop.md)：远程运维闭环的架构、安全边界和演进路线
+- [docs/project-deep-dive-guide.md](docs/project-deep-dive-guide.md)：面向个人学习和秋招准备的项目全览
+- [docs/ops-mvp2-business-fixture-report-feishu-plan.md](docs/ops-mvp2-business-fixture-report-feishu-plan.md)：业务故障、事故报告和飞书通知的当前进度与验收标准
 - [docs/project-highlights-and-ops-loop-roadmap.md](docs/project-highlights-and-ops-loop-roadmap.md)：2026-07-17 阶段性历史快照，不作为当前状态来源
 - [SECURITY.md](./SECURITY.md)：安全策略和漏洞报告方式
 
 ## 演进方向
 
-P0 Runtime 安全、观测和可靠性主链已经建立；OPS-0A/0B 工程实现完成，OPS-1 已完成 SSH 后端和远程只读账号。后续顺序以 [TODO.md](./TODO.md) 为准：
+运行底座、远程只读连接和第一个审批修复闭环已经建立。后续顺序以 [TODO.md](./TODO.md) 为准：
 
-1. 收口未提交改动、CI、Docker smoke 和首个 Release。
-2. 完成 OPS-1 远程只读 Discovery Loop 与异常分类。
-3. 以单个 allowlisted `restart_service` 动作完成 OPS-2A 审批、Precheck、独立 Verification 和补偿闭环。
-4. 再补 Incident 去重、调度、Playbook State 和通知，形成最小持续 Loop。
+1. 打磨服务器接入：复用 OpenSSH 配置和 Agent，提供 doctor、简洁状态与可执行错误提示。
+2. 统一“快速查看”和“深度调查”入口，让普通 CLI 能顺手进入现有 Ops Loop。
+3. 重排审批展示，使用户先看到原因、影响和保护措施，内部 ID 与哈希按需展开。
+4. 通过连续真实使用收集摩擦、耗时和成本，再评审 Observe-only 持续运行与 Shadow；不整体切换 Agent 权限。
 
 更详细的待办见 [TODO.md](./TODO.md)。
 

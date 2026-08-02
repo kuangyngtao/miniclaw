@@ -30,6 +30,7 @@ public record DiagnosticSignals(
         boolean lockWait = false;
         boolean lockAcquired = false;
         boolean lockReleased = false;
+        boolean appDown = false;
         double maxCpu = 0;
         List<String> relevant = new ArrayList<>();
 
@@ -80,17 +81,28 @@ public record DiagnosticSignals(
                     lockReleased |= text.contains("transaction released account row lock");
                     if (lockAcquired || lockReleased) relevant.add(item.evidenceId());
                 }
+                case SERVICE_STATUS, CONTAINER_STATUS -> {
+                    if (!item.scope().contains("order-api")) break;
+                    String state = data.path("State").asText("");
+                    if (state.contains("exited") || state.contains("stopped")
+                        || state.contains("down") || state.contains("unhealthy")) {
+                        appDown = true;
+                        relevant.add(item.evidenceId());
+                    }
+                }
                 default -> { }
             }
         }
 
         boolean completedLock = lockAcquired && lockReleased;
-        String root = lockWait ? "DB_LOCK_WAIT"
+        String root = appDown ? "APP_DOWN"
+            : lockWait ? "DB_LOCK_WAIT"
             : poolSaturated ? "CONNECTION_EXHAUSTION"
             : maxCpu >= CPU_PRESSURE_PERCENT ? "CPU_PRESSURE"
             : completedLock && incidentDegraded ? "DB_LOCK_WAIT"
             : "INCONCLUSIVE";
-        boolean currentCauseActive = lockWait || poolSaturated || maxCpu >= CPU_PRESSURE_PERCENT;
+        boolean currentCauseActive = appDown || lockWait || poolSaturated
+            || maxCpu >= CPU_PRESSURE_PERCENT;
         String condition = currentCauseActive ? "ACTIVE"
             : currentHealthy ? "RECOVERED"
             : incidentDegraded ? "ACTIVE" : "UNKNOWN";

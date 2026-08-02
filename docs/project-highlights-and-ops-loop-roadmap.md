@@ -1,16 +1,16 @@
-# Clawkit 项目现状、技术亮点与演进总览
+# Clawkit 项目现状与演进总览
 
-> 修订日期：2026-07-17
+> 修订日期：2026-07-29
 >
-> 文档性质：阶段性历史快照。当前状态、完成记录和实施顺序以 [TODO.md](../TODO.md) 为准；稳定项目定位以 [CLAUDE.md](../CLAUDE.md) 为准。
+> 本文保留项目从 Runtime 到 OPS 闭环的技术演进视角。当前面向用户的产品定位与近期路线以 [product-direction.md](product-direction.md) 为准。
 >
 > 详细 Ops 架构与门禁路线：[ops-loop.md](ops-loop.md)
 
 ## 1. 项目定位
 
-Clawkit 是基于 Java 21 的本地 Agent Runtime，主要入口为交互式 CLI，并支持 IM Adapter。项目已经从 ReAct Demo 进入“核心运行路径完成重构、工程交付闭环接近收口”的阶段。
+Clawkit 面向用户是运行在本地的个人 AI 运维助手；Java 21 智能体 Runtime 是它的技术底座。产品通过命令行连接用户已有服务器，以预定义工具完成快速查看、调查、审批处置和独立验证，也保留即时通讯入口。项目已经越过协议演示阶段：工具调用、模型通信、上下文、会话、记忆、观测、权限控制和 OPS 闭环都有稳定主路径。
 
-三层定位：
+项目可以理解为三层：
 
 ```text
 Clawkit Agent Runtime
@@ -22,7 +22,7 @@ Clawkit Agent Runtime
               v
 Safe Ops Capability Layer
   opsro / Policy Gate / opsfix
-  Typed Ops Runner / Verification
+  受限动作执行 / 独立复验
               |
               v
 Ops Arena
@@ -30,21 +30,21 @@ Ops Arena
   Hidden Ground Truth / Evaluator
 ```
 
-对外不定位为“另一个自动运维平台”，而是：
+它不是另一个通用自动运维平台，而是：
 
-> Clawkit 是可控、可观测、可评测的本地 Agent Runtime；Ops Loop 是建立在其上的 Agentic SRE 应用；Ops Arena 是用真实流量和隐藏故障评估 Agent 能力的 Benchmark 环境。
+> Clawkit 用本地 Agent Runtime 提供可控、可追踪、可评测的执行能力；Remote 是可信服务器入口，OPS Loop 是理解和处置问题的核心引擎；故障实验环境用真实流量和隐藏答案检验这条链路。
 
-三个核心标签：
+三个核心原则：
 
-- **Evidence-first**：事实与推测分离，证据不足返回 `INCONCLUSIVE`。
-- **Capability-safe**：模型只选择类型化、白名单能力，凭据和底层命令不进入上下文。
-- **Independently-verified**：出题者、答题 Agent 和裁判隔离，Agent 不能自证成功。
+- **证据优先**：事实与推测分开；证据不足就明确说无法下结论。
+- **能力受限**：模型只能选择白名单内的结构化能力，凭据和底层命令不进入上下文。
+- **独立验证**：故障控制、诊断和评分相互隔离，执行者不能自行宣布成功。
 
 ## 2. 当前技术亮点
 
-### 2.1 四条唯一主链
+### 2.1 四条唯一主路径
 
-| 主链 | 唯一入口 |
+| 职责 | 代码入口 |
 | --- | --- |
 | 工具执行 | `ToolCallExecutor` |
 | 上下文构建与压缩 | `ContextPipeline` |
@@ -53,23 +53,23 @@ Ops Arena
 
 SessionStore、MemoryHooks、SkillRuntime、SlashCommandRouter、ApprovalConsole 和 CLI Command Handler 已进入生产路径。ArchUnit 使用 10 条硬规则阻止核心路径重新出现旁路或反向依赖。
 
-### 2.2 可信观测
+### 2.2 所有过程都能追溯
 
-- 每个 run 独立写入 `events.jsonl` 和原子 `summary.json`。
-- Metrics 从 RunEvent 投影，不维护第二份指标事实。
-- Run、Turn、Provider、Tool、Context、Compact、Approval 和 SubAgent 父子关系可追踪。
+- 每次运行独立保存事件明细和汇总结果。
+- 指标从事件事实计算，不再维护另一套容易对不上的数据。
+- 模型调用、工具调用、上下文压缩、审批和子任务关系都能追踪。
 - CLI 已提供 `/runs`、`/metrics` 和 `/trace`。
 
 这套事件事实源可以继续扩展 Incident、Evidence、Attempt、Verification 和 Compensation，而不需要另建无法对账的审计链。
 
-### 2.3 可机械回归
+### 2.3 改动后可以机械化回归
 
-- 固定 Benchmark 覆盖读写、搜索、失败恢复、长输出、上下文压缩、权限边界、Plan 和并行 SubAgent。
-- 版本化 Baseline 支持逐 case 比较。
-- 回归结果区分 `DEGRADED`、`UNCHANGED`、`IMPROVED` 和 `INCOMPATIBLE_BASELINE`。
+- 固定测试集覆盖读写、搜索、失败恢复、长输出、上下文压缩、权限边界、计划执行和并行子任务。
+- 版本化基准支持逐项比较。
+- 结果明确区分退化、无变化、改善和基准不兼容。
 - 安全约束和缺失完成事件可作为硬门禁。
 
-### 2.4 类型化安全执行
+### 2.4 所有副作用都先过安全门
 
 普通工具、Internal Tool、Plan Worker 和 SubAgent 统一经过：
 
@@ -82,11 +82,11 @@ Metadata
   -> RunEvent / Audit
 ```
 
-已有能力包括：
+目前已经具备：
 
-- 类型化 metadata、风险等级、执行策略、审批记录和结构化错误。
-- PLAN、ASK、AUTO 权限模式。
-- Bash timeout、进程树终止、输出限制和非零退出码。
+- 明确的工具属性、风险等级、执行策略、审批记录和结构化错误。
+- 只规划、执行前询问和自动执行三种权限模式。
+- 命令超时、进程树终止、输出限制和失败退出码处理。
 - 路径越界、symlink、防覆盖、原子写和 TOCTOU 检查。
 - MCP 坏参数保护及不可信工具保守降级。
 
@@ -154,7 +154,7 @@ Docker Desktop 镜像和自动 smoke 已通过。由于当前自动化终端不�
 
 - PostgreSQL 锁等待黄金诊断与对抗变体。
 - 远程只读 SSH。
-- Typed Ops Runner、独立验证和回滚/补偿。
+- 受限动作执行、独立验证和回滚或补偿。
 
 ## 6. 修订后的实施顺序
 

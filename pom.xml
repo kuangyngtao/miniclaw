@@ -32,6 +32,8 @@
         <java.version>21</java.version>
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
+        <!-- Remote E2E needs SSH credentials and is opt-in via -De2e.excludedGroups=. -->
+        <e2e.excludedGroups>e2e</e2e.excludedGroups>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
         <picocli.version>4.7.6</picocli.version>
@@ -125,6 +127,9 @@
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>3.3.0</version>
+                    <configuration>
+                        <excludedGroups>${e2e.excludedGroups}</excludedGroups>
+                    </configuration>
                 </plugin>
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>

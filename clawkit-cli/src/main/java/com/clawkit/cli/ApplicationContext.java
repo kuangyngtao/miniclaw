@@ -10,6 +10,9 @@ import com.clawkit.tools.ToolRegistry;
 import com.clawkit.context.SkillLoader;
 import com.clawkit.tools.mcp.McpManager;
 import com.clawkit.im.ImChannel;
+import com.clawkit.cli.remote.RemoteConnectionService;
+import com.clawkit.cli.remote.RemoteTargetStore;
+import com.clawkit.ops.delivery.OpsInvestigationFacade;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -32,5 +35,8 @@ public record ApplicationContext(
     Path workDir,
     String model,
     ThinkingMode thinkingMode,
-    EffectiveConfig effectiveConfig
+    EffectiveConfig effectiveConfig,
+    RemoteConnectionService remoteService,
+    RemoteTargetStore remoteTargetStore,
+    OpsInvestigationFacade opsFacade
 ) {}

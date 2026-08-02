@@ -5,8 +5,11 @@ import com.clawkit.tools.schema.ToolDefinition;
 import com.clawkit.tools.schema.ToolResult;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,6 +22,7 @@ public class ToolRegistry implements Registry {
     private static final Logger log = LoggerFactory.getLogger(ToolRegistry.class);
 
     private final ConcurrentHashMap<String, Tool> tools = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ToolMount> mounts = new ConcurrentHashMap<>();
     private final List<SafetyInterceptor> interceptors = new ArrayList<>();
 
     @Override
@@ -114,5 +118,147 @@ public class ToolRegistry implements Registry {
     /** 工具数量 */
     public int count() {
         return tools.size();
+    }
+
+    // ── Namespace mount (REMOTE-0 §9.1) ───────────────────────────────
+
+    /**
+     * Atomically mount a collection of tools under a named owner.
+     *
+     * <p>All tools are checked for name conflicts first; if any conflict,
+     * zero tools are mounted and a {@link ToolNamespaceCollisionException}
+     * is thrown. On success, a {@link ToolMount} handle is returned —
+     * closing it removes only the tools that still belong to this mount.
+     *
+     * <p>This is the safe replacement for {@link #register(Tool)} when
+     * mounting remote/dynamic tools. Built-in tools registered via
+     * {@code register()} are not tracked by mounts.
+     *
+     * @param ownerId unique owner identifier (e.g., "remote:test-server")
+     * @param toolsToMount the tools to mount
+     * @return a closeable mount handle
+     * @throws ToolNamespaceCollisionException if any tool name conflicts
+     */
+    public ToolMount mount(String ownerId, Collection<Tool> toolsToMount) {
+        if (ownerId == null || ownerId.isBlank()) {
+            throw new IllegalArgumentException("ownerId must not be blank");
+        }
+        if (toolsToMount == null || toolsToMount.isEmpty()) {
+            throw new IllegalArgumentException("toolsToMount must not be empty");
+        }
+
+        // Check for duplicates within the batch (no lock needed — input is local)
+        List<String> names = toolsToMount.stream().map(Tool::name).toList();
+        Set<String> uniqueNames = Set.copyOf(names);
+        if (uniqueNames.size() != names.size()) {
+            throw new ToolNamespaceCollisionException(ownerId,
+                "duplicate tool names within mount batch");
+        }
+
+        // Atomic check-then-mount under a single lock to prevent races
+        synchronized (this) {
+            // Reject duplicate ownerId
+            if (mounts.containsKey(ownerId)) {
+                throw new ToolNamespaceCollisionException(ownerId,
+                    "mount owner already active: " + ownerId + " — close previous mount first");
+            }
+
+            // Check for conflicts with existing tools
+            List<String> conflicts = new ArrayList<>();
+            for (String name : uniqueNames) {
+                if (tools.containsKey(name)) {
+                    conflicts.add(name);
+                }
+            }
+            if (!conflicts.isEmpty()) {
+                throw new ToolNamespaceCollisionException(ownerId,
+                    "tool name collision: " + String.join(", ", conflicts));
+            }
+
+            // Atomic mount: all-or-nothing under the lock
+            List<String> mountedNames = new ArrayList<>();
+            for (Tool tool : toolsToMount) {
+                tools.put(tool.name(), tool);
+                mountedNames.add(tool.name());
+            }
+
+            var mount = new OwnedToolMount(ownerId, List.copyOf(mountedNames),
+                List.copyOf(toolsToMount), this);
+            mounts.put(ownerId, mount);
+            log.info("[Registry] mounted {} tools for owner '{}'", mountedNames.size(), ownerId);
+            return mount;
+        }
+    }
+
+    /** Check if an owner has an active mount. */
+    public boolean hasMount(String ownerId) {
+        return mounts.containsKey(ownerId);
+    }
+
+    /** Get the active mount for an owner, if any. */
+    public Optional<ToolMount> getMount(String ownerId) {
+        return Optional.ofNullable(mounts.get(ownerId));
+    }
+
+    /** Return the tool instances belonging to a mount (debug/testing). */
+    List<Tool> toolsForOwner(String ownerId) {
+        ToolMount mount = mounts.get(ownerId);
+        if (mount == null) return List.of();
+        return mount.toolNames().stream()
+            .map(tools::get)
+            .filter(java.util.Objects::nonNull)
+            .toList();
+    }
+
+    // ── Inner: OwnedToolMount ─────────────────────────────────────────
+
+    private static class OwnedToolMount implements ToolMount {
+        private final String ownerId;
+        private final List<String> toolNames;
+        private final List<Tool> ownedInstances;
+        private final ToolRegistry registry;
+        private volatile boolean closed;
+
+        OwnedToolMount(String ownerId, List<String> toolNames, List<Tool> ownedInstances,
+                       ToolRegistry registry) {
+            this.ownerId = ownerId;
+            this.toolNames = toolNames;
+            this.ownedInstances = ownedInstances;
+            this.registry = registry;
+        }
+
+        @Override
+        public String ownerId() { return ownerId; }
+
+        @Override
+        public List<String> toolNames() { return toolNames; }
+
+        @Override
+        public void close() {
+            if (closed) return;
+            synchronized (this) {
+                if (closed) return;
+                closed = true;
+            }
+            // Conditional remove: only delete if the current tool IS our owned instance.
+            // This prevents deleting a later-registered tool with the same name.
+            for (int i = 0; i < ownedInstances.size(); i++) {
+                String name = toolNames.get(i);
+                Tool owned = ownedInstances.get(i);
+                registry.tools.remove(name, owned);
+            }
+            registry.mounts.remove(ownerId);
+            log.info("[Registry] unmounted {} tools for owner '{}'", toolNames.size(), ownerId);
+        }
+    }
+
+    /** Thrown when a tool mount would collide with existing tools. */
+    public static class ToolNamespaceCollisionException extends RuntimeException {
+        private final String ownerId;
+        public ToolNamespaceCollisionException(String ownerId, String message) {
+            super(message);
+            this.ownerId = ownerId;
+        }
+        public String ownerId() { return ownerId; }
     }
 }

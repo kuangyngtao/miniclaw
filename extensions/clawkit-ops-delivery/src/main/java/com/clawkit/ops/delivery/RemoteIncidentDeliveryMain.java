@@ -126,7 +126,10 @@ public final class RemoteIncidentDeliveryMain {
             require("CLAWKIT_REMOTE_OPS_EXPECTED_PROFILE"),
             System.getenv().getOrDefault("CLAWKIT_REMOTE_OPS_EXPECTED_PROBE_VERSION", "1"),
             System.getenv("CLAWKIT_REMOTE_OPS_EXPECTED_TOOLSET_HASH"),
-            System.getenv("CLAWKIT_API_KEY"), Duration.ofSeconds(120));
+            System.getenv("CLAWKIT_API_KEY"),
+            System.getenv().getOrDefault("CLAWKIT_DIAGNOSIS_MODEL",
+                RemoteDiscoveryWorkflow.Config.DEFAULT_DIAGNOSIS_MODEL),
+            Duration.ofSeconds(120));
     }
 
     private static String nextArg(String[] args, int i) {

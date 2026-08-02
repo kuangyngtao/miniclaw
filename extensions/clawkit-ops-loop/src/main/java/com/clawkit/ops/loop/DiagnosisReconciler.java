@@ -7,7 +7,7 @@ import java.util.List;
 import java.util.Set;
 
 /** Applies only explicit taxonomy rules backed by current evidence; ambiguity stays with the model. */
-final class DiagnosisReconciler {
+public final class DiagnosisReconciler {
     private static final Set<EvidenceType> DIAGNOSTIC_TYPES = Set.of(
         EvidenceType.BUSINESS_METRIC, EvidenceType.CONTAINER_RESOURCE,
         EvidenceType.LOGS, EvidenceType.DB_ACTIVITY, EvidenceType.DB_LOCK_GRAPH,
@@ -15,7 +15,36 @@ final class DiagnosisReconciler {
 
     private DiagnosisReconciler() { }
 
-    static Diagnosis reconcile(
+    /** Direct evidence check for APP_DOWN: order-api service/container stopped, HTTP non-200. */
+    private static boolean detectAppDown(List<Evidence> evidence) {
+        boolean orderApiDown = false;
+        boolean httpFailing = false;
+
+        for (Evidence item : evidence) {
+            if (item.collectionStatus() != Evidence.CollectionStatus.OBSERVED
+                || item.freshness() != Evidence.Freshness.CURRENT) continue;
+            var data = item.fact().path("data");
+            switch (item.type()) {
+                case SERVICE_STATUS, CONTAINER_STATUS -> {
+                    if (!item.scope().contains("order-api")) break;
+                    String state = data.path("State").asText("");
+                    if (!state.isBlank() && (state.contains("exited") || state.contains("stopped")
+                        || state.contains("down") || state.contains("unhealthy"))) {
+                        orderApiDown = true;
+                    }
+                }
+                case HTTP_PROBE -> {
+                    int sc = data.path("statusCode").asInt(-1);
+                    if (sc <= 0) sc = data.path("status").asInt(-1);
+                    if (sc > 0 && sc != 200) httpFailing = true;
+                }
+                default -> {}
+            }
+        }
+        return orderApiDown && httpFailing;
+    }
+
+    public static Diagnosis reconcile(
         Diagnosis model, DiagnosticSignals signals, List<Evidence> evidence, Instant evaluatedAt
     ) {
         LinkedHashSet<String> supporting = new LinkedHashSet<>(model.supportingEvidence());
@@ -28,6 +57,14 @@ final class DiagnosisReconciler {
             .map(Evidence::evidenceId).forEach(supporting::add);
 
         if ("INCONCLUSIVE".equals(signals.candidateRootCause())) {
+            // Fallback: detect APP_DOWN directly from evidence
+            boolean detectedAppDown = detectAppDown(evidence);
+            if (detectedAppDown) {
+                return copy(model, "APP_DOWN", 0.95, List.copyOf(supporting),
+                    List.of(model.rootCauseCode()), Diagnosis.DiagnosisStatus.CONFIRMED,
+                    Diagnosis.CurrentCondition.ACTIVE, Diagnosis.ResolutionAttribution.NONE,
+                    evaluatedAt);
+            }
             return copy(model, model.rootCauseCode(), model.confidence(), List.copyOf(supporting),
                 model.alternatives(), model.diagnosisStatus(), model.currentCondition(),
                 model.resolutionAttribution(), evaluatedAt);

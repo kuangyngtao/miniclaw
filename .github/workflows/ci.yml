@@ -37,7 +37,7 @@ jobs:
             git show --check --oneline "${{ github.sha }}"
           }
       - name: Clean verify
-        run: mvn -B -ntp clean verify
+        run: mvn -B -ntp clean verify -Dgroups='!e2e'
       - name: Runtime baseline compare
         run: mvn -B -ntp -pl clawkit-evaluation -am -Pbenchmark verify "-Dbenchmark.mode=compare"
       - name: Ensure build did not modify tracked files

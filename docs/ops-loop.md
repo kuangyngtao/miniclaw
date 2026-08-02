@@ -1,34 +1,51 @@
-# Clawkit Ops Loop 架构与演进路线
+# Clawkit 运维闭环：架构与演进路线
 
-> 修订日期：2026-07-25
+> 修订日期：2026-07-28
 >
-> 状态：OPS-0A/0B 工程实现完成；OPS-1 已有 SSH 原型后端，但 `opsro` 的 Docker 组权限是 P0 阻断，forced-command 安全接口、SSH/MCP session 生命周期与远程 Discovery Loop 待完成
+> 当前状态：OPS MVP-3 已完成 20/20 `VERIFIED_SUCCESS` 和机器证据 `passed=true` 封板。Ops Loop 不再只是 Runtime 压力测试，而是 Clawkit 产品完成“调查、建议、审批处置和独立验证”的核心引擎；近期先接入普通 CLI 用户旅程，再推进持续触发或扩大自治。
 >
 > 当前工程事实与实施顺序：[TODO.md](../TODO.md)
 >
+> 产品定位与体验路线：[product-direction.md](product-direction.md)
+>
 > OPS MVP-1 定版实现方案：[ops-mvp1-secure-remote-discovery-design.md](ops-mvp1-secure-remote-discovery-design.md)
 
-## 1. 目标与非目标
+## 1. 要解决什么问题
 
-Ops Loop 用真实但可丢弃的运维环境验证 Agent Runtime 是否能够：
+这条路线用真实但可随时重建的测试环境，验证智能体能否：
 
 1. 自动发现异常。
 2. 形成带时间和来源的证据。
-3. 在证据不足时返回 `INCONCLUSIVE`。
-4. 命中受限 Playbook 后选择最小动作。
+3. 在证据不足时明确说“无法下结论”。
+4. 命中经过审核的处置方案后，只选择影响最小的动作。
 5. 由独立上下文重新验证业务、性能和数据状态。
 6. 失败时执行预定义回滚或补偿，并可靠升级人工。
-7. 由隐藏 Ground Truth Evaluator 确定性评分。
+7. 由与诊断过程隔离的标准答案做机械化评分。
 
-当前定位不是建设通用 AIOps 平台，而是用一个 Evidence-gated Agentic SRE 应用验证 Runtime。OPS-0B 仍属于受限诊断工作流；只有补齐自动发现、持久状态、调度以及至少一个审批修复与独立验证闭环后，才可称为持续 Ops Loop。
+当前不是要建设通用运维平台，而是把“先取证、后判断、再受控处置”的可靠链路变成个人用户能顺手使用的产品。OPS 已经验证了第一个审批修复闭环；目标、连接、attestation 和只读工具装配也已经增量提炼给个人 CLI。下一步不是继续增加故障 Case 或写动作，而是让用户能从一句问题自然进入 Quick Check 或 Investigation。
 
-### 1.1 Benchmark 口径
+### 1.2 在产品中的角色
 
-- **Pipeline Benchmark**：允许确定性采证、信号提取和结果校准，验证工程链路是否可靠；现有 OPS-0B 6×20 属于此类。
-- **Diagnosis Benchmark**：测模型能否处理完整、缺失、冲突、过期和未知证据；确定性代码不得改写模型结论后计为通过。
-- **Closed-loop Benchmark**：测 Discovery、审批、动作、独立 Verification、补偿和人工升级；在 OPS-2A 落地后启用。
+用户不应先学习 Incident、Evidence 和状态机。Ops Loop 在产品中的职责是：
 
-三类报告不得互相替代。Pipeline 高通过率不能表述为未知故障诊断准确率，也不能表述为自动修复成功率。
+```text
+用户说“order-api 为什么一直 500”
+  -> 系统选择已登记目标并确认只读能力
+  -> Ops Loop 收集当前证据
+  -> 给出影响、结论、反证和缺失证据
+  -> 如果存在审核过的动作，解释后请求批准
+  -> fresh precheck、受限执行、独立验证
+```
+
+Quick Check 可以只产生本轮 Run 和 evidence ref；明确调查、发现严重异常或需要持续跟踪时再创建 Incident。Incident 是可追踪事实，不是用户必须手工管理的前置表单。
+
+### 1.1 三种验收不能混为一谈
+
+- **链路验收**：验证采证、协议、权限、报告和清理是否可靠。现有数据库故障 6×20 属于此类。
+- **诊断验收**：验证模型能否处理完整、缺失、冲突、过期和未知证据；程序只能否决错误答案，不能替模型改答案。
+- **修复闭环验收**：验证发现问题、审批、执行、独立复验、补偿和人工接管的完整过程；在审批修复阶段启用。
+
+三类结果不得互相替代。工程链路通过率高，不等于未知故障诊断准确，也不等于自动修复可靠。
 
 非目标：
 
@@ -38,7 +55,9 @@ Ops Loop 用真实但可丢弃的运维环境验证 Agent Runtime 是否能够�
 - 不自建通用监控、混沌或 Runbook 平台。
 - 不让诊断 Agent 自行宣布修复成功。
 
-## 2. 架构与职责
+## 2. 三层结构
+
+阅读下面的技术图时，只需要抓住三件事：底层负责可靠执行，中间层负责限制权限，上层测试环境负责制造和验证故障。英文名称仅用于对应代码目录。
 
 ```text
 Clawkit Agent Runtime
@@ -52,7 +71,7 @@ Safe Ops Capability Layer
   clawkit-ops-loop
   clawkit-ops-mcp
   opsro / Policy Gate / opsfix
-  Typed Ops Runner / Verification
+  受限动作执行 / 独立复验
               |
               v
 Ops Arena
@@ -74,17 +93,40 @@ ops-fixtures/
   reports/
 ```
 
-| 组件 | 唯一职责 | 明确不负责 |
+| 中文职责 | 代码位置 | 明确不负责 |
 | --- | --- | --- |
-| Fixture Runner | 建立初始状态、注入和销毁故障，持有 Ground Truth | 不向 Clawkit 暴露根因 |
-| k6 / Probe | 生成业务流量，输出确定性业务、性能和一致性断言 | 不做根因诊断 |
-| `clawkit-ops-mcp` | 暴露结构化只读能力和类型化写动作 | 不暴露通用 shell/SSH |
-| `clawkit-ops-loop` | Incident、采证策略、诊断、Policy Gate 和报告 | 不直接执行底层命令 |
-| Typed Ops Runner | 校验枚举参数并执行固定动作 | 不接受模型生成命令 |
-| Verification Run | 使用新上下文重新采集证据 | 不信任修复 Run 的结论 |
-| Ops Evaluator | 持有隐藏答案并确定性评分 | 不参与诊断和修复 |
+| 故障实验管理 | `ops-fixtures` | 不向诊断程序暴露标准答案 |
+| 流量与探针 | k6 和检查脚本 | 不判断根因 |
+| 远端只读接口 | `clawkit-ops-mcp` | 不暴露通用终端或任意远程命令 |
+| 采证、诊断和报告 | `clawkit-ops-loop` | 不直接执行底层命令 |
+| 受限动作执行 | 后续修复模块 | 不接受模型临时生成的命令 |
+| 独立复验 | 后续复验模块 | 不相信修复执行者的自证 |
+| 机械化评分 | `clawkit-evaluation` | 不参与诊断和修复 |
 
 如果引入 Chaos Toolkit，其职责仅为 Fixture 实验生命周期；Clawkit Incident 不成为第二个故障注入编排器。ChaosBlade 只作为标准故障执行器。
+
+### 2.1 与个人远程 CLI 的关系
+
+OPS Loop 是 Clawkit 远程能力的第一个纵向应用，但不拥有连接基础设施。当前本地 CLI 已经可以连接已登记云服务器，核对 capability 并把预定义远端工具注册到现有 `ToolCallExecutor`。OPS 继续负责 Incident、Evidence、Diagnosis、Repair 和 Verification，并作为普通用户“深度调查”的产品后端。
+
+```text
+个人本地 CLI
+  -> RemoteTarget（已登记目标）
+  -> SSH/MCP 受控连接与 attestation
+  -> 预定义只读 Capability Profile
+  -> ToolRegistry / ToolCallExecutor
+       -> 通用远程查看：连接状态、服务状态、有界日志、HTTP
+       -> OPS Loop：Incident、诊断、审批修复、独立复验
+```
+
+当前边界：
+
+- 只连接用户明确登记的单台云服务器；不自动扫描云账号或主机资产。
+- 只使用预定义 MCP 工具；不向模型暴露任意 SSH、sudo、Docker 命令、自由 SQL 或任意文件读取。
+- 通用 `RemoteMcpSession`、`RemoteConnectionService` 和 profile attestation 提供连接能力，`RemoteOpsSession` 保持薄适配；不为产品化重写现有 OPS 领域状态机。
+- CLI 提供确定性的目标/连接/能力管理，自然语言负责选择已登记目标、快速查看和启动调查；新增目标、host key 和写 profile 仍需明确确认。
+- 普通用户不应手写 endpoint 和合同 hash；近期通过 OpenSSH config/Agent、profile manifest、doctor 和渐进式 status 降低接入成本。
+- 产品仍是个人 CLI，仅让 Target/Connection/Capability 契约保持可扩展；多租户、团队权限中心和 Web 控制台继续延后。
 
 ## 3. Incident 与数据契约
 
@@ -204,7 +246,7 @@ maxAttempts
 | L2 | 切换/回滚已知 Release、受限 DB 维护 | 长期审批，逐动作评估 |
 | L3 | 任意命令、系统升级、防火墙、业务数据删除、未知 SQL | 永久禁止或人工接管 |
 
-`opsro` 是默认身份，无 sudo、无写权限。`opsfix` 不拥有通用 shell，只调用 root 持有的 Typed Ops Runner。
+`opsro` 是默认身份，无 sudo、无写权限。`opsfix` 不拥有通用终端，只调用 root 持有的受限动作执行器。
 
 ### 4.2 Policy Gate
 
@@ -258,17 +300,18 @@ OPS-0 首个切片只引入：
 
 ## 6. 总体路线
 
-路线按可验证门禁推进：
+工程闭环已经推进到审批修复。产品阶段按以下顺序继续：
 
 ```text
-D0 P0-D 外部证据收口
-  -> OPS-0A App Down 本地只读纵向切片
-  -> OPS-0B PostgreSQL 锁等待黄金诊断
-  -> OPS-1 远程只读靶机
-  -> P1-G 写操作前可靠性门禁
-  -> OPS-2A 审批修复
-  -> OPS-2B 有限自动修复
-  -> OPS-3 持续运行与经验复利
+已完成：
+OPS-0A -> OPS-0B -> OPS-1 -> P1-G -> OPS-2A / MVP-3 -> REMOTE-0
+
+当前：
+PRODUCT-1 服务器接入体验
+  -> PRODUCT-2 Quick Check 与 Investigation 统一入口
+  -> PRODUCT-3 审批体验与个人真实使用
+  -> OPS-3A Observe-only
+  -> OPS-2B Shadow / Fixture Limited Auto
 ```
 
 共同原则：
@@ -278,6 +321,7 @@ D0 P0-D 外部证据收口
 3. 先确定性断言、后模型解释。
 4. 先本地可重复、后远程真实环境。
 5. 先证明不会误修，再优化命中率和 MTTR。
+6. 先让用户能顺手完成手动调查，再增加持续触发和自治。
 
 ## 7. D0：P0-D 外部证据收口
 
@@ -420,7 +464,7 @@ terminate_fixture_session(case_id)
 实施顺序：
 
 1. 定义 Action Contract、Precheck、Verification 和回滚/补偿。
-2. 实现独立 Typed Ops Runner。
+2. 实现独立的受限动作执行器。
 3. `opsfix` 与 `opsro` 使用不同身份。
 4. 全部写动作先走 ASK。
 5. 执行前重新 Precheck，状态变化则取消计划。
@@ -436,19 +480,34 @@ terminate_fixture_session(case_id)
 
 ## 13. OPS-2B：有限自动修复
 
-自动化按单个 Action/Playbook 提升，不整体切换 AUTO：
+长期方向改为“持续评估 + 分级自治”，自动化按单个 Action/Playbook 提升，不整体切换 AUTO。触发方式、能力范围和自治等级是三个独立维度：Cron 自动发现可以仍然只读，人工触发也可以调用已晋级的有限动作。
+
+进入条件增加产品门禁：PRODUCT-2/3 已经证明用户能理解调查、审批和异常终态，并积累至少一周个人真实使用记录。没有稳定手动体验时，不用 Shadow/AUTO 掩盖交互问题。
+
+自治等级：
+
+```text
+A0 Observe
+  -> A1 Recommend
+  -> A2 Ask
+  -> A3 Shadow
+  -> A4 Limited Auto
+```
+
+当前 OPS MVP-3 属于 A2；E2E `--auto-approve` 只是 Fixture 测试入口，不是生产 A4。后续先记录 A3 Shadow 判断与人工审批是否一致，再评审 Fixture A4。
 
 - 统计按 Case、Action、Playbook、模型和版本分组。
 - 越权和假修复始终为 0。
 - Verification 报告生成率为 100%。
 - 连续失败、状态漂移、预算耗尽或补偿失败立即降级为 ASK。
 - 自动化策略不改变底层工具权限。
+- 自治升级还必须绑定 target class、environment、Capability Profile 和 policyHash；模型不能为自己升级。
 
 首个候选仅为 App Down 的 allowlisted 服务重启；数据库会话终止和 Release 切换不随其自动升级。
 
 ## 14. OPS-3：持续运行
 
-进入条件：OPS-2A 稳定，至少一个 L1 动作满足盲测门禁。
+持续运行先做 Observe-only，不以自动修复为进入条件。PRODUCT-2 的手动 Investigation 体验稳定后，OPS-3A 才自动触发发现、诊断和报告；所有写动作仍保持 A2 Ask。只有 Shadow 和 Fixture AUTO 独立通过后，才讨论持续触发下的有限自动写。
 
 能力：
 
@@ -461,6 +520,8 @@ terminate_fixture_session(case_id)
 
 持续运行首先限于 Fixture，不迁移到真实生产。
 
+持续评估至少按以下维度保存原始计数：证据完整性、模型/确定性信号冲突、人工同意/拒绝、Precheck 漂移、Verification、假修复、越权、重复副作用、`OUTCOME_UNKNOWN`、人工接管、耗时和成本。晋级慢、降级快；严重安全事件可以直接退回 A2。
+
 ## 15. 里程碑产物
 
 | 里程碑 | 必须展示的产物 |
@@ -470,6 +531,7 @@ terminate_fixture_session(case_id)
 | OPS-0B | PostgreSQL 锁等待 Flight Recorder、对抗变体和盲测数据 |
 | OPS-1 | 远程只读 Incident、SSH 安全审计和重建脚本 |
 | OPS-2A | 审批动作、独立 Verification、失败补偿报告 |
+| REMOTE-0 | 个人 CLI 的已登记 Target、连接状态、attestation 和预定义只读工具 |
 | OPS-2B | 单动作自动化策略、降级证据和零越权记录 |
 | OPS-3 | 连续运行报告、去重/冷却/预算和版本化 Playbook |
 

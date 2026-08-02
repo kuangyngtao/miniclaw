@@ -12,6 +12,8 @@ import com.clawkit.observability.RunReader;
 import com.clawkit.tools.Tool;
 import com.clawkit.tools.ToolRegistry;
 import com.clawkit.tools.mcp.McpManager;
+import com.clawkit.cli.remote.RemoteCommandHandler;
+import com.clawkit.cli.ops.OpsCommandHandler;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
 import java.util.List;
@@ -30,10 +32,13 @@ final class CliCommandHandlers {
     private final DiskMemoryService memory;
     private final RunReader runs;
     private final LineReader reader;
+    private final RemoteCommandHandler remoteCmd;
+    private final OpsCommandHandler opsCmd;
 
     CliCommandHandlers(AgentEngine engine, SessionService sessions, SkillLoader skills,
                        McpManager mcp, ToolRegistry registry, DiskMemoryService memory,
-                       RunReader runs, LineReader reader) {
+                       RunReader runs, LineReader reader, RemoteCommandHandler remoteCmd,
+                       OpsCommandHandler opsCmd) {
         this.engine = engine;
         this.sessions = sessions;
         this.skills = skills;
@@ -42,6 +47,8 @@ final class CliCommandHandlers {
         this.memory = memory;
         this.runs = runs;
         this.reader = reader;
+        this.remoteCmd = remoteCmd;
+        this.opsCmd = opsCmd;
     }
 
     boolean handle(SlashCommandRouter.Command command) {
@@ -54,6 +61,8 @@ final class CliCommandHandlers {
             case "runs" -> { runs(); yield true; }
             case "metrics" -> { metrics(command.arguments()); yield true; }
             case "trace" -> { trace(command.arguments()); yield true; }
+            case "remote" -> { remoteCmd.handle(command.arguments()); yield true; }
+            case "ops" -> { opsCmd.handle(command.arguments()); yield true; }
             default -> false;
         };
     }
