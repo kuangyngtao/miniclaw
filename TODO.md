@@ -15,13 +15,18 @@
 
 ## 当前代码事实
 
-截至 2026-08-02：
+截至 2026-08-04：
 
-- 全量回归覆盖 14 个 Reactor 模块并通过；真实网络 E2E 与普通 CI 已分组隔离。具体历史数字只保留在下方验证记录，不用累计测试数量代替产品完成度。
-- 新增 `clawkit-reliability` 模块（可靠性内核）+ `clawkit-ops-delivery` 模块（OPS 报告/通知 composition）。
-- OPS MVP-2 新增类型：`RemoteIncidentResult`、`RemoteDiscoveryWorkflow`、`BusinessFixtureCase`、`BusinessInvariant`、`FixtureSeed`、`HumanIncidentReport`、`IncidentReportAssembler`、三种 Renderer、`NotificationOutbox`、`OpsFeishuNotifier`、`FeishuApiException`。
-- 远端 Fixture 部署脚本：`ops-fixtures/remote/postgres/{install,seed,verify,reset,destroy,run-case}.sh` + `lib/safety-guard.sh`。
-- P1-G 七项门禁全部进入真实路径：取消/deadline/预算贯穿 ReAct、Plan、SubAgent、Provider、Tool、ProcessRunner；副作用工具必须生成 ActionDescriptor（无描述符 fail closed）；durable DISPATCH_INTENT 先于执行；结果未知 sticky 禁止自动重复写；MANUAL_REQUIRED 永不自动 VERIFIED_SUCCESS；进程启动恢复扫描 + reconcile；独立 Verification Run 隔离。定版设计与实现对照见 [docs/p1-g-design.md](docs/p1-g-design.md)。
+- 全量回归覆盖所有模块并通过（`mvn test -pl extensions/clawkit-ops-delivery -am` 全绿）。
+- PRODUCT-3 审批体验闭环 Phase 0–4 已交付：
+  - 新增 `FixSession` 接口（ops-loop），解耦 `OpsFixSession` 使夹具可注入。
+  - 新增 `AppDownApproveFixtureTest`（15 夹具测试）覆盖 8 条审批决策路径（批准成功/拒绝/取消/自恢复/漂移/执行失败/结果未知/验证失败）。
+  - 新增 `AppDownRejectFixtureTest`（6 夹具测试）。
+  - 新增 `RejectedTerminalRenderTest`（15 渲染冒烟测试，覆盖拒绝/取消/成功/自恢复/失败/人工处理 6 种终端格式）。
+  - 新增 `DogfoodLogger`（脱敏使用日志 → `~/.clawkit/dogfood/usage.jsonl`）。
+  - 新增 `docs/phase-0-baseline.md`（基线设计）、`docs/dogfood-guide.md`（7 天执行指南）。
+  - `/ops recent/inspect` 中文状态标签、`/ops continue` 9 种终态明确提示、审批框 target 始终可见。
+- 安全门禁不变：8 项门禁全部通过夹具断言（fixFactory 调用路径、ApprovalGrant TTL、TOCTOU、fresh precheck、durable DISPATCH_INTENT、结果未知 sticky、独立验证新会话、仅 restart_service）。
 - 四条主链继续收敛：
   - ToolCallExecutor：工具调用唯一入口，且是唯一 Side Effect Gate ✅
   - ContextPipeline：模型上下文与 compact 唯一入口，主 Agent/SubAgent 均接入 ✅
@@ -33,7 +38,7 @@
 - 远端验证（122.51.51.118）：Fixture 部署成功、HOT_ACCOUNT_CONTENTION_V1 真实锁竞争确认（db_lock_graph 11 行阻塞链、5 活跃 Lock wait）、E2E 20/20 轮全部通过、业务不变量 100 账户全部通过。
 - OPS MVP-3 已完成审批修复、fresh precheck、受限执行、独立验证和严格证据包；最终 20/20 `VERIFIED_SUCCESS`，机器汇总 `passed=true`。
 - REMOTE-0 交付（2026-07-29）：`clawkit-tools` 新增通用 remote 类型；`clawkit-cli` 完成 Target Store、ConnectionService、自然语言连接、generation-bound 动态工具挂载和完整 ToolExecution 链；服务端/客户端双层脱敏、合同 pin、证据引用、退出清理和 CI E2E 隔离已完成。当前远端 `POSTGRES_DIAGNOSIS_V1` E2E 为 10/10；`APP_DOWN_V1` 五工具真机切换验证作为非阻塞兼容性补测保留。
-- PRODUCT-1 已完成 OpenSSH alias 导入、Target onboarding、doctor、状态展示、合同校验和安装引导；本地产品 E2E 与跨模块合同测试通过，真实远端 v2 产品 E2E 作为非阻塞 dogfood 证据保留。
+- PRODUCT-1 已完成 OpenSSH alias 导入、Target onboarding、doctor、状态展示、合同校验和安装引导；本地产品 E2E、跨模块合同测试与真实远端 v2 产品 E2E 均已通过。
 - OPS-PRODUCT-LOOP-1 已把普通 CLI 接到调查、人工审批、受限修复和独立验证主链；本地产品 E2E 13/13 与全量回归通过，里程碑冻结为 `CONDITIONAL_PASS / FROZEN`，等待首次真实远端产品链 dogfood。
 
 ## 当前执行顺序
@@ -42,13 +47,13 @@
 
 1. **[x] PRODUCT-0：产品方向冻结**：明确目标用户是管理少量 Linux 服务的个人开发者；Remote 是可信入口，Ops Loop 是查看、调查、处置和验证的核心问题解决流程。
 2. **[x] PRODUCT-1：服务器接入体验**：已交付 OpenSSH config/Agent/known_hosts 复用、导入向导、doctor、简洁 status 和高级 inspect；普通路径不手写 YAML、key path 或工具 hash。真实远端 v2 产品 E2E 作为非阻塞 dogfood 证据保留。
-3. **[~] PRODUCT-2：快速查看与 Ops 调查统一入口**：一句自然语言可以完成 Quick Check；明确调查请求或发现异常时进入现有 `RemoteDiscoveryWorkflow` 和 Incident，不重写 Ops 状态机。
-   OPS-PRODUCT-LOOP-1 已交付调查入口、中文报告、Incident 持久化和 recent/inspect/continue 命令。Quick Check 用户任务尚未实现。
+3. **[x] PRODUCT-2：快速查看与 Ops 调查统一入口**：一句自然语言可以完成 Quick Check；明确调查请求或发现异常时进入现有 `RemoteDiscoveryWorkflow` 和 Incident，不重写 Ops 状态机。
+   Quick Check 已通过真实模型与真实终端验收；OPS-PRODUCT-LOOP-1 已交付调查入口、中文报告、Incident 持久化和 recent/inspect/continue 命令。
 4. **[~] PRODUCT-3：审批体验与个人真实使用**：按”发现、建议、原因、影响、执行前保护、执行后验证”展示 MVP-3；连续使用至少 7 天，先修复真实摩擦。
-   OPS-PRODUCT-LOOP-1 已交付 JLine 审批、JLineInvestigationInteraction、ApprovalDecision、RepairPolicyGate 集成。真实远端 dogfood 未开始。
+   Phase 0–4 已完成（2026-08-04）：8 条审批路径夹具覆盖 + 6 种中文终端渲染 + 统一 /ops 入口 + 脱敏使用日志基础设施。Phase 5（7 天 dogfood）等待真实使用数据。真实远端 test-server 保持只读，未开放写权限。
 5. **[~] D0 / P0-D 外部证据收口**：只保留 Windows `-it` 人工 smoke 和首个 Release，不阻塞 PRODUCT-1/2 的本地开发。
 6. **[ ] P2 最小产品度量**：只记录首次连接、首次有效结果、调查耗时、Provider 成本和人工决策等真实使用字段；多模型路由、Prompt caching 等不进入当前主线。
-7. **[ ] OPS-3A Observe-only**：在手动调查体验稳定后，推进持续发现、去重、冷却和预算；修复仍保持 ASK。
+7. **[~] OPS-3A Observe-only**：在手动调查体验稳定后，推进持续发现、去重、冷却和预算；修复仍保持 ASK。2026-08-04 起按用户明确授权与 PRODUCT-3 dogfood 并行，但仅限可丢弃 Fixture 的持续只读发现，不接入真实服务器 Cron，不新增写权限。
 8. **[ ] OPS-2B Shadow 与有限自治**：只有 PRODUCT-3 的真实使用和 OPS-3A 数据足够后，才为单一固定动作积累 Shadow 数据并评审 Fixture AUTO。
 
 已完成里程碑：OPS-0A、OPS-0B、OPS MVP-1、OPS MVP-2、OPS MVP-3 和 REMOTE-0。它们继续作为产品安全底座和回归基线，不在当前顺序中重复展开。
@@ -100,7 +105,7 @@
 - **[x] `/remote doctor` 与渐进式状态展示**（cli）
   doctor 检查 OpenSSH 配置、Agent、host key、连接、远端组件和 capability；status 默认只展示目标、连接状态、只读/可写范围和可用能力，inspect 才展示完整 attestation。
   验收：已知错误 100% 展示原因、影响和下一步；所有远程结果显示当前 target；应用退出无 SSH 或工具挂载残留。
-  ✅ 2026-08-02 — doctor 分阶段检查、结构化错误、JSON/verbose 输出和退出清理已通过测试。
+  ✅ 2026-08-02 — doctor 分阶段检查、结构化错误、JSON/verbose 输出和退出清理已通过测试；修复 Windows SSH 子进程缺少 `PROGRAMDATA` 导致退出码 255 的问题后，真实远端产品链 8/8 通过。
 
 - **[x] 远端组件安装与撤销引导**（docs / ops-mcp）
   给出可审查、可验证、可撤销的服务器侧安装路径。Clawkit 不静默执行 sudo；安装缺失时 doctor 给出明确步骤。
@@ -109,9 +114,14 @@
 
 ### PRODUCT-2：快速查看与 Ops 调查
 
-- **[ ] Quick Check 用户任务**（cli / engine / remote）
-  将“看看 order-api 是否正常”“总结最近十分钟错误”组织为用户任务，模型按需调用预定义工具并输出目标、状态、影响、证据时间和下一步。Quick Check 不强制创建 Incident。
+- **[x] Quick Check 用户任务**（cli / engine / remote）
+  将”看看 order-api 是否正常””总结最近十分钟错误”组织为用户任务，模型按需调用预定义工具并输出目标、状态、影响、证据时间和下一步。Quick Check 不强制创建 Incident。
   验收：一句自然语言产生带真实 run/tool evidence ref 的摘要；用户不需要知道工具名；无已连接目标时只请求选择或连接，不构造任意 IP。
+  ✅ 2026-08-02 — 已完成首次使用体验和自然语言分流：启动显示服务器和连接状态；系统先判断用户是在处理本地代码、远程服务器、普通聊天，还是说得不够清楚。
+  安全收口：分类失败只追问，不会放开全部工具；本地任务看不到远程工具，远程快速检查只允许已标记为只读的远程工具；即使模型强行点名被禁止的工具，执行前也会拦住。受限范围下不允许进入计划执行模式，避免权限被绕过。
+  验证：完整测试 241 个通过、0 个失败；打包和改动检查通过。
+  ✅ 2026-08-02 — 真实模型与真实终端验收通过：`test-server` 连接成功，Quick Check 仅调用远程只读工具；最终回答包含目标、状态、影响、结论、证据时间、下一步和真实 `run://.../tool/...` 引用，并对 HTTP/端口白名单导致的缺失证据明确降级说明。验收 run：`20260802-211936-9bdd`。
+  非阻塞体验项：`/verbose` 重启后不会记住开关，纳入连续 dogfood 观察，不阻塞 Quick Check 完成。
 
 - **[x] Investigation 产品入口**（cli / ops-loop / ops-delivery）
   明确的“调查/诊断”请求，或 Quick Check 发现满足规则的异常后，进入现有 `RemoteDiscoveryWorkflow`。Incident、Evidence、Diagnosis、Repair 和 Verification 仍留在 OPS，不复制到 CLI。
@@ -125,12 +135,81 @@
 
 ### PRODUCT-3：审批体验与真实使用
 
-- **[ ] 用户向审批摘要**（cli / ops）
-  复用 MVP-3 的 ApprovalGrant、fresh precheck、Attempt 和 Verification，只重排展示：发现、建议、原因、影响、执行前保护、执行后验证。内部 ID、hash 和状态机放入 details。
-  验收：拒绝、自恢复、快照漂移、结果未知、验证失败和成功均有明确中文终态；用户可以在 30 秒内做出决定。
+**[~] Phase 0 基线完成**（2026-08-03）：
+文档与代码一致性核对通过（TODO.md、product-direction.md、代码三者一致，无需修正）。
+全部关键入口已定位：approve 路径（OpsInvestigationFacade L162-172）、fresh precheck（L185-229 + RO L59-92）、FixSession.executeRestart（RO L143）、Attempt 生命周期（ActionAttemptCoordinator + FileActionAttemptStore）、IndependentVerifier（IV L97-151）、JLine 渲染（JLineInvestigationInteraction L104-152）、/ops inspect（OpsCommandHandler L109-151）。
+夹具状态模型和 8 场景测试矩阵已写入 [docs/phase-0-baseline.md](docs/phase-0-baseline.md)。
+安全门禁不变：所有 8 项门禁（fixFactory 调用路径、ApprovalGrant TTL、TOCTOU、fresh precheck、durable DISPATCH_INTENT、结果未知 sticky、独立验证新会话、预定义动作）在夹具中保持完整。
+下一步：阶段 1（批准成功闭环 P1）。
+
+- **[x] 拒绝零副作用闭环**（cli / ops）
+  不改动安全机制，只强化用户可见的审批决策体验：
+  - `JLineInvestigationInteraction.onFinalResult()` 新增 `renderRejectedTerminal()`：REJECTED/CANCELLED 以醒目的双线框展示中文终态“操作已拒绝/已取消 — 服务器未发生任何变更”，下方列出零副作用保证（未建立修复会话、未执行任何命令或容器操作、未修改任何配置、服务器状态与调查前完全一致）。
+  - `OpsInvestigationFacade.rejectedView()` 的 summary 从“已拒绝”改为“服务器未发生任何变更 — 已拒绝”，verificationSummary 增加“未建立修复会话，未执行任何命令或容器操作，服务器状态与调查前完全一致”。
+  安全保证不变：拒绝/取消路径永远不会调用 `fixFactory.openFix()`；`ApprovalGrant` 5 分钟 TTL + TOCTOU 快照比对继续生效。
+  新增 `AppDownRejectFixtureTest`（6 个夹具测试）：`AppDownReadSession` 模拟 order-api 已停止（service_status→State=exited、container_status→State=exited、http_probe→statusCode=503），`WriteCounters` 跟踪 fixSessionCreated 和 approvalPrompts；验证 REJECT→fixSessionCreated=0、CANCEL→fixSessionCreated=0、/ops inspect→REJECTED/CANCELLED 持久化、无秘密泄露、/ops continue 被阻止。
+  验证：全量 13 模块 `mvn test` BUILD SUCCESS；clawkit-ops-delivery 27/27 测试通过（含新增 6 个夹具测试）；clawkit-cli 所有可运行测试通过。
+  ✅ 2026-08-03 — 拒绝/取消终态展示 + APP_DOWN 夹具验收已完成。批准路径的远端 dogfood 暂不进入（未给 test-server 开放写权限）。
+
+- **[x] 批准成功闭环**（cli / ops / fixture）
+  改动：
+  - 新增 `FixSession` 接口（clawkit-ops-loop），`OpsFixSession` 实现之；`RepairOrchestrator.executeApprovedRepair()` 参数改为 `FixSession`；`FixSessionFactory` 返回类型改为 `FixSession`。接口提取为纯重构，不改外部行为。
+  - `JLineInvestigationInteraction` 新增 `formatResolvedTerminal()`：双线框展示"✓ 问题已恢复"、诊断发现、建议操作、已执行、独立验证、确认事实、inspect 链接。
+  新增测试：
+  - `AppDownApproveFixtureTest`（5 个测试）：`FakeFixSession`（不执行真实 SSH，计数 `restartCalls`）、`FixtureSessions`（可切换 precheck/verification 状态）、`WriteCounters`（fixSessionCreated、restartCalls、approvalPrompts、freshPrecheckCount、verifySessionCount）。
+    验证：APPROVE → fixCreated=1, restartCalls=1, approvalPrompts=1, freshPrecheck≥2, verifySession≥1, status=RESOLVED, Incident 可 inspect、无秘密、不可 continue。
+  - `RejectedTerminalRenderTest` 新增 4 个 RESOLVED 冒烟测试：标题、全流程字段、inspect 链接、不含拒绝文本。
+  验证：ops-delivery 32 测试 0 失败（含新增 5 个）；渲染测试 12/12 通过。
+  ✅ 2026-08-03 — 批准成功 P1 闭环已完成。安全门禁保持不变（TOCTOU、durable DISPATCH_INTENT、独立验证使用新会话等均通过夹具验证）。
+
+- **[x] 快照漂移 + 自恢复闭环**（cli / ops / fixture）
+  改动：
+  - `AppDownReadSession` 重构为 `FixtureReadState` 枚举（APP_DOWN/RUNNING/SELF_RECOVERED/DRIFTED），支持四种远端状态模拟。
+  - `FixtureSessions` 支持按调用序号（call=1/2/3）返回不同状态：`forSelfRecovery()`（call1=APP_DOWN, call2=RUNNING）、`forSnapshotDrift()`（call1=APP_DOWN, call2=DRIFTED）。
+  - `verifyAndPersist()` 新增 `CANCELLED_NO_EFFECT` 显式映射为 `NO_ACTION_REQUIRED`（"服务已自行恢复"）。
+  - `JLineInvestigationInteraction` 新增 `formatNoActionTerminal()`（"服务已自行恢复 — 无需操作"）和 `formatFailedNoEffectTerminal()`（"操作未执行 — 服务器无变更"）。
+  新增测试：
+  - S1 自恢复：`selfRecoveryReturnsNoActionRequired`（NO_ACTION_REQUIRED, restartCalls=0）、`selfRecoveryShowsRecoveryEvidence`（verificationSummary 含"自行恢复"，actionExecuted 为空）。
+  - S2 快照漂移：`snapshotDriftReturnsFailedNoEffect`（restartCalls=0, approvalPrompts=1）、`snapshotDriftHasNoSecrets`。
+  - 渲染冒烟：`noActionTerminalShowsSelfRecovery`、`failedNoEffectTerminalShowsNoServerChange`。
+  验证：ops-delivery 36/36 测试 0 失败；渲染测试 14/14 通过；全量 BUILD SUCCESS。
+  ✅ 2026-08-03 — S1 自恢复 + S2 快照漂移闭环已完成。
+
+- **[x] 执行失败 / 结果未知 / 验证失败闭环**（cli / ops / fixture）
+  改动：
+  - `FixtureSessions` 新增 `forExecFailure()`（FAIL_NO_EFFECT）、`forOutcomeUnknown()`（THROW_IOEXCEPTION）、`forVerifyFailure()`（SUCCESS + call3=APP_DOWN）。
+  - `JLineInvestigationInteraction` 新增 `formatNeedsHumanTerminal()`（"⚠ 需要人工处理"）。
+  新增测试：
+  - E1 执行失败（2 个）：`execFailureReturnsFailedNoEffect`（FAILED_NO_EFFECT, restartCalls=1, 含"未产生远端副作用"）、`execFailureIncidentPersisted`。
+  - E2 结果未知（2 个）：`outcomeUnknownReturnsNeedsHuman`（NEEDS_HUMAN, restartCalls=1, 含"结果未知""可能已部分执行"）、`outcomeUnknownContinueIsSticky`（continue 不自动重试 restartCalls=0）。
+  - V1 验证失败（2 个）：`verifyFailureReturnsNeedsHuman`（NEEDS_HUMAN, restartCalls=1, verifySession≥1, 验证摘要非空且不声称成功）、`verifyFailureDoesNotClaimSuccess`（status≠RESOLVED, summary 不含"恢复"）。
+  - 渲染冒烟（1 个）：`needsHumanTerminalShowsWarning`。
+  验证：ops-delivery 全量 BUILD SUCCESS（15 个夹具测试 0 失败）；全模块 12/12 SUCCESS。
+  ✅ 2026-08-04 — E1/E2/V1 三种失败状态闭环已完成。安全门禁不变（结果未知 sticky、不自动重试、验证失败不声称成功均通过夹具断言）。
+
+- **[x] 审批摘要与统一入口**（cli / ops）
+  改动：
+  - `OpsCommandHandler.cmdRecent()`：状态改为中文标签，Incident ID 截短显示。
+  - `OpsCommandHandler.cmdInspect()`：状态改为中文标签。
+  - `OpsInvestigationFacade.continueIncident()`：新增 `NO_ACTION_REQUIRED`（"服务已自行恢复，无需操作"）和 `FAILED_NO_EFFECT`（"操作已确认未产生远端副作用，无法继续"）明确提示。
+  - `JLineInvestigationInteraction.requestApproval()`：审批框增加目标和服务行（target 始终可见）。
+  - `OpsInvestigationFacade.statusChinese()` 改为 `public`。
+  验证：全量 12/12 BUILD SUCCESS；审批展示 target 始终可见；/ops recent/inspect/continue 对全部终态行为一致；内部 hash/ID 不在用户默认视图中。
+  ✅ 2026-08-04 — 审批摘要统一入口已完成。
+
+- **[~] 30 秒可决策性 + 7 天 dogfood**（product — 等待真实数据）
+  基础设施已就绪：
+  - `DogfoodLogger` 在调查提交时开始记录、在审批决定时结算阅读时间、在终态时写入 `~/.clawkit/dogfood/usage.jsonl`。每行包含日期、环境、目标、任务类型、实际动作数、阅读时间、决策与终态；未反馈字段保持未知，不伪造为 `false`。
+  - `JLineInvestigationInteraction` 已集成：审批展示时记录起始时间，`approve/reject/cancel/EOF/interrupt` 时记录实际决定与阅读时间。
+  - `/ops feedback <incidentId> <yes|no> <yes|no> <HIGH|MEDIUM|LOW> [说明]` 以追加记录保存是否看懂、是否退回 SSH 与脱敏摩擦说明；不修改历史 JSON 行。
+  - 执行指南见 [docs/dogfood-guide.md](docs/dogfood-guide.md)。
+  等待连续 7 天真实使用数据。不可伪造。dogfood 与已授权的 Fixture-only OPS-3A Observe-only 可并行；完成后评审摩擦清单，再决定是否进入 OPS-2B。
+  ✅ 2026-08-04 — 日志决策、阅读时间、动作数与追加反馈入口已验证；全量 `mvn test` 通过。
 
 - **[ ] 连续 7 天个人 dogfood**（product / evaluation）
   每次真实使用记录任务、用户动作数、耗时、失败点、是否看懂结果和是否需要退回 SSH 手工排查。只修复重复出现的摩擦，不据此扩大生产写权限。
+  ✅ 2026-08-02 — 首次日常对话发现两个真实问题：模型已返回回答但命令行未显示，以及普通问候误加载飞书技能。已修复最终回答显示，并限制问候、身份和功能介绍直接回答；全量测试通过。
+  ✅ 2026-08-02 — “查看状况”“服务器连接情况”曾误入通用模型，导致翻查本地项目并反复执行不适用的 shell 命令。现已改为直接展示已登记服务器和当前连接状态；未连接时给出明确的连接或检查命令。
   验收：形成原始使用日志和优先级清单；首次连接、首次有效结果和审批理解指标达到产品方向文档目标后，再启动 OPS-3A/OPS-2B。
 
 ## Ops MVP 范围与取舍
